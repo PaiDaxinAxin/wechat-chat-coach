@@ -1,0 +1,9 @@
+{
+  "userProfile": "虚构测试用户：说话简短，偏自然、温和幽默，想练习关注对方和适度表达兴趣。",
+  "counterpartProfile": "虚构测试对象：通过交友软件认识，目前只知道她从事设计工作；回复习惯和见面意愿未知。",
+  "messages": [
+    { "id": "example-1", "speaker": "self", "text": "最近有什么让你开心的事？" },
+    { "id": "example-2", "speaker": "other", "text": "最近一直在忙工作。你呢？" }
+  ],
+  "intent": "自然地继续话题，了解她的状态；不用急着邀约。"
+}

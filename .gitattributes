@@ -1,0 +1,2 @@
+# Preserve the imported original knowledge, including its historical whitespace.
+knowledge/game-system.md whitespace=-blank-at-eol
