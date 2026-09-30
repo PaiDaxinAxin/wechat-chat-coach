@@ -4,6 +4,14 @@ Status: local beta build, browser workflow and real Agnes integration verified o
 
 ## Run the private server
 
+### Current owner demo
+
+The owner currently wants direct local access and has deferred email, login and public authorization work. After building, use `npm run demo` (or `node --env-file=/absolute/private/agnes.env src/beta.mjs --demo`) to enter a fictional, paid-demo account automatically. It binds only loopback, refuses a public origin/proxy request, and keeps a separate database under `data/local-demo` unless `CHAT_COACH_DATA_DIR` names a dedicated private demo directory. Do not reuse the invited-user database. Initial loading makes zero provider calls; analysis and generation remain explicit, budgeted actions.
+
+The owner's current data path is `/Users/paidaxin/.local/share/wechat-chat-coach/local-demo`; Agnes configuration remains outside the repository. The initialization receipt contains no password. Reload and restart retain user edits and deletions. Registration, login, management and HTTP MCP endpoints are unavailable in demo mode. Owner full-access stdio MCP remains a separate local process. No company sender or mail credential is used.
+
+### Standard invited mode
+
 Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, and `npm run beta:admin -- init --username owner`. Initialization creates the owner and writes generated credentials to `data/beta/owner-access.json` with private permissions; it does not print passwords. Read the file locally and sign in. Never commit or send this file to testers.
 
 Set the provider environment securely. The owner's existing configuration is outside the repository at `/Users/paidaxin/.config/wechat-chat-coach/agnes.env`. Start with `node --env-file=/absolute/private/agnes.env src/beta.mjs`. Defaults bind `127.0.0.1:8788`. Environment variables already inherited by Node take precedence over an env file; unset stale `AGNES_API_KEY`, `AGNES_BASE_URL` and `AGNES_MODEL` when deliberately loading this configuration. Override `CHAT_COACH_DATA_DIR` to select a private persistent directory. Do not start multiple server processes against the same database. A service lock is acquired before database initialization; dead-process recovery is serialized. Inspect any abandoned recovery guard before manual removal.

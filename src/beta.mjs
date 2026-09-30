@@ -7,6 +7,9 @@ export function betaSettingsFromEnv(env = process.env) {
   const port = Number(env.CHAT_COACH_BETA_PORT ?? 8788);
   const host = env.CHAT_COACH_BETA_HOST ?? '127.0.0.1';
   const publicOrigin = env.CHAT_COACH_PUBLIC_ORIGIN;
+  if (env.CHAT_COACH_LOCAL_DEMO !== undefined && !['0', '1'].includes(env.CHAT_COACH_LOCAL_DEMO)) throw new Error('DEMO_MODE_INVALID');
+  const localDemoMode = env.CHAT_COACH_LOCAL_DEMO === '1';
+  if (localDemoMode && (publicOrigin || !['127.0.0.1', 'localhost', '::1'].includes(host))) throw new Error('LOCAL_DEMO_ONLY');
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('PORT_INVALID');
   if (!['127.0.0.1', 'localhost', '::1'].includes(host) && !publicOrigin) throw new Error('PUBLIC_ORIGIN_REQUIRED');
   if (publicOrigin) {
@@ -21,8 +24,8 @@ export function betaSettingsFromEnv(env = process.env) {
   };
   for (const limit of Object.values(limits)) if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new Error('PROVIDER_LIMIT_INVALID');
   return {
-    host, port, publicOrigin,
-    dataDir: resolve(env.CHAT_COACH_DATA_DIR ?? 'data/beta'),
+    host, port, publicOrigin, localDemoMode,
+    dataDir: resolve(env.CHAT_COACH_DATA_DIR ?? (localDemoMode ? 'data/local-demo' : 'data/beta')),
     webDir: resolve('dist/public'),
     ...limits,
   };
@@ -33,11 +36,14 @@ export function betaListeningUrl({ host, port, publicOrigin }) {
 }
 
 async function main() {
-  if (process.argv.length > 2) throw new Error('STARTUP_ARGUMENTS_INVALID');
+  const args = process.argv.slice(2);
+  if (args.length > 1 || args.some((arg) => arg !== '--demo')) throw new Error('STARTUP_ARGUMENTS_INVALID');
   process.umask(0o077);
-  const { host, port, ...options } = betaSettingsFromEnv();
+  const launchEnv = args.includes('--demo') ? { ...process.env, CHAT_COACH_LOCAL_DEMO: '1' } : process.env;
+  const { host, port, ...options } = betaSettingsFromEnv(launchEnv);
   const server = await createBetaServer(options);
-  server.setMcpHandler(createBetaMcpHandler(server));
+  if (options.localDemoMode) await server.ensureDemoSeed();
+  else server.setMcpHandler(createBetaMcpHandler(server));
   await new Promise((done, failed) => { server.once('error', failed); server.listen(port, host, done); });
   console.log(`Chat coach beta is listening at ${betaListeningUrl({ host, port, ...options })}.`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {

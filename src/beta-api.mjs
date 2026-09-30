@@ -7,6 +7,7 @@ import { z } from 'zod';
 import packageMetadata from '../package.json' with { type: 'json' };
 import { createBetaStore, BetaError, seedOwner } from './beta-store.mjs';
 import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './knowledge.mjs';
+import { ensureLocalDemoSeed, assertLocalDemoRequest } from './demo.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import {
   QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree,
@@ -131,10 +132,12 @@ async function serviceLock(dataDir) {
 export async function createBetaServer({
   dataDir, knowledgePath, webDir = join(PROJECT_ROOT, 'dist/public'), publicOrigin,
   classifyFn = classifyChat, replyFn = generateReply, storeKnowledge,
+  localDemoMode = false,
   providerEnv = process.env,
   freeProviderDailyLimit = 10, paidProviderDailyLimit = 10, globalProviderDailyLimit = 100,
   now = Date.now,
 } = {}) {
+  if (typeof localDemoMode !== 'boolean') throw new BetaError('DEMO_CONFIGURATION_INVALID');
   let canonicalOrigin;
   if (publicOrigin !== undefined) {
     try {
@@ -145,6 +148,7 @@ export async function createBetaServer({
     }
     catch { throw new BetaError('PUBLIC_ORIGIN_INVALID'); }
   }
+  if (localDemoMode && canonicalOrigin && !['127.0.0.1', 'localhost', '[::1]'].includes(canonicalOrigin.hostname)) throw new BetaError('DEMO_LOOPBACK_REQUIRED', 400);
   const assets = new Map();
   if (webDir !== null) {
     const directory = resolve(webDir);
@@ -380,11 +384,13 @@ export async function createBetaServer({
   }
   const server = createServer(async (req, res) => {
     try {
+      if (localDemoMode) assertLocalDemoRequest(req);
       const origin = requestOrigin(req);
       const url = new URL(req.url, origin);
       if (url.search) throw new BetaError('INPUT_INVALID');
       const path = url.pathname;
       if (path === '/mcp') {
+        if (localDemoMode) throw new BetaError('NOT_FOUND', 404);
         if (req.headers.origin && req.headers.origin !== origin) throw new BetaError('ORIGIN_FORBIDDEN', 403);
         if (!mcpHandler) throw new BetaError('NOT_FOUND', 404);
         return await mcpHandler(req, res);
@@ -395,7 +401,15 @@ export async function createBetaServer({
       res.setHeader('referrer-policy', 'no-referrer');
       res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
       if ((path === '/health' || path === '/api/health') && req.method === 'GET') return send(res, 200, { data: { service: 'wechat-chat-coach', version: packageMetadata.version } });
-      if (path === '/api/meta' && req.method === 'GET') return send(res, 200, { data: { name: '聊天训练助手 · 内测', questionnaires: QUESTIONNAIRES, privacy: '聊天与画像按账户隔离；手动记录发送，不自动联系微信。反馈先隔离、清理和owner审阅；建议权重不是成功概率。' } });
+      if (path === '/api/meta' && req.method === 'GET') return send(res, 200, { data: { name: '聊天训练助手 · 内测', questionnaires: QUESTIONNAIRES, localDemo: { enabled: localDemoMode, synthetic: localDemoMode }, privacy: '聊天与画像按账户隔离；手动记录发送，不自动联系微信。反馈先隔离、清理和owner审阅；建议权重不是成功概率。' } });
+      if (path === '/api/demo/session') {
+        if (!localDemoMode || req.method !== 'POST') throw new BetaError('NOT_FOUND', 404);
+        parse(z.strictObject({}), await body(req));
+        const seed = await ensureLocalDemoSeed(store);
+        const session = store.createSession(seed.user.id); setSessionCookie(res, session, secure);
+        return send(res, 200, { data: { ...seed, csrfToken: session.csrfToken } });
+      }
+      if (localDemoMode && (path === '/api/register' || path === '/api/login' || path.startsWith('/api/admin/'))) throw new BetaError('NOT_FOUND', 404);
       if (['/api/register', '/api/login'].includes(path) && req.method === 'POST') {
         authRate(req);
         const input = await body(req);
@@ -423,6 +437,7 @@ export async function createBetaServer({
     } catch (error) { const sanitized = errorBody(error); send(res, sanitized.status, sanitized.body); }
   });
   server.betaStore = store;
+  server.ensureDemoSeed = async () => { if (!localDemoMode) throw new BetaError('NOT_FOUND', 404); return ensureLocalDemoSeed(store); };
   server.setMcpHandler = (handler) => { if (typeof handler !== 'function') throw new BetaError('MCP_HANDLER_INVALID'); mcpHandler = handler; };
   server.invokeForAccount = async ({ accountId, method, path, body: input = {} }) => {
     const allowed = method === 'GET' && (path === '/api/counterparts' || /^\/api\/counterparts\/[^/]+$/.test(path))

@@ -168,6 +168,8 @@ export function createBetaStore({
     dataDir: directory,
     close: () => db.close(),
     getUser: (id) => safeUser(user(id)),
+    // Startup helpers receive a safe view; no route exposes name-based lookup.
+    getUserByUsername: (username) => typeof username === 'string' ? safeUser(get('SELECT * FROM users WHERE normalized_username=?', username.normalize('NFC').trim().toLocaleLowerCase('en-US'))) : null,
     listUsers: (ownerId) => { owner(ownerId); return all('SELECT * FROM users ORDER BY created_at').map(safeUser); },
     quota,
     async register({ invite, username, password }) {

@@ -4,6 +4,12 @@ Personal project owned by [PaiDaxinAxin](https://github.com/PaiDaxinAxin), maint
 
 The first stage combines the complete game framework, current and desired expression style, counterpart context and feedback to support online interaction and mutually agreed meetings. Users paste conversations, review suggestions and send messages themselves. Display-profile coaching and offline instruction are deferred.
 
+## Direct local demo
+
+Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run demo` with the provider environment configured privately. Open `http://127.0.0.1:8788`. The demo enters a fictional account directly and keeps edits in its own private data directory (`data/local-demo` by default). There is no login or registration step. Loading the page makes no model call; requesting analysis or a reply uses the configured provider and complete knowledge.
+
+The UI is one simulated WeChat conversation, with AI advice inside it and day/night themes; see [the scoped design record](docs/ui-design.md). Email, login and public website authorization work are deferred by the owner. Do not use company email infrastructure. Demo startup refuses public origins and nonlocal listening; do not expose it through a public proxy.
+
 ## Invite-only web beta
 
 Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run beta:admin -- init --username owner`. Read the generated owner credentials locally from the private file reported by the command. Set the provider environment securely and run `npm run start:beta`; the default address is `http://127.0.0.1:8788`.
@@ -24,6 +30,7 @@ Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent sto
 - [Beta API and account contract](docs/beta-contract.md)
 - [Requirement acceptance matrix](docs/beta-acceptance.md)
 - [Verification evidence](docs/verification.md)
+- [Single conversation design](docs/ui-design.md)
 - [Development entry and adopted Linear standard](AGENTS.md)
 
 Chinese source knowledge and interviews retain their original language; new engineering records follow the adopted baseline.
@@ -62,7 +69,7 @@ All submitted feedback starts as raw, untrusted observations in private storage.
 
 ## Checks
 
-Run `npm test`, `npm run build`, `npx playwright install chromium`, and `npm run test:browser`. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; it is not part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
+Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, and `npm run test:demo`. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; it is not part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
 
 ## Knowledge write recovery
 
