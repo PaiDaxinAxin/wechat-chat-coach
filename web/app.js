@@ -6,6 +6,7 @@ const state = {
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false,
+  styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
@@ -98,7 +99,7 @@ function closeInlineCards({ restoreFocus = false } = {}) {
     const triggerMenu = trigger?.closest('.chat-menu');
     const menuSummary = triggerMenu?.querySelector(':scope > summary');
     const insideClosedMenu = triggerMenu && !triggerMenu.open && trigger !== menuSummary;
-    const visibleTrigger = !insideClosedMenu && trigger?.isConnected && trigger.matches('button,input,textarea,select,a[href],summary,[tabindex]') && trigger.getClientRects().length ? trigger : menuSummary || $('chat-menu').querySelector('summary');
+    const visibleTrigger = !insideClosedMenu && trigger?.isConnected && trigger.matches('button,input,textarea,select,a[href],summary,[tabindex]') && trigger.checkVisibility() ? trigger : trigger?.closest('#field-coach') && $('toggle-field-coach').checkVisibility() ? $('toggle-field-coach') : menuSummary || $('chat-menu').querySelector('summary');
     visibleTrigger?.focus({ preventScroll: true });
   }
 }
@@ -194,8 +195,9 @@ function updateQuota(quota = state.me?.quota) {
     : '方向分析依据已保存的双方背景与当前对话；一次完整分析计一次，同一上下文或切换方向不重复计次。权重不是成功率。';
   updateComposer();
 }
-async function reloadMe() {
+async function reloadMe({ expectedUserId } = {}) {
   const me = await api('/api/me');
+  if (expectedUserId && (state.me?.user.id !== expectedUserId || me.user.id !== expectedUserId)) return null;
   state.me = me;
   state.csrf = me.csrfToken;
   $('account-name').textContent = state.localDemo ? '虚构演示账号' : me.user.username;
@@ -235,11 +237,137 @@ async function enterWorkspace() {
   $('workspace').hidden = false;
   $('account-bar').hidden = false;
   fillProfile();
+  await loadStyleLearning();
   await loadCounterparts();
   const requiresUpdate = state.me.requiresQuestionnaireUpdate || state.me.profile?.requiresQuestionnaireUpdate;
   showView(state.me.profile?.background && !requiresUpdate ? 'coach' : 'profile');
   if (requiresUpdate) announce('当前账号已改为免费内测。请补全并保存精简问卷后继续辅助，原完整版答案在后台保留。', 'error');
 }
+const styleStatusNames = { candidate: '候选 · 尚未应用', adopted: '已采用 · 私有辅助规则', revoked: '已停用' };
+const styleTargetNames = { current_preference: '当前表达偏好', growth_goal: '愿意练习的方向' };
+const styleFitNames = { like: '像我', mixed: '部分像我', unlike: '不像我', unknown: '暂不判断' };
+const styleWillingnessNames = { try: '愿意练习', avoid: '暂不想使用', undecided: '暂未决定' };
+function renderStyleLearning() {
+  const data = state.styleLearning;
+  $('style-rule-list').replaceChildren(); $('style-review-list').replaceChildren();
+  if (!data) { $('style-status').textContent = '规则尚未读取，请重新读取后保存。'; return; }
+  $('style-status').textContent = '这些规则仅属于当前账号；候选不会进入辅助背景，采用后跨自己的聊天对象使用。';
+  if (!data.rules.length) $('style-rule-list').append(el('p', { class: 'helper' }, '还没有表达规则。可以先保存候选，再决定是否采用。'));
+  for (const rule of [...data.rules].reverse()) {
+    const card = el('article', { class: 'style-rule', 'data-rule-id': rule.id, 'data-rule-status': rule.status },
+      el('div', { class: 'section-heading' }, el('strong', {}, styleTargetNames[rule.target] || '表达规则'), el('span', { class: 'badge' }, styleStatusNames[rule.status] || '状态待读取')),
+      el('p', { class: 'style-source' }, rule.text));
+    if (rule.conditions) card.append(el('p', {}, `适用条件：${rule.conditions}`));
+    if (rule.limits) card.append(el('p', {}, `限制：${rule.limits}`));
+    const buttons = el('div', { class: 'button-row' });
+    if (rule.status === 'candidate') buttons.append(el('button', { type: 'button', class: 'primary', 'data-rule-action': 'adopt', onclick: (event) => void saveRuleAction(event.currentTarget, { type: 'adopt', candidateId: rule.id }) }, '采用这条规则'));
+    if (rule.status === 'adopted') buttons.append(el('button', { type: 'button', class: 'quiet-button', 'data-rule-action': 'revoke', onclick: (event) => void saveRuleAction(event.currentTarget, { type: 'revoke', ruleId: rule.id }) }, '停用'));
+    if (rule.status !== 'revoked') buttons.append(el('button', { type: 'button', class: 'quiet-button', 'data-rule-action': 'edit', onclick: () => {
+      $('style-rule-text').value = rule.text; $('style-rule-target').value = rule.target;
+      $('style-rule-conditions').value = rule.conditions || ''; $('style-rule-limits').value = rule.limits || '';
+      $('style-apply').checked = false; state.styleSupersedesId = rule.id; state.profileDraftVersion++;
+      $('style-replacement').textContent = '正在起草这条规则的新版本。明确采用并保存后，旧版本才会停用。'; $('style-replacement').hidden = false;
+      $('style-rule-text').focus();
+    } }, '改写新版本'));
+    card.append(buttons); $('style-rule-list').append(card);
+  }
+  $('style-review-history').hidden = !data.reviews.length;
+  for (const review of data.reviews) {
+    const observation = review.replyObservation?.status === 'recorded' ? '已录入对方回应；效果尚未评估。' : '对方结果未知；效果尚未评估。';
+    $('style-review-list').append(el('article', { class: 'style-review', 'data-review-id': review.id },
+      el('p', { class: 'small muted' }, '原 AI 建议 · 保存的原文'), el('p', { class: 'style-source' }, review.originalSuggestion?.reply || '旧记录缺少完整来源'),
+      el('p', { class: 'small muted' }, '我的改写 · 自述草稿，发送未确认'), el('p', { class: 'style-source' }, review.ownVersion),
+      el('p', {}, `原建议风格：${styleFitNames[review.styleFit] || '暂不判断'} · 对这种表达或方向：${styleWillingnessNames[review.willingness] || '暂未决定'}`),
+      ...(review.why ? [el('p', {}, `自述原因：${review.why}`)] : []), el('p', { class: 'helper' }, observation)));
+  }
+}
+async function loadStyleLearning() {
+  const userId = state.me?.user.id, serial = ++state.styleReadSerial;
+  if (!userId) return;
+  const data = await api('/api/style-learning');
+  if (state.me?.user.id !== userId || serial !== state.styleReadSerial) return;
+  if (state.styleLearning && data.revision < state.styleLearning.revision) return;
+  state.styleLearning = data; renderStyleLearning();
+}
+function resetStyleDraft() {
+  state.styleCase = null; state.styleReviewDirty = false; state.styleSupersedesId = null;
+  for (const id of ['style-own-version', 'style-why', 'style-rule-text', 'style-rule-conditions', 'style-rule-limits']) $(id).value = '';
+  $('style-fit').value = 'unknown'; $('style-willingness').value = 'undecided'; $('style-reason-kind').value = 'unknown'; $('style-rule-target').value = 'current_preference'; $('style-apply').checked = false;
+  $('style-case').hidden = true; $('style-case-empty').hidden = false; $('style-original').textContent = ''; $('style-replacement').hidden = true;
+}
+function openStylePreferences() {
+  if (!state.me) return;
+  if (!state.styleCase && state.suggestion) {
+    state.styleCase = { userId: state.me.user.id, counterpartId: state.selectedId, suggestionId: state.suggestion.id, original: state.suggestion.reply || '' };
+    $('style-original-label').textContent = `原 AI 建议 · ${state.detail?.counterpart.alias || '本次案例'} · 保存的原文`;
+    $('style-original').textContent = state.styleCase.original;
+    $('style-own-version').value = $('suggestion-text').value;
+    renderStyleObservation();
+    $('style-case').hidden = false; $('style-case-empty').hidden = true;
+  }
+  openInlineCard('profile-view'); $('style-preferences').open = true;
+  // The entry lives in a narrow overlay; close it so the inline editor is reachable.
+  closeFieldCoach();
+  $('style-preferences').scrollIntoView({ block: 'start', behavior: 'auto' });
+  (state.styleCase ? $('style-own-version') : $('style-rule-text')).focus({ preventScroll: true });
+}
+function renderStyleObservation() {
+  const previous = state.styleLearning?.reviews.find((review) => review.suggestionId === state.styleCase?.suggestionId && review.ownVersion === $('style-own-version').value.trim());
+  $('style-observation').textContent = previous?.replyObservation?.status === 'recorded'
+    ? '已录入对方回应；效果尚未评估。自己的偏好与对方回应分别记录。'
+    : '对方结果：未知；尚未评估效果。自己的偏好与对方回应分别记录。';
+}
+function profileInput() {
+  captureAnswers();
+  const kind = $('questionnaire-kind').value;
+  return { background: $('profile-background').value.trim(), style: $('profile-style').value.trim(), growthGoals: $('profile-growth').value.trim(), relationshipGoal: $('profile-goal').value.trim(), questionnaire: { kind, answers: Object.fromEntries((state.meta.questionnaires[kind] || []).map((question) => [question.id, state.questionnaireAnswers[question.id]])) } };
+}
+function styleDraftInput() {
+  const learning = {};
+  const text = $('style-rule-text').value.trim();
+  if (!text && ($('style-apply').checked || $('style-rule-conditions').value.trim() || $('style-rule-limits').value.trim() || state.styleSupersedesId)) throw new Error('新增或改写规则时，请先填写表达规则；未保存的内容仍保留。');
+  if (state.styleCase && (state.styleReviewDirty || text)) learning.review = { counterpartId: state.styleCase.counterpartId, suggestionId: state.styleCase.suggestionId, ownVersion: $('style-own-version').value.trim(), why: $('style-why').value.trim(), reasonKind: $('style-reason-kind').value, styleFit: $('style-fit').value, willingness: $('style-willingness').value };
+  if (text) learning.ruleChange = { type: $('style-apply').checked ? 'adopt_new' : 'propose', rule: { target: $('style-rule-target').value, text, conditions: $('style-rule-conditions').value.trim(), limits: $('style-rule-limits').value.trim() }, ...(state.styleSupersedesId ? { supersedesId: state.styleSupersedesId } : {}) };
+  return learning;
+}
+async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
+  if (!$('profile-form').reportValidity()) return;
+  const userId = state.me?.user.id, counterpartId = state.selectedId, draftVersion = state.profileDraftVersion, hadProfile = Boolean(state.me?.profile?.background), actionHadFocus = document.activeElement === button;
+  const scope = { userId, counterpartId };
+  await perform(button, '保存画像…', async () => {
+    if (!state.styleLearning) throw new Error('请先重新读取规则，再保存画像。你的草稿仍保留。');
+    const expectedRevision = state.styleLearning.revision;
+    const changes = includeDraft ? styleDraftInput() : { ...(ruleChange ? { ruleChange } : {}) };
+    const input = profileInput();
+    const key = JSON.stringify(['style-save', userId, expectedRevision, input, changes]);
+    if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
+    let data;
+    try { data = await put('/api/profile', { ...input, styleLearning: { requestId: state.requestIds.get(key), expectedRevision, ...changes } }); }
+    catch (error) {
+      if (error.code === 'STYLE_REVISION_CONFLICT' || error.code === 'STYLE_RULE_STATE_INVALID') throw new Error('画像或规则版本已变化。你的草稿仍保留；请点「重新读取规则」，检查最新内容后手动保存，不会自动重试。');
+      throw error;
+    }
+    state.requestIds.delete(key);
+    if (state.me?.user.id !== userId) return;
+    state.styleLearning = data.styleLearning; renderStyleLearning();
+    if (state.selectedId !== counterpartId) return;
+    await reloadMe({ expectedUserId: userId });
+    if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
+    if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: !hadProfile && !changes.review && !changes.ruleChange, preserveComposer: true });
+    if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
+    if (includeDraft && state.profileDraftVersion === draftVersion) resetStyleDraft();
+    if (!includeDraft && actionHadFocus && document.activeElement === document.body) {
+      const ruleId = changes.ruleChange?.candidateId || changes.ruleChange?.ruleId;
+      const card = ruleId ? $('style-rule-list').querySelector(`[data-rule-id="${CSS.escape(ruleId)}"]`) : null;
+      if (card) card.tabIndex = -1;
+      (card?.querySelector('button') || card || $('style-preferences').querySelector('summary')).focus({ preventScroll: true });
+    }
+    const adopted = changes.ruleChange?.type === 'adopt' || changes.ruleChange?.type === 'adopt_new';
+    announce(adopted ? '表达规则已采用。后续辅助会使用你的私有规则；本次保存没有调用模型，可自主重新分析。' : changes.ruleChange?.type === 'revoke' ? '规则已停用，后续辅助不再使用。本次保存没有调用模型。' : changes.ruleChange?.type === 'propose' ? '候选规则已保存，尚未应用；本次保存没有调用模型。' : '画像与自述评价已保存。本次保存没有调用模型。');
+    if (includeDraft && state.profileDraftVersion === draftVersion && !changes.review && !changes.ruleChange) showView('coach');
+  }, scope);
+}
+function saveRuleAction(button, ruleChange) { return saveProfile(button, { ruleChange }); }
 async function loadCounterparts() {
   const data = await api('/api/counterparts');
   state.counterparts = data.counterparts || [];
@@ -723,6 +851,7 @@ function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
+  state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
   $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
@@ -795,16 +924,16 @@ for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'mee
   openInlineCard(card);
 });
 $('questionnaire-kind').addEventListener('change', () => { captureAnswers(); renderQuestionnaire($('questionnaire-kind').value); });
+$('open-style-preferences').addEventListener('click', openStylePreferences);
+$('style-own-version').addEventListener('input', renderStyleObservation);
+$('style-cancel-draft').addEventListener('click', () => { resetStyleDraft(); state.profileDraftVersion++; $('style-rule-text').focus(); });
+$('style-reload').addEventListener('click', () => void perform($('style-reload'), '读取规则…', async () => { await loadStyleLearning(); announce('已读取最新规则版本，未保存的画像与偏好草稿仍保留。可检查后手动保存，没有调用模型。'); }));
+$('profile-form').addEventListener('input', (event) => { state.profileDraftVersion++; if (event.target.classList.contains('style-review-input')) state.styleReviewDirty = true; });
+$('profile-form').addEventListener('change', (event) => { state.profileDraftVersion++; if (event.target.classList.contains('style-review-input')) state.styleReviewDirty = true; });
 $('profile-form').addEventListener('invalid', (event) => { const details = event.target.closest('details'); if (details) details.open = true; }, true);
 $('profile-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  void perform(event.submitter, '保存画像…', async () => {
-    captureAnswers();
-    const kind = $('questionnaire-kind').value;
-    const answers = Object.fromEntries((state.meta.questionnaires[kind] || []).map((question) => [question.id, state.questionnaireAnswers[question.id]]));
-    await put('/api/profile', { background: $('profile-background').value.trim(), style: $('profile-style').value.trim(), growthGoals: $('profile-growth').value.trim(), relationshipGoal: $('profile-goal').value.trim(), questionnaire: { kind, answers } });
-    await reloadMe(); showView('coach'); if (state.selectedId) await loadCounterpart(state.selectedId); announce(state.localDemo ? '演示画像已保存，后续 AI 会使用更新后的演示内容。' : '画像已保存，后续辅助会使用更新后的真实背景与成长目标。');
-  });
+  void saveProfile(event.submitter, { includeDraft: true });
 });
 for (const id of ['add-counterpart', 'empty-add']) $(id).addEventListener('click', () => openCounterpart());
 $('edit-counterpart').addEventListener('click', () => { if (state.detail) openCounterpart(state.detail.counterpart); });

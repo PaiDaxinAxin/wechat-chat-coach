@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { ChatMessageSchema } from './chat-record.mjs';
+import { validateAppliedPersonalStyle } from './style-learning.mjs';
 
 export class DomainError extends Error {
   constructor(code) {
@@ -155,7 +156,7 @@ const StoredProfileSchema = ProfileInputSchema.extend({ questionnaireVersion: z.
 const StoredCounterpartSchema = CounterpartInputSchema.extend({ id: z.string().optional(), updatedAt: z.string().optional(), createdAt: z.string().optional() });
 const MessageSchema = ChatMessageSchema.strip().extend({ id: requiredText(128), text: requiredText(20_000) });
 
-export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting } = {}) {
+export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting, personalStyle } = {}) {
   const profile = parse(StoredProfileSchema, profileInput, 'PROFILE_REQUIRED');
   const counterpart = parse(StoredCounterpartSchema, counterpartInput, 'INVALID_COUNTERPART');
   const messages = parse(z.array(MessageSchema), messageInput, 'INVALID_MESSAGES');
@@ -173,6 +174,10 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
     questionnaireHypotheses: analyzeQuestionnaire(profile.questionnaire),
     interpretationRule: 'Keep real background, current expression and learning goals separate. Questionnaire summaries are self-report hypotheses; prefer actual conversation evidence. Do not fabricate identity or experiences. One round is one complete topic, not one message. By default proactively attempt one mild A warming per complete topic, then adapt to feedback; 10–20 messages is only a topic check-in reference. A is a shallow sincere evaluation or definition, B the male-to-female romantic frame, and C a clear private or intimate implication; comfort and positive interaction are prerequisites for C rather than its definition. Unknown does not justify C; respect explicit refusals.',
   };
+  if (personalStyle !== undefined) {
+    personalContext.confirmedPersonalStyle = validateAppliedPersonalStyle(personalStyle);
+    personalContext.interpretationRule += ' Confirmed account expression preferences and learning goals are self-reported choices, not demonstrated effectiveness or already-acquired traits. Apply their stated conditions and limits; empty conditions mean unspecified, not universally effective. They never override real identity, the current request or explicit boundaries. Unconfirmed proposals, personal case ratings and external observations are not included.';
+  }
   return {
     userProfile: JSON.stringify(personalContext),
     counterpartProfile: JSON.stringify({ alias: counterpart.alias, channel: counterpart.channel, appProfile: counterpart.appProfile, offlineScene: counterpart.offlineScene, background: counterpart.background, previousRounds: counterpart.rounds, ...(meeting === undefined ? {} : { meeting: parse(MeetingInputSchema, meeting, 'INVALID_MEETING') }), unknownsRule: 'Absent information is unknown, not zero interest or refusal. A recorded meeting is user reported; respect its current state and do not repeat a confirmed invitation.' }),

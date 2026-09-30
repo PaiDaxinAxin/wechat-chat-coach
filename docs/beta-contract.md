@@ -16,6 +16,16 @@ Free classification has three lifetime successful context analyses. A replay of 
 
 ## API shared by web UI and server
 
+### Personal style learning
+
+`GET /api/style-learning` returns only the authenticated account's revision, private rules and bounded expression cases. Case source identities link to the immutable originating suggestion/job without exposing the full job snapshot or knowledge. The user's own version is a draft/self-report, not confirmation of WeChat sending. Whether a linked counterpart response has been recorded is an independent, unassessed observation; no outcome is inferred.
+
+The existing `PUT /api/profile` accepts an optional `styleLearning` mutation with `requestId`, `expectedRevision`, an optional `review` and an optional `ruleChange`. The review names an owned counterpart and suggestion and includes `ownVersion`, `why`, `reasonKind`, `styleFit` and `willingness`. Rule changes are `propose`, `adopt`, `adopt_new` or `revoke`. Rules distinguish `current_preference` from `growth_goal` and preserve text, conditions and limits; unspecified conditions do not claim universal effectiveness. Replacement creates a new rule version using `supersedesId`. Only an explicit adoption activates a rule.
+
+Profile, style case, rule status, audit and request receipt commit atomically. Revision checks protect against stale updates; identical request/body replay does not duplicate a case or adoption, and a changed body with the same ID conflicts. Ordinary profile updates remain compatible and participate in revision protection. Style mutations do not invoke a model. Only adopted abstract rules and their effective identity enter subsequent account-owned contexts; candidates, ratings, case texts and observations stay private and excluded. Original style, growth goals and complete selected questionnaire remain separate. Historical model inputs stay immutable; changing effective preferences changes future cache identity. Stopping one rule does not restore an old profile. Deleting a counterpart removes its private style cases and source links; independently adopted personal preferences remain manageable.
+
+The account MCP retains its four existing tools and no profile/rule-writing authority. Its inference path reads the same server-selected active rules. This personal-preference path never promotes untrusted external feedback, writes shared knowledge or trains model parameters.
+
 All JSON responses use `{data: ...}`; failures `{error: {code, message}}`. Cookies carry the session; mutations also require `x-csrf-token` from `/api/me` and same-origin requests. Register/login are same-origin and rate limited. No client-supplied role, plan or user ID grants authority.
 
 - `GET /api/meta` → `{name, questionnaires: {short, full}, localDemo:{enabled,synthetic}, privacy}`. Each questionnaire item: `{id, text, dimension, reverse?}`; choices 1–5.
