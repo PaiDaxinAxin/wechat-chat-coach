@@ -10,11 +10,12 @@ import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './kno
 import { ensureLocalDemoSeed, assertLocalDemoRequest } from './demo.mjs';
 import { archiveKnowledgeVersion } from './case-snapshot.mjs';
 import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs';
+import { StyleLearningInputSchema } from './style-learning.mjs';
 import { generateFieldCoachPlan } from './field-coach.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import {
   QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree,
-  CounterpartInputSchema, MeetingInputSchema, FeedbackInputSchema, ReviewInputSchema,
+  ProfileInputSchema, CounterpartInputSchema, MeetingInputSchema, FeedbackInputSchema, ReviewInputSchema,
   cleanFeedback, reviewFeedback, buildFeedbackKnowledgeSupplement,
 } from './domain.mjs';
 
@@ -36,6 +37,7 @@ const FollowupSchema = z.strictObject({ text: z.string().trim().min(1).max(20_00
 const CopySchema = z.strictObject({ copiedText: z.string().trim().min(1).max(20_000).optional(), requestId: RequestId });
 const MessageTimeSchema = z.strictObject({ actualWechatAt: z.iso.datetime({ offset: true }).nullable() });
 const PlanSchema = z.strictObject({ plan: z.enum(['free', 'paid']) });
+const ProfileSaveSchema = ProfileInputSchema.extend({ styleLearning: StyleLearningInputSchema.optional() });
 
 const MESSAGES = {
   UNAUTHORIZED: '请先登录。', CSRF_INVALID: '会话校验未通过，请刷新页面。', ORIGIN_FORBIDDEN: '请求来源不匹配。',
@@ -55,6 +57,13 @@ const MESSAGES = {
   FOLLOWUP_SOURCE_ALREADY_LINKED: '上一轮草稿已关联过后续消息，请直接录入新的一句或选择本轮回复。',
   COPY_REQUEST_CONFLICT: '复制记录编号已用于其他内容，请重新复制。',
   MESSAGE_TIME_INVALID: '请填写有效的过去时间；录入时间会保留。',
+  INVALID_STYLE_LEARNING: '表达偏好未保存，请检查本次自述或规则内容。',
+  INVALID_STYLE_RULE: '请填写有效的表达偏好。',
+  STYLE_REVISION_CONFLICT: '画像或表达偏好已更新，请重新载入后保存。',
+  STYLE_REQUEST_CONFLICT: '这次保存编号已用于其他内容，请为新保存创建新请求。',
+  STYLE_RULE_NOT_FOUND: '未找到你的这条表达偏好。',
+  STYLE_RULE_STATE_INVALID: '这条候选的状态已变化，请重新载入。',
+  STYLE_ACTIVE_LIMIT: '最多采用20条表达偏好，请先停用不再适用的规则。',
 };
 
 function parse(schema, value, code = 'INPUT_INVALID') {
@@ -70,6 +79,7 @@ function normalizedError(error) {
     'FEEDBACK_QUARANTINED', 'FEEDBACK_CONSENT_REQUIRED', 'FEEDBACK_REVIEW_UNSAFE', 'INVALID_APPROVED_FEEDBACK',
     'KNOWLEDGE_WRITE_BUSY', 'KNOWLEDGE_VERSION_CONFLICT', 'KNOWLEDGE_READ_FAILED', 'KNOWLEDGE_APPEND_FAILED',
     'OUTPUT_KNOWLEDGE_EXCERPT_BLOCKED', 'OUTPUT_LIMIT_EXCEEDED',
+    'INVALID_STYLE_LEARNING', 'INVALID_STYLE_RULE', 'STYLE_ACTIVE_LIMIT',
   ]);
   if (known.has(error?.code)) return new BetaError(error.code, error.code === 'FULL_QUESTIONNAIRE_PAID_ONLY' ? 403 : 400);
   if (error?.code === 'provider_http_error' && Number.isInteger(error.status) && error.status >= 100 && error.status <= 599) return new BetaError(`PROVIDER_HTTP_${error.status}`, 502);
@@ -223,7 +233,7 @@ export async function createBetaServer({
     const { revision: _revision, ...businessCounterpart } = counterpart;
     const messages = store.listMessages(userId, counterpartId);
     if (!messages.some((message) => message.speaker === 'other')) throw new BetaError('CONTEXT_REQUIRED');
-    return buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: store.getMeeting(userId, counterpartId) });
+    return buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: store.getMeeting(userId, counterpartId), personalStyle: store.getAppliedPersonalStyle(userId) });
   }
   function contextHash(context, knowledgeHash, operation, options = {}) {
     const providerModel = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
@@ -352,7 +362,11 @@ export async function createBetaServer({
   async function dispatch(user, method, path, input = {}) {
     const userId = user.id;
     if (path === '/api/me' && method === 'GET') return { user, profile: visibleProfile(user), quota: store.quota(userId) };
-    if (path === '/api/profile' && method === 'PUT') return { profile: store.putProfile(userId, validateProfile(input, user.plan)) };
+    if (path === '/api/profile' && method === 'PUT') {
+      const { styleLearning, ...profile } = parse(ProfileSaveSchema, input, input.styleLearning === undefined ? 'INVALID_PROFILE' : 'INVALID_STYLE_LEARNING');
+      return store.saveProfileAndStyle(userId, validateProfile(profile, user.plan), styleLearning);
+    }
+    if (path === '/api/style-learning' && method === 'GET') return store.getStyleLearning(userId);
     if (path === '/api/counterparts' && method === 'GET') {
       const knowledgeSnapshot = await knowledge.read();
       const counterparts = await Promise.all(store.listCounterparts(userId).map(async (counterpart) => ({ ...counterpart, heat: (await currentClassification(userId, counterpart.id, knowledgeSnapshot)).heat })));

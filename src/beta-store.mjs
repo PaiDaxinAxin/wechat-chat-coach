@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { PROJECT_ROOT } from './knowledge.mjs';
+import { appliedPersonalStyle, MAX_ACTIVE_STYLE_RULES, STYLE_REVIEW_VERSION, StyleLearningInputSchema } from './style-learning.mjs';
 
 const derive = promisify(scrypt);
 const digest = (value) => createHash('sha256').update(value).digest('hex');
@@ -136,6 +137,23 @@ export function createBetaStore({
       suggestion_id TEXT NOT NULL REFERENCES suggestions(id) ON DELETE CASCADE,
       request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, copied_text TEXT NOT NULL, copied_at TEXT NOT NULL,
       UNIQUE(user_id,request_id)
+    );
+    CREATE TABLE IF NOT EXISTS style_reviews (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      counterpart_id TEXT NOT NULL REFERENCES counterparts(id) ON DELETE CASCADE,
+      value_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS style_rules (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      value_json TEXT NOT NULL, status TEXT NOT NULL,
+      source_review_id TEXT REFERENCES style_reviews(id) ON DELETE SET NULL,
+      supersedes_id TEXT REFERENCES style_rules(id), rule_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL, adopted_at TEXT, revoked_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS style_save_receipts (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, request_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL, result_ids_json TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY(user_id,request_id)
     );`);
   const addColumn = (table, name, declaration) => {
     if (!db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${declaration}`);
@@ -150,9 +168,16 @@ export function createBetaStore({
   addColumn('followup_receipts', 'previous_reply_hash', 'TEXT');
   addColumn('followup_receipts', 'counterpart_text_hash', 'TEXT');
   addColumn('followup_receipts', 'copy_receipt_id', 'TEXT');
+  addColumn('users', 'style_revision', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('users', 'active_style_revision', 'INTEGER NOT NULL DEFAULT 0');
   db.exec(`CREATE TRIGGER IF NOT EXISTS model_snapshot_immutable BEFORE UPDATE OF context_snapshot_json,snapshot_hash ON model_jobs
     WHEN OLD.context_snapshot_json IS NOT NEW.context_snapshot_json OR OLD.snapshot_hash IS NOT NEW.snapshot_hash
     BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_CASE_SNAPSHOT'); END;`);
+  db.exec(`CREATE TRIGGER IF NOT EXISTS style_review_immutable BEFORE UPDATE OF value_json ON style_reviews
+    WHEN OLD.value_json IS NOT NEW.value_json BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_STYLE_REVIEW'); END;
+    CREATE TRIGGER IF NOT EXISTS style_rule_body_immutable BEFORE UPDATE OF value_json,rule_hash,supersedes_id ON style_rules
+    WHEN OLD.value_json IS NOT NEW.value_json OR OLD.rule_hash IS NOT NEW.rule_hash OR OLD.supersedes_id IS NOT NEW.supersedes_id
+    BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_STYLE_RULE'); END;`);
   const get = (sql, ...arguments_) => db.prepare(sql).get(...arguments_);
   const all = (sql, ...arguments_) => db.prepare(sql).all(...arguments_);
   const run = (sql, ...arguments_) => db.prepare(sql).run(...arguments_);
@@ -214,6 +239,14 @@ export function createBetaStore({
   const suggestionValue = (row) => {
     const source = suggestionSource(row);
     return { ...source.suggestion, ...pendingState(row, source).metadata };
+  };
+  const styleRuleValue = (row) => ({ id: row.id, ...parse(row.value_json), status: row.status, source: 'user_self_report', sourceReviewId: row.source_review_id ?? null, supersedesId: row.supersedes_id ?? null, ruleHash: row.rule_hash, createdAt: row.created_at, adoptedAt: row.adopted_at ?? null, revokedAt: row.revoked_at ?? null });
+  const styleRuleRow = (userId, id) => { const row = get('SELECT * FROM style_rules WHERE id=? AND user_id=?', id, userId); if (!row) throw new BetaError('STYLE_RULE_NOT_FOUND', 404); return row; };
+  const styleReplyObservation = (userId, review) => {
+    // Read-only decoration: linkage says a chat record exists, never that this
+    // self expression was actually sent or that the observed response worked.
+    const messageIds = all("SELECT received.id FROM messages received JOIN messages previous ON received.reply_to_message_id=previous.id WHERE received.user_id=? AND received.counterpart_id=? AND received.speaker='other' AND previous.user_id=? AND previous.counterpart_id=? AND previous.speaker='self' AND previous.suggestion_id=? AND previous.text=? ORDER BY received.seq", userId, review.counterpartId, userId, review.counterpartId, review.suggestionId, review.ownVersion).map(({ id }) => id);
+    return { status: messageIds.length ? 'recorded' : 'unknown', assessment: 'unassessed', messageIds };
   };
   const jobValue = (row) => row ? ({ id: row.id, userId: row.user_id, counterpartId: row.counterpart_id, operation: row.operation, requestId: row.request_id, contextHash: row.context_hash, knowledgeHash: row.knowledge_hash, state: row.state, result: parse(row.result_json), errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at, workerId: row.worker_id, cacheOf: row.cache_of }) : null;
   const budget = (subject, forDay) => { run('INSERT OR IGNORE INTO provider_budget(subject,day) VALUES(?,?)', subject, forDay); return get('SELECT * FROM provider_budget WHERE subject=? AND day=?', subject, forDay); };
@@ -313,8 +346,89 @@ export function createBetaStore({
     putProfile(userId, value) {
       user(userId);
       run('INSERT INTO profiles VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', userId, json(value), timestamp());
+      run('UPDATE users SET style_revision=style_revision+1 WHERE id=?', userId);
       audit(userId, 'profile_updated', userId, { questionnaireKind: value.questionnaire?.kind });
       return this.getProfile(userId);
+    },
+    getStyleLearning(userId) {
+      const account = user(userId);
+      const rules = all('SELECT * FROM style_rules WHERE user_id=? ORDER BY created_at,rowid', userId).map(styleRuleValue);
+      const reviews = all('SELECT * FROM style_reviews WHERE user_id=? ORDER BY created_at DESC,rowid DESC', userId).map((row) => {
+        const record = parse(row.value_json);
+        return { id: row.id, ...record, replyObservation: styleReplyObservation(userId, record), createdAt: row.created_at };
+      });
+      return { revision: account.style_revision, activeRevision: account.active_style_revision, rules, reviews };
+    },
+    getAppliedPersonalStyle(userId) {
+      const account = user(userId);
+      return appliedPersonalStyle(all("SELECT * FROM style_rules WHERE user_id=? AND status='adopted' ORDER BY created_at,rowid", userId).map(styleRuleValue), account.active_style_revision);
+    },
+    saveProfileAndStyle(userId, value, styleInput) {
+      const parsed = styleInput === undefined ? null : StyleLearningInputSchema.safeParse(styleInput);
+      if (parsed && !parsed.success) throw new BetaError('INVALID_STYLE_LEARNING');
+      const learning = parsed?.data;
+      return transaction(() => {
+        const account = user(userId);
+        const payloadHash = learning ? digest(json({ profile: value, styleLearning: learning })) : null;
+        if (learning) {
+          const receipt = get('SELECT * FROM style_save_receipts WHERE user_id=? AND request_id=?', userId, learning.requestId);
+          if (receipt) {
+            if (receipt.payload_hash !== payloadHash) throw new BetaError('STYLE_REQUEST_CONFLICT', 409);
+            return { profile: this.getProfile(userId), styleLearning: { ...this.getStyleLearning(userId), cached: true } };
+          }
+          if (account.style_revision !== learning.expectedRevision) throw new BetaError('STYLE_REVISION_CONFLICT', 409);
+        }
+        this.putProfile(userId, value);
+        let reviewId = null, changedRuleId = null, activeChanged = false;
+        if (learning?.review) {
+          const input = learning.review;
+          counterpartRow(userId, input.counterpartId);
+          const source = this.getSuggestionCase(userId, input.counterpartId, input.suggestionId);
+          const record = { ...input, source: 'user_self_report', version: STYLE_REVIEW_VERSION,
+            originalSuggestion: { id: source.suggestion.id, reply: source.suggestion.reply, originJobId: source.originJobId, knowledgeHash: source.suggestion.knowledgeHash, contextStatus: source.status, snapshotHash: source.snapshotHash },
+            replyObservation: styleReplyObservation(userId, input) };
+          reviewId = randomUUID();
+          run('INSERT INTO style_reviews VALUES(?,?,?,?,?)', reviewId, userId, input.counterpartId, json(record), timestamp());
+          audit(userId, 'style_review_saved', reviewId, { suggestionId: input.suggestionId, reasonKind: input.reasonKind, source: 'user_self_report' });
+        }
+        const change = learning?.ruleChange;
+        if (change) {
+          const activeCount = () => get("SELECT COUNT(*) AS count FROM style_rules WHERE user_id=? AND status='adopted'", userId).count;
+          const assertCapacity = (supersedes) => { if (activeCount() - (supersedes?.status === 'adopted' ? 1 : 0) >= MAX_ACTIVE_STYLE_RULES) throw new BetaError('STYLE_ACTIVE_LIMIT'); };
+          const revoke = (row) => {
+            if (row.status === 'revoked') return;
+            run("UPDATE style_rules SET status='revoked',revoked_at=? WHERE id=?", timestamp(), row.id);
+            if (row.status === 'adopted') activeChanged = true;
+            audit(userId, 'style_rule_revoked', row.id, { previousStatus: row.status });
+          };
+          if (change.type === 'propose' || change.type === 'adopt_new') {
+            const supersedes = change.supersedesId ? styleRuleRow(userId, change.supersedesId) : null;
+            const adopted = change.type === 'adopt_new';
+            if (adopted && supersedes?.status === 'revoked') throw new BetaError('STYLE_RULE_STATE_INVALID', 409);
+            if (adopted) assertCapacity(supersedes);
+            changedRuleId = randomUUID();
+            run('INSERT INTO style_rules VALUES(?,?,?,?,?,?,?,?,?,NULL)', changedRuleId, userId, json(change.rule), adopted ? 'adopted' : 'candidate', reviewId, change.supersedesId ?? null, digest(json(change.rule)), timestamp(), adopted ? timestamp() : null);
+            if (adopted) { if (supersedes) revoke(supersedes); activeChanged = true; }
+            audit(userId, adopted ? 'style_rule_adopted' : 'style_rule_proposed', changedRuleId, { target: change.rule.target, source: 'user_self_report', supersedesId: change.supersedesId ?? null });
+          } else if (change.type === 'adopt') {
+            const candidate = styleRuleRow(userId, change.candidateId);
+            if (candidate.status !== 'candidate') throw new BetaError('STYLE_RULE_STATE_INVALID', 409);
+            const supersedes = candidate.supersedes_id ? styleRuleRow(userId, candidate.supersedes_id) : null;
+            if (supersedes?.status === 'revoked') throw new BetaError('STYLE_RULE_STATE_INVALID', 409);
+            assertCapacity(supersedes);
+            if (supersedes) revoke(supersedes);
+            run("UPDATE style_rules SET status='adopted',adopted_at=? WHERE id=?", timestamp(), candidate.id);
+            changedRuleId = candidate.id; activeChanged = true;
+            audit(userId, 'style_rule_adopted', candidate.id, { source: 'user_self_report', supersedesId: candidate.supersedes_id ?? null });
+          } else {
+            const rule = styleRuleRow(userId, change.ruleId);
+            revoke(rule); changedRuleId = rule.id;
+          }
+        }
+        if (activeChanged) run('UPDATE users SET active_style_revision=active_style_revision+1 WHERE id=?', userId);
+        if (learning) run('INSERT INTO style_save_receipts VALUES(?,?,?,?,?)', userId, learning.requestId, payloadHash, json({ reviewId, ruleId: changedRuleId }), timestamp());
+        return { profile: this.getProfile(userId), styleLearning: { ...this.getStyleLearning(userId), cached: false } };
+      });
     },
     listCounterparts(userId) { user(userId); return all('SELECT * FROM counterparts WHERE user_id=? ORDER BY updated_at DESC', userId).map(counterpartValue); },
     getCounterpart: (userId, id) => counterpartValue(counterpartRow(userId, id)),

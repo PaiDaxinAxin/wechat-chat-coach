@@ -4,6 +4,10 @@ Status: deterministic cleaning/review domain implemented for the internal beta; 
 
 The owner treats external feedback as dirty data. Receipt does not establish truth, a positive chat result or permission to update knowledge. Raw submissions remain outside knowledge, model context, training and evaluation.
 
+## Personal expression preferences
+
+An authenticated user's own expression preferences are separate from evidence about another person's reaction. The private style-learning path stores the user's original/edited expression comparison and self-reported fit, reason and willingness to try. It accepts no outcome, feedback or proof fields and cannot import raw external feedback. A user may explicitly adopt an abstract preference for current expression or future practice, with stated conditions and limits; unadopted cases and proposals never enter the model context. Adoption changes only that account's private preferences, not the game knowledge or model weights. A reply being recorded remains unassessed; it cannot establish success or automatically produce a rule. Any later use of external outcome data still follows the admission and owner-review path below.
+
 ## Admission path
 
 `raw_untrusted → clean_candidate or quarantined → owner review → approved_candidate or rejected → explicitly authorized use`

@@ -10,6 +10,8 @@ Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run de
 
 The UI centers on a simulated WeChat conversation, with three direction weights and editable replies inside it, a companion 场外教练 for complete-topic monitoring and initiative plans, and day/night themes; see [the scoped design record](docs/ui-design.md). Email, login and public website authorization work are deferred by the owner. Do not use company email infrastructure. Demo startup refuses public origins and nonlocal listening; do not expose it through a public proxy.
 
+The field coach's expression-preference entry reuses the personal profile editor. An optional private case preserves the original suggestion, the user's own version, modification reason, style fit and willingness to practice. User-written rules remain candidates until explicitly adopted; adopted preferences and growth rules apply to subsequent account-scoped coaching and can be replaced or stopped. Saving preferences makes no model call and does not establish that a draft was sent or that it worked. Other people's responses remain separate, unassessed evidence. See [the API contract](docs/beta-contract.md) for the distinction from untrusted external feedback.
+
 ## Invite-only web beta
 
 Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run beta:admin -- init --username owner`. Read the generated owner credentials locally from the private file reported by the command. Set the provider environment securely and run `npm run start:beta`; the default address is `http://127.0.0.1:8788`.
@@ -69,7 +71,7 @@ All submitted feedback starts as raw, untrusted observations in private storage.
 
 ## Checks
 
-Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, and `npm run test:demo`. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; it is not part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
+Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, `npm run test:demo`, and `npm run test:style`. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; `scripts/verify-style-live.mjs` requires explicit opt-in and attempts one fictional reply using an adopted expression preference. Neither is part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
 
 ## Knowledge write recovery
 

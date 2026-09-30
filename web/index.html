@@ -74,6 +74,33 @@
             <label>我现在的表达风格<textarea id="profile-style" required rows="3" maxlength="10000" placeholder="写两三句你自己会说的话，也可以写不喜欢的表达"></textarea></label>
             <label>希望练习的地方<textarea id="profile-growth" required rows="2" maxlength="10000" placeholder="如自然表达兴趣、接住玩笑、把话题带到见面"></textarea></label>
             <label>当前关系目标<textarea id="profile-goal" required rows="2" maxlength="10000" placeholder="先认识再判断也可以"></textarea></label>
+            <details id="style-preferences" class="style-preferences">
+              <summary>我的表达偏好</summary>
+              <p class="helper">记录自己喜欢怎样表达，或愿意练习什么。只有明确采用的规则才用于你的后续辅助；候选和自述评价不会自动生效。</p>
+              <div id="style-case" class="style-case" hidden>
+                <p id="style-original-label" class="small muted">原 AI 建议 · 保存的原文</p><p id="style-original" class="style-source"></p>
+                <label>我的改写（自述草稿，发送未确认）<textarea id="style-own-version" class="style-review-input" rows="2" maxlength="5000"></textarea></label>
+                <div class="form-grid">
+                  <label>原建议像不像我的风格<select id="style-fit" class="style-review-input"><option value="unknown">暂不判断</option><option value="like">像我</option><option value="mixed">部分像我</option><option value="unlike">不像我</option></select></label>
+                  <label>是否愿意尝试这种表达或方向<select id="style-willingness" class="style-review-input"><option value="undecided">暂未决定</option><option value="try">愿意练习</option><option value="avoid">暂不想使用</option></select></label>
+                </div>
+                <label>我为什么这样想（可选）<textarea id="style-why" class="style-review-input" rows="2" maxlength="2000"></textarea></label>
+                <label>主要原因<select id="style-reason-kind" class="style-review-input"><option value="unknown">暂不分类</option><option value="style">表达风格</option><option value="strategy">聊天策略</option><option value="fact">事实不符</option></select></label>
+                <p id="style-observation" class="helper">对方结果：未知；尚未评估效果。自己的偏好与对方回应分别记录。</p>
+              </div>
+              <p id="style-case-empty" class="helper">有 AI 建议时，可一起保留原句和自己的改写；现在也可以直接写下表达规则。</p>
+              <label>新表达规则（可选）<textarea id="style-rule-text" rows="2" maxlength="500" placeholder="如少用连续追问；先分享一句自己的真实经历"></textarea></label>
+              <label>规则用于<select id="style-rule-target"><option value="current_preference">我现在的表达偏好</option><option value="growth_goal">我愿意练习的方向</option></select></label>
+              <label>适用条件（可选）<textarea id="style-rule-conditions" rows="2" maxlength="1000" placeholder="什么时候适用"></textarea></label>
+              <label>限制（可选）<textarea id="style-rule-limits" rows="2" maxlength="1000" placeholder="什么时候不使用"></textarea></label>
+              <label class="checkbox-label"><input id="style-apply" type="checkbox">作为我的表达偏好应用</label>
+              <p id="style-replacement" class="helper" hidden></p>
+              <button id="style-cancel-draft" class="quiet-button" type="button">清空本次偏好草稿</button>
+              <div class="section-heading style-list-heading"><h3>我的私有规则</h3><button id="style-reload" class="quiet-button" type="button">重新读取规则</button></div>
+              <p id="style-status" class="helper" role="status" aria-live="polite"></p>
+              <div id="style-rule-list"></div>
+              <details id="style-review-history"><summary>我的表达评价记录</summary><div id="style-review-list"></div></details>
+            </details>
             <details class="questionnaire-details"><summary>聊天偏好问卷</summary><p class="helper">自编偏好题，不是正式人格测评。1 很不符合，5 很符合。</p><label>问卷类型<select id="questionnaire-kind"><option value="short">精简版</option><option value="full">完整版 · 付费内测</option></select></label><div id="questionnaire" class="questionnaire"></div></details>
             <p id="profile-saved" class="helper"></p><button class="primary" type="submit">保存画像</button>
           </form>
@@ -107,6 +134,7 @@
       <section class="field-coach-section"><span class="eyebrow">当前话题</span><p id="field-coach-topic">有对话后再判断</p><p id="field-coach-state" class="helper" role="status">等待新的对话</p></section>
       <section class="field-coach-section"><span class="eyebrow">怎样主导</span><p id="field-coach-initiative">记录对方的话后，结合完整话题给建议。</p><p id="field-coach-next" class="helper"></p><p id="field-coach-evidence" class="helper"></p></section>
       <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div></form>
+      <details class="field-coach-section style-entry"><summary>我的表达偏好</summary><p class="helper">这句像不像你？可以保留改写，明确选择今后使用的规则。</p><button id="open-style-preferences" class="quiet-button" type="button">调整我的表达偏好</button></details>
     </aside>
     </div>
   </main>

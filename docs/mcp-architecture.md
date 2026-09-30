@@ -26,6 +26,8 @@ Web followup receipts associate the previous editable draft with the next pasted
 
 Fresh beta jobs preserve immutable private input/choice snapshots and a full server-side knowledge archive per hash. Ordinary account clients receive neither case snapshots nor knowledge text or archive paths. Legacy jobs retain an explicit missing-context state. Cache identity includes context/protocol version and provider model as well as complete input and knowledge hash. The beta account MCP still has only its four listed tools; the new web followup/copy/time-edit/manual-plan routes do not add owner, export, resources or arbitrary-context capabilities.
 
+Explicitly adopted account expression preferences enter the shared stored coaching context as bounded abstract rules, separate from current style and growth goals. Their effective identity participates in cache and in-flight validity. Private style cases, unadopted proposals, self-ratings and response observations remain excluded; adopting a preference does not promote feedback or change shared knowledge. The existing account MCP tools read the server-selected rules during inference and gain no new rule/profile-write authority.
+
 Exact-excerpt filtering is supplementary. The design prevents direct source reads, but cannot guarantee resistance to inference, paraphrasing or extraction through repeated calls.
 
 ## Alternatives and release boundary
