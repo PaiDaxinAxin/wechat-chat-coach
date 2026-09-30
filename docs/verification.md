@@ -1,5 +1,11 @@
 # Verification — 2026-10-01
 
+## Service-lock test cleanup correction
+
+[PR #8](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/8) delivered the private personal-expression implementation at `375ba93`; its [candidate CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36759070254) passed. The initial [merged-main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36759371326) failed in the existing two-process dead-receipt test during cleanup. The test had already asserted exactly one started server and one expected lock rejection, then wrote a stop message to both children. The rejected child could already have exited, producing `EPIPE`. This failure is retained as evidence and is not overwritten by the earlier candidate success.
+
+The correction registers both child-close observations before reading startup results, sends the stop message only to the started server, waits for both closes and requires a clean winner exit. The exactly-one-owner and expected-rejection assertions remain, with a 15-second test bound. The corrected focused test passed **20/20** consecutive executions, the full Node suite passed **153/153**, and an independent non-author readback plus focused execution passed. These checks make zero provider calls. Only the test and this evidence record change; server, assets, knowledge and model behavior remain identical to the PR #8 source. New candidate and merged-main CI are separate required delivery gates.
+
 ## Private personal expression learning
 
 The delivered preceding baseline is [PR #7](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/7), merged at `818d7b5`, with successful [PR CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36754688809) and [main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36754981741). This addition has separate candidate evidence and must pass its own CI.

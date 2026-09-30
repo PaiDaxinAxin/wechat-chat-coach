@@ -403,7 +403,7 @@ test('explicit IPv6 loopback HTTP origin is accepted while remote plaintext orig
   await assert.rejects(createBetaServer({ webDir: null, publicOrigin: 'http://remote.invalid' }), { code: 'PUBLIC_ORIGIN_INVALID' });
 });
 
-test('two processes recovering a dead server receipt cannot both become service owner', async (t) => {
+test('two processes recovering a dead server receipt cannot both become service owner', { timeout: 15_000 }, async (t) => {
   const f = await fixture(t);
   await f.stop();
   await writeFile(join(f.dataDir, 'server.lock'), JSON.stringify({ pid: 2_000_000_000, workerId: 'dead-worker', createdAt: '2000-01-01T00:00:00Z' }));
@@ -414,10 +414,15 @@ await new Promise(resolve => server.listen(0,'127.0.0.1',resolve)); process.stdo
 process.stdin.once('data',()=>server.close(()=>process.exit(0))); }
 catch(error) { process.stdout.write(error.code + '\\n'); }`;
   const children = [0, 1].map(() => spawn(process.execPath, ['--input-type=module', '-e', script, f.dataDir, f.knowledgePath], { stdio: ['pipe', 'pipe', 'pipe'] }));
+  const closed = children.map((child) => new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal }))));
   t.after(() => children.forEach((child) => { if (!child.killed) child.kill(); }));
   const result = await Promise.all(children.map((child) => new Promise((resolve, reject) => { child.stdout.once('data', (chunk) => resolve(chunk.toString().trim())); child.once('error', reject); })));
   assert.equal(result.filter((value) => value === 'started').length, 1);
   assert.ok(result.some((value) => ['SERVICE_ALREADY_RUNNING', 'SERVICE_LOCK_UNVERIFIED'].includes(value)), JSON.stringify(result));
-  for (const child of children) child.stdin.end('stop');
-  await Promise.all(children.map((child) => child.exitCode !== null ? Promise.resolve() : new Promise((resolve) => child.once('close', resolve))));
+  // The rejected contender may have exited already. Only the running winner
+  // owns a server to stop; observing close up front avoids missing its exit.
+  const winner = result.indexOf('started');
+  children[winner].stdin.end('stop');
+  const exits = await Promise.all(closed);
+  assert.deepEqual(exits[winner], { code: 0, signal: null });
 });
