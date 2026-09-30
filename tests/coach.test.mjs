@@ -200,3 +200,29 @@ test('module import has no network or stdout side effects', async () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, '');
 });
+
+test('classification retains inferred provenance and time sources and semantically validates field coaching in its single native call', async () => {
+  const context = { ...input, messages: [
+    { id: 'draft', speaker: 'self', text: '待发草稿。', provenance: 'inferred_from_followup', recordedAt: '2026-10-01T08:00:00.000Z', wechatTime: null, replyInterval: null },
+    { ...input.messages[0], provenance: 'user_entered', recordedAt: '2026-10-01T09:00:00.000Z', wechatTime: { at: '2026-10-01T08:50:00.000Z', source: 'user_reported', editedAt: '2026-10-01T09:00:00.000Z' }, replyInterval: { fromAt: '2026-10-01T08:00:00.000Z', toAt: '2026-10-01T09:00:00.000Z', elapsedMs: 3_600_000, fromSource: 'clipboard_copied', toSource: 'counterpart_text_recorded', reliability: 'app_interval_estimate', interpretation: 'not_verified_wechat_latency' } },
+  ] };
+  const field = { currentTopic: '最近的工作状态', topicStatus: 'developing', topicMessageIds: ['m1'], initiative: '轻度真诚评价，再自然展开。', nextAction: '看她是否继续聊。', warmingLayer: 'A', reason: '主动轻度尝试一次。' };
+  const value = { ...validClassification(), fieldCoach: field };
+  let calls = 0;
+  const fetchImpl = async (_url, request) => {
+    calls++;
+    const body = JSON.parse(request.body);
+    assert.equal(body.messages[1].content, knowledgeText);
+    const nativeSchema = body.tools[0].function.parameters.properties.fieldCoach;
+    assert.equal(nativeSchema.additionalProperties, false);
+    assert.deepEqual(nativeSchema.properties.warmingLayer.enum, ['A', 'B', 'C', 'none']);
+    assert.match(body.messages[2].content, /"provenance":"inferred_from_followup"/);
+    assert.match(body.messages[2].content, /"source":"user_reported"/);
+    assert.match(body.messages[2].content, /"reliability":"app_interval_estimate"/);
+    assert.match(body.messages[0].content, /C是明显私密或亲密暗示/);
+    return mockResponse(value)();
+  };
+  assert.deepEqual((await classifyChat(context, { knowledgeText, env, fetchImpl })).fieldCoach, field); assert.equal(calls, 1);
+  await assert.rejects(classifyChat(context, { knowledgeText, env, fetchImpl: mockResponse({ ...value, fieldCoach: { ...field, currentTopic: '声称知道话题', topicStatus: 'unknown', topicMessageIds: [] } }) }), { code: 'invalid_model_output' });
+  await assert.rejects(classifyChat(context, { knowledgeText, env, fetchImpl: mockResponse({ ...value, fieldCoach: { ...field, warmingLayer: 'C' } }) }), { code: 'invalid_model_output' });
+});

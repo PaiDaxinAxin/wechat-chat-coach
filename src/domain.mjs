@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { ChatMessageSchema } from './chat-record.mjs';
 
 export class DomainError extends Error {
   constructor(code) {
@@ -152,7 +153,7 @@ export function analyzeQuestionnaire(questionnaire) {
 
 const StoredProfileSchema = ProfileInputSchema.extend({ questionnaireVersion: z.string().optional(), questionnaireHypotheses: z.unknown().optional() });
 const StoredCounterpartSchema = CounterpartInputSchema.extend({ id: z.string().optional(), updatedAt: z.string().optional(), createdAt: z.string().optional() });
-const MessageSchema = z.object({ id: requiredText(128), speaker: z.enum(['self', 'other']), text: requiredText(20_000) });
+const MessageSchema = ChatMessageSchema.strip().extend({ id: requiredText(128), text: requiredText(20_000) });
 
 export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting } = {}) {
   const profile = parse(StoredProfileSchema, profileInput, 'PROFILE_REQUIRED');
@@ -170,7 +171,7 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
       answers: QUESTIONNAIRES[profile.questionnaire.kind].map((item) => ({ ...item, answer: profile.questionnaire.answers[item.id] })),
     },
     questionnaireHypotheses: analyzeQuestionnaire(profile.questionnaire),
-    interpretationRule: 'Keep real background, current expression and learning goals separate. Questionnaire summaries are self-report hypotheses; prefer actual conversation evidence. Do not fabricate identity or experiences.',
+    interpretationRule: 'Keep real background, current expression and learning goals separate. Questionnaire summaries are self-report hypotheses; prefer actual conversation evidence. Do not fabricate identity or experiences. One round is one complete topic, not one message. By default proactively attempt one mild A warming per complete topic, then adapt to feedback; 10–20 messages is only a topic check-in reference. A is a shallow sincere evaluation or definition, B the male-to-female romantic frame, and C a clear private or intimate implication; comfort and positive interaction are prerequisites for C rather than its definition. Unknown does not justify C; respect explicit refusals.',
   };
   return {
     userProfile: JSON.stringify(personalContext),

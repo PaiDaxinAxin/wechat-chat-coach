@@ -81,16 +81,17 @@ server = await createBetaServer({
     return {
       status: 'ready', confidence: 'moderate', phase: 'ordinary',
       obstacle: { type: 'none', evidenceIds: [], reason: '双方在接同一个话题。' },
-      heat: { activeInteraction: observed, responseEngagement: { level: 'positive', evidenceIds: [ids[0], ids.at(-1)] }, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+      heat: { activeInteraction: observed, responseEngagement: { level: 'positive', evidenceIds: [...new Set([ids[0], ids.at(-1)])] }, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
       options: [['up', 0.6], ['down', 0.1], ['sideways', 0.3]].map(([topicMove, weight]) => ({ topicMove, weight, relationAction: 'continue', reason: '结合工作话题继续了解。', evidenceIds: [ids.at(-1)] })),
       uncertainties: ['没有线下安排的证据。'], recommendationKind: 'uncalibrated',
+      fieldCoach: { currentTopic: '工作与生活', topicStatus: 'developing', topicMessageIds: [ids.at(-1)], initiative: '分享真实经历，让交流更双向。', nextAction: '继续当前具体话题。', warmingLayer: 'none', reason: '她仍在展开话题。' },
     };
   },
   replyFn: async ({ context, direction }, options) => {
     replies++;
     assert.ok(options.knowledgeText.startsWith(originalKnowledge));
     assert.equal(JSON.parse(context.userProfile).questionnaire.answers.length, 10);
-    assert.equal(direction, 'down');
+    assert.ok(direction === 'down' || direction === undefined);
     return { reply: '最近哪个项目，让你最有成就感？', reason: '继续了解她已经展开的具体经历。', action: 'reply', styleNote: '保留直接简短的表达。' };
   },
 });
@@ -202,31 +203,49 @@ try {
   for (const [speaker, text] of [['other', '最近一直在忙工作。'], ['self', '你是做设计方面的吗？'], ['other', '对，最近在做新项目。你平时下班喜欢做什么？']]) {
     await page.locator('#message-speaker').selectOption(speaker);
     await page.locator('#message-text').fill(text);
-    await waitRequest(`/api/counterparts/${id}/messages`, 'POST', () => page.locator('#save-message').click());
+    await waitRequest(`/api/counterparts/${id}/${speaker === 'other' ? 'followup' : 'messages'}`, 'POST', () => page.locator('#save-message').click());
     await page.locator('.message-bubble').filter({ hasText: text }).waitFor();
+    if (speaker === 'other') await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   }
-  await waitRequest(`/api/counterparts/${id}/classify`, 'POST', () => page.locator('#classify').click());
   await page.locator('[data-direction=down]').waitFor();
   assert.equal(await page.locator('#direction-options button').count(), 3);
-  assert.equal(classifications, 1);
+  assert.equal(classifications, 2);
+  assert.ok((await page.locator('[data-direction=down]').textContent()).includes('10%'));
   await waitRequest(`/api/counterparts/${id}/classify`, 'POST', () => page.locator('#classify').click());
-  assert.equal(classifications, 1, 'replay must not invoke classifier');
-  await page.locator('[data-direction=down]').click();
-  await waitRequest(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('#chosen-reply').click());
+  assert.equal(classifications, 2, 'replay must not invoke classifier');
+  await waitRequest(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
   assert.equal(replies, 1);
   const sent = '最近哪个项目，让你挺有成就感的？';
   await page.locator('#suggestion-text').fill(sent);
-  await waitRequest(`/api/counterparts/${id}/sent`, 'POST', () => page.locator('#record-sent').click());
-  await page.locator('#sent-state').filter({ hasText: '已记录' }).waitFor();
-  await page.locator('#reply-feedback').click();
-  await page.locator('#feedback-kind').selectOption('positive');
-  await page.locator('#feedback-reply').fill('上次做的店铺设计，花了不少心思。');
-  await page.locator('#feedback-observation').fill('她展开了具体经历。这是匿名流程测试，不能证明真实效果。');
-  await page.locator('#feedback-consent').check();
-  await waitRequest(`/api/counterparts/${id}/feedback`, 'POST', () => page.locator('#feedback-form button[type=submit]').click());
-  await page.locator('#feedback-state').filter({ hasText: '未清洗' }).waitFor();
+  await page.locator('#message-text').fill('上次做的店铺设计，花了不少心思。');
+  const followupRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${id}/followup`) && r.method() === 'POST');
+  const followup = await waitRequest(`/api/counterparts/${id}/followup`, 'POST', () => page.locator('#save-message').click());
+  const savedBody = (await followupRequest).postDataJSON();
+  assert.equal(followup.previousMessage.provenance, 'inferred_from_followup');
+  assert.equal(followup.previousMessage.text, sent);
+  assert.equal(followup.feedback.stage, 'raw_untrusted');
+  await page.locator('.message-bubble').filter({ hasText: '上次做的店铺设计，花了不少心思。' }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  assert.equal(classifications, 3);
+  const userMe = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+  const replay = await context.request.post(`${origin}/api/counterparts/${id}/followup`, { headers: { origin, 'x-csrf-token': userMe.csrfToken }, data: savedBody });
+  assert.equal(replay.status(), 200); assert.equal((await replay.json()).data.cached, true);
+  assert.equal(server.betaStore.listFeedback(owner.id).length, 1, 'Replayed followup cannot multiply feedback');
   assert.equal(await readFile(knowledgePath, 'utf8'), originalKnowledge, 'raw feedback cannot update knowledge');
+  await page.locator('#message-text').fill('今天又开始一个新项目了。');
+  const fallbackResponse = page.waitForResponse((response) => response.url().endsWith(`/api/counterparts/${id}/reply`) && response.request().method() === 'POST');
+  await waitRequest(`/api/counterparts/${id}/followup`, 'POST', () => page.locator('#save-message').click());
+  assert.equal((await fallbackResponse).status(), 200);
+  await page.locator('#coach-loading').waitFor({ state: 'hidden' });
+  await page.locator('#classification-summary').filter({ hasText: '试用已用完' }).waitFor();
+  assert.equal(classifications, 3, 'Exhausted trial must not call classifier');
+  assert.equal(replies, 2, 'New context falls back to direct reply');
+  assert.equal(await page.locator('#classify').isVisible(), false);
+  assert.ok(!(await page.locator('#direction-options').textContent()).includes('%'), 'Exhaustion never displays fabricated weights');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.waitForTimeout(150);
+  assert.equal(replies, 2, 'Saved direct reply prevents another automatic call on reload');
   await menuAction('#open-meeting');
   await page.locator('#meeting-kind').selectOption('confirmed');
   await page.locator('#meeting-time').fill('2026-10-03 19:00'); await page.locator('#meeting-place').fill('双方确认的示例咖啡店');
@@ -242,7 +261,12 @@ try {
   await page.screenshot({ path: join(evidenceDir, 'desktop.png'), fullPage: true });
   await page.reload();
   await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#record-sent').isDisabled(), true, 'sent version persists after reload');
+  assert.equal(await page.locator('.message.self').filter({ hasText: sent }).count(), 1, 'Inferred prior expression persists');
+  await page.locator('#coach-loading').waitFor({ state: 'hidden' });
+  assert.equal(replies, 3, 'Changed meeting context gets one new fallback on opening');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.waitForTimeout(150);
+  assert.equal(replies, 3, 'Unchanged meeting context reuses the saved fallback');
   await menuAction('#logout'); await page.locator('#auth').waitFor({ state: 'visible' });
   await register('test-paid', paidInvite); await profile('full');
   assert.equal(await page.locator('#counterpart-select option:not([value=""])').count(), 0, 'second account cannot see first account object');
@@ -251,13 +275,11 @@ try {
   await menuAction('#admin-nav');
   await page.locator('.feedback-review').waitFor();
   await waitRequest('/clean', 'POST', () => page.getByRole('button', { name: '清洗这条反馈' }).click());
-  const review = page.locator('.feedback-review');
-  await review.getByPlaceholder('这条经验适用于什么情境？').fill('双方围绕工作互相提问的匿名流程测试。');
-  await review.getByPlaceholder('证据局限、例外或不适用情况').fill('仅为内测流程样例，不代表真实聊天效果，不构成因果证据。');
-  await waitRequest('/review', 'POST', () => page.getByRole('button', { name: '批准指定用途' }).click());
+  const review = page.locator('.feedback-review').first();
+  await review.getByRole('button', { name: '批准指定用途' }).waitFor();
+  assert.equal(await review.getByRole('button', { name: '批准指定用途' }).isDisabled(), true, 'Inferred and non-consented feedback cannot be promoted');
   const updatedKnowledge = await readFile(knowledgePath, 'utf8');
-  assert.ok(updatedKnowledge.startsWith(originalKnowledge));
-  assert.ok(updatedKnowledge.includes('Reviewed feedback candidate'));
+  assert.equal(updatedKnowledge, originalKnowledge);
   const sourceBody = (text) => text.split(SOURCE_START)[1].split(SOURCE_END)[0];
   assert.equal(sourceBody(updatedKnowledge), sourceBody(originalKnowledge));
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
@@ -270,8 +292,8 @@ try {
   await waitRequest(`/api/counterparts/${id}`, 'DELETE', () => page.locator('#delete-counterpart').click());
   await page.locator('#counterpart-workspace').waitFor({ state: 'hidden' });
   assert.equal(server.betaStore.listCounterparts(server.betaStore.listUsers(owner.id).find(({ username }) => username === 'test-free').id).length, 0);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, transport: httpsProxyMode ? 'local-self-signed-https-proxy' : 'local-http', publicAccessVerified: false, browser: browser.version(), checks: ['session cookie attributes and authenticated transport', 'same-origin and CSRF rejection', 'Host rejection', 'private paths unavailable', 'invite registration', 'short/full questionnaires', 'counterpart intake', 'conversation', 'classification replay', 'lower-weight choice', 'editable reply', 'manual sent persistence', 'raw isolation', 'meeting confirmation', 'mobile layout at 390px and 320px', 'account isolation', 'clean-review-knowledge append', 'source preservation', 'counterpart deletion'], classifications, replies, pageErrors }, null, 2) + '\n');
-  console.log(`Browser beta journey passed (${httpsProxyMode ? 'local self-signed HTTPS proxy' : 'local HTTP'}): registration → profile → conversation → direction → edited sent version → feedback → owner review, including cookie/origin/CSRF/Host/private-path checks. Zero paid model calls; public access is not verified.`);
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, transport: httpsProxyMode ? 'local-self-signed-https-proxy' : 'local-http', publicAccessVerified: false, browser: browser.version(), checks: ['session cookie attributes and authenticated transport', 'same-origin and CSRF rejection', 'Host rejection', 'private paths unavailable', 'invite registration', 'short/full questionnaires', 'counterpart intake', 'conversation', 'classification replay', 'lower-weight choice', 'editable reply', 'inferred followup persistence', 'raw feedback replay isolation', 'three-use exhaustion and direct fallback', 'meeting confirmation', 'mobile layout at 390px and 320px', 'account isolation', 'non-consented inferred feedback quarantined', 'source preservation', 'counterpart deletion'], classifications, replies, pageErrors }, null, 2) + '\n');
+  console.log(`Browser beta journey passed (${httpsProxyMode ? 'local self-signed HTTPS proxy' : 'local HTTP'}): registration → profile → conversation → direction → edited reply → inferred followup → isolated owner review, including cookie/origin/CSRF/Host/private-path checks. Zero paid model calls; public access is not verified.`);
 } catch (error) {
   await page.screenshot({ path: join(evidenceDir, 'failure.png'), fullPage: true }).catch(() => {});
   throw error;
