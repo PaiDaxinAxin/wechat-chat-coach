@@ -246,7 +246,7 @@ export async function createBetaServer({
       const classificationHash = contextHash(context, knowledgeSnapshot.hash, 'classify');
       const directHash = contextHash(context, knowledgeSnapshot.hash, 'reply');
       const directJob = store.latestSuccessful(userId, counterpartId, 'reply', directHash);
-      return { directReply: directJob?.result?.suggestion ?? null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, contextHash(context, knowledgeSnapshot.hash, 'conversation')), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
+      return { directReply: directJob?.result?.suggestion ? store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, contextHash(context, knowledgeSnapshot.hash, 'conversation')), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
       throw error;
@@ -254,6 +254,7 @@ export async function createBetaServer({
   }
 
   async function runModel(userId, counterpartId, operation, input) {
+    const currentResult = (result) => result.suggestion ? { ...result, suggestion: store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
     const knowledgeSnapshot = await knowledge.read();
     const context = chatSnapshot(userId, counterpartId, { intent: operation === 'reply' ? input.intent : undefined });
     const hash = contextHash(context, knowledgeSnapshot.hash, operation, input);
@@ -269,12 +270,12 @@ export async function createBetaServer({
       choice: { requestedDirection: input.direction ?? null, source: operation === 'classify' ? 'classification' : operation === 'coach_plan' ? 'user_plan' : input.direction ? 'user_choice' : 'direct_reply', classificationJobId: classified?.id ?? null, classificationResult: classified?.result ?? null } };
     const reserved = store.reserveJob({ userId, counterpartId, operation, requestId: input.requestId, contextHash: hash, knowledgeHash: knowledgeSnapshot.hash, workerId: lock.workerId, providerModel: model, contextSnapshot });
     if (!reserved.fresh) {
-      if (reserved.job.state === 'succeeded') return { ...reserved.job.result, cached: true, quota: store.quota(userId) };
+      if (reserved.job.state === 'succeeded') return { ...currentResult(reserved.job.result), cached: true, quota: store.quota(userId) };
       if (reserved.job.state === 'failed') throw new BetaError(reserved.job.errorCode ?? 'JOB_INTERRUPTED', 409);
       const running = inFlight.get(reserved.job.id);
       if (!running) throw new BetaError('JOB_IN_PROGRESS', 409);
       const result = await running;
-      return { ...result, cached: true, quota: store.quota(userId) };
+      return { ...currentResult(result), cached: true, quota: store.quota(userId) };
     }
     const job = reserved.job;
     const pending = (async () => {
@@ -308,7 +309,7 @@ export async function createBetaServer({
       }
     })();
     inFlight.set(job.id, pending);
-    try { return { ...await pending, cached: false, quota: store.quota(userId) }; }
+    try { return { ...currentResult(await pending), cached: false, quota: store.quota(userId) }; }
     finally { if (inFlight.get(job.id) === pending) inFlight.delete(job.id); }
   }
 

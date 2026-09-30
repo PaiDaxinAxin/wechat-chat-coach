@@ -149,6 +149,7 @@ export function createBetaStore({
   addColumn('followup_receipts', 'previous_suggestion_id', 'TEXT');
   addColumn('followup_receipts', 'previous_reply_hash', 'TEXT');
   addColumn('followup_receipts', 'counterpart_text_hash', 'TEXT');
+  addColumn('followup_receipts', 'copy_receipt_id', 'TEXT');
   db.exec(`CREATE TRIGGER IF NOT EXISTS model_snapshot_immutable BEFORE UPDATE OF context_snapshot_json,snapshot_hash ON model_jobs
     WHEN OLD.context_snapshot_json IS NOT NEW.context_snapshot_json OR OLD.snapshot_hash IS NOT NEW.snapshot_hash
     BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_CASE_SNAPSHOT'); END;`);
@@ -184,6 +185,36 @@ export function createBetaStore({
     return { id: row.id, speaker: row.speaker, text: row.text, suggestionId: row.suggestion_id, provenance: row.provenance, recordedAt: row.created_at, wechatTime, replyInterval, createdAt: row.created_at, updatedAt: row.updated_at };
   };
   const touch = (id) => run('UPDATE counterparts SET revision=revision+1,updated_at=? WHERE id=?', timestamp(), id);
+  const suggestionSource = (row) => {
+    const job = row.origin_job_id ? get('SELECT * FROM model_jobs WHERE id=? AND user_id=? AND counterpart_id=?', row.origin_job_id, row.user_id, row.counterpart_id) : null;
+    return { suggestion: { ...parse(row.value_json), createdAt: row.created_at }, originJobId: row.origin_job_id ?? null, status: job?.context_snapshot_json ? 'complete' : 'legacy_incomplete', snapshot: parse(job?.context_snapshot_json), snapshotHash: job?.snapshot_hash ?? null };
+  };
+  const consumedSource = (userId, counterpartId, suggestionId, text, copy) => copy
+    ? get('SELECT * FROM followup_receipts WHERE user_id=? AND counterpart_id=? AND previous_suggestion_id=? AND previous_reply_hash=? AND (copy_receipt_id=? OR (copy_receipt_id IS NULL AND created_at>=?)) ORDER BY created_at LIMIT 1', userId, counterpartId, suggestionId, digest(text), copy.id, copy.copied_at)
+    : get('SELECT * FROM followup_receipts WHERE user_id=? AND counterpart_id=? AND previous_suggestion_id=? AND previous_reply_hash=? AND copy_receipt_id IS NULL ORDER BY created_at LIMIT 1', userId, counterpartId, suggestionId, digest(text));
+  const pendingState = (row, source, { replyText, copy } = {}) => {
+    const baseline = source.snapshot?.modelInput?.messages;
+    const baselineMessages = Array.isArray(baseline) ? new Map(baseline.map((message) => [message.id, message])) : null;
+    const laterSelf = all("SELECT * FROM messages WHERE user_id=? AND counterpart_id=? AND speaker='self' ORDER BY seq", row.user_id, row.counterpart_id)
+      .filter((message) => baselineMessages ? baselineMessages.get(message.id)?.speaker !== 'self' || baselineMessages.get(message.id)?.text !== message.text : message.updated_at >= row.created_at);
+    if (copy === undefined) copy = replyText === undefined
+      ? get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id)
+      : get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id, replyText);
+    const matchingCopy = copy && (replyText === undefined || copy.copied_text === replyText) ? copy : null;
+    const copyRestores = matchingCopy && laterSelf.every((message) => Date.parse(matchingCopy.copied_at) > Date.parse(message.updated_at));
+    const superseded = laterSelf.length > 0 && !copyRestores;
+    const manualSuperseded = superseded && laterSelf.some((message) => message.provenance !== 'inferred_from_followup' && (!matchingCopy || Date.parse(matchingCopy.copied_at) <= Date.parse(message.updated_at)));
+    const activeCopy = superseded ? null : matchingCopy;
+    const text = replyText ?? activeCopy?.copied_text ?? source.suggestion.reply;
+    const consumed = consumedSource(row.user_id, row.counterpart_id, row.id, text, matchingCopy);
+    const eligible = !superseded && !consumed;
+    return { eligible, superseded, manualSuperseded, copy: eligible ? activeCopy : null, consumed,
+      metadata: { pendingEligible: eligible, pendingCopyReceiptId: eligible ? activeCopy?.id ?? null : null, pendingReplyText: eligible ? activeCopy?.copied_text ?? null : null } };
+  };
+  const suggestionValue = (row) => {
+    const source = suggestionSource(row);
+    return { ...source.suggestion, ...pendingState(row, source).metadata };
+  };
   const jobValue = (row) => row ? ({ id: row.id, userId: row.user_id, counterpartId: row.counterpart_id, operation: row.operation, requestId: row.request_id, contextHash: row.context_hash, knowledgeHash: row.knowledge_hash, state: row.state, result: parse(row.result_json), errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at, workerId: row.worker_id, cacheOf: row.cache_of }) : null;
   const budget = (subject, forDay) => { run('INSERT OR IGNORE INTO provider_budget(subject,day) VALUES(?,?)', subject, forDay); return get('SELECT * FROM provider_budget WHERE subject=? AND day=?', subject, forDay); };
   const providerLimit = (account) => account.plan === 'paid' ? paidProviderDailyLimit : freeProviderDailyLimit;
@@ -355,14 +386,14 @@ export function createBetaStore({
       audit(userId, 'meeting_saved', counterpartId, { status: value.status });
       return value;
     },
-    listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY created_at', userId, counterpartId).map((row) => ({ ...parse(row.value_json), createdAt: row.created_at })); },
-    getSuggestion(userId, counterpartId, id) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return parse(row.value_json); },
+    listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY created_at', userId, counterpartId).map(suggestionValue); },
+    getSuggestion(userId, counterpartId, id) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return suggestionValue(row); },
     getSuggestionCase(userId, counterpartId, id) {
       counterpartRow(userId, counterpartId);
       const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId);
       if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404);
-      const job = row.origin_job_id ? get('SELECT * FROM model_jobs WHERE id=? AND user_id=? AND counterpart_id=?', row.origin_job_id, userId, counterpartId) : null;
-      return { suggestion: { ...parse(row.value_json), createdAt: row.created_at }, originJobId: row.origin_job_id ?? null, status: job?.context_snapshot_json ? 'complete' : 'legacy_incomplete', snapshot: parse(job?.context_snapshot_json), snapshotHash: job?.snapshot_hash ?? null };
+      const source = suggestionSource(row);
+      return { ...source, suggestion: { ...source.suggestion, ...pendingState(row, source).metadata } };
     },
     recordReplyCopy(userId, counterpartId, suggestionId, { copiedText, requestId }) {
       counterpartRow(userId, counterpartId);
@@ -390,22 +421,26 @@ export function createBetaStore({
           if (prior.payload_hash !== payloadHash) throw new BetaError('FOLLOWUP_REQUEST_CONFLICT', 409);
           return { ...parse(prior.result_json), cached: true };
         }
-        const source = previousSuggestionId ? this.getSuggestionCase(userId, counterpartId, previousSuggestionId) : null;
-        if (source) {
-          const consumed = get('SELECT * FROM followup_receipts WHERE user_id=? AND counterpart_id=? AND previous_suggestion_id=? AND previous_reply_hash=? ORDER BY created_at LIMIT 1', userId, counterpartId, previousSuggestionId, digest(previousReplyText));
-          if (consumed) {
-            if (consumed.counterpart_text_hash !== digest(text)) throw new BetaError('FOLLOWUP_SOURCE_ALREADY_LINKED', 409);
-            const result = parse(consumed.result_json);
-            run('INSERT INTO followup_receipts(id,user_id,counterpart_id,request_id,payload_hash,result_json,created_at,previous_suggestion_id,previous_reply_hash,counterpart_text_hash) VALUES(?,?,?,?,?,?,?,?,?,?)', randomUUID(), userId, counterpartId, requestId, payloadHash, consumed.result_json, timestamp(), previousSuggestionId, digest(previousReplyText), digest(text));
-            return { ...result, cached: true };
-          }
-        }
+        let source = previousSuggestionId ? this.getSuggestionCase(userId, counterpartId, previousSuggestionId) : null;
         let copy;
         if (previousCopyReceiptId) {
           copy = get('SELECT * FROM reply_copy_receipts WHERE id=? AND user_id=? AND counterpart_id=?', previousCopyReceiptId, userId, counterpartId);
           if (!copy || copy.suggestion_id !== previousSuggestionId) throw new BetaError('COPY_RECEIPT_NOT_FOUND', 404);
           if (copy.copied_text !== previousReplyText) copy = null;
         } else if (source && previousReplyText) copy = get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText);
+        let associatedSuggestionId = previousSuggestionId, associatedReplyText = previousReplyText;
+        if (source) {
+          const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', previousSuggestionId, userId, counterpartId);
+          const state = pendingState(row, source, { replyText: previousReplyText, copy });
+          if (state.consumed && !state.manualSuperseded) {
+            if (state.consumed.counterpart_text_hash !== digest(text)) throw new BetaError('FOLLOWUP_SOURCE_ALREADY_LINKED', 409);
+            const result = parse(state.consumed.result_json);
+            run('INSERT INTO followup_receipts(id,user_id,counterpart_id,request_id,payload_hash,result_json,created_at,previous_suggestion_id,previous_reply_hash,counterpart_text_hash,copy_receipt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), userId, counterpartId, requestId, payloadHash, state.consumed.result_json, timestamp(), previousSuggestionId, digest(previousReplyText), digest(text), state.consumed.copy_receipt_id ?? null);
+            return { ...result, cached: true };
+          }
+          if (!state.eligible) { source = null; copy = null; associatedSuggestionId = undefined; associatedReplyText = undefined; }
+          else copy = state.copy;
+        }
         const createdAt = timestamp();
         const fromAt = copy?.copied_at ?? source?.suggestion.createdAt ?? null;
         const delta = fromAt ? Date.parse(createdAt) - Date.parse(fromAt) : null;
@@ -416,23 +451,25 @@ export function createBetaStore({
           run('INSERT INTO messages(id,user_id,counterpart_id,speaker,text,suggestion_id,provenance,created_at,updated_at,reply_interval_json) VALUES(?,?,?,?,?,?,?,?,?,?)', id, userId, counterpartId, speaker, content, suggestionId ?? null, provenance, createdAt, createdAt, interval ? json(interval) : null);
           return messageValue(get('SELECT * FROM messages WHERE id=?', id));
         };
-        const previousMessage = previousReplyText ? insertMessage('self', previousReplyText, previousSuggestionId, 'inferred_from_followup', null) : null;
+        const lastRecorded = get('SELECT id,speaker FROM messages WHERE user_id=? AND counterpart_id=? ORDER BY seq DESC LIMIT 1', userId, counterpartId);
+        const previousMessage = associatedReplyText ? insertMessage('self', associatedReplyText, associatedSuggestionId, 'inferred_from_followup', null) : null;
         const message = insertMessage('other', text, null, 'user_entered', timing);
-        if (previousMessage) run('UPDATE messages SET reply_to_message_id=? WHERE id=?', previousMessage.id, message.id);
+        const linkedSelf = previousMessage?.id ?? (lastRecorded?.speaker === 'self' ? lastRecorded.id : null);
+        if (linkedSelf) run('UPDATE messages SET reply_to_message_id=? WHERE id=?', linkedSelf, message.id);
         let feedback = null;
         if (previousMessage) {
           const id = randomUUID();
           const envelope = { id, createdAt, sourceMode: 'beta_followup', sourceAccountId: userId, stage: 'raw_untrusted', outcome: 'unknown', consent: false, automaticPromotionAllowed: false,
-            payload: { suggestionId: previousSuggestionId ?? '', actualSentText: previousReplyText, counterpartReply: text, observation: '', kind: 'uncertain', consent: false },
-            caseEvidence: { originJobId: source?.originJobId ?? null, contextStatus: source?.status ?? 'legacy_incomplete', suggestionId: previousSuggestionId ?? null, previousMessage, counterpartMessage: message, timing, actualSend: 'inferred_from_followup', outcomeSource: 'user_reported' } };
+            payload: { suggestionId: associatedSuggestionId ?? '', actualSentText: associatedReplyText, counterpartReply: text, observation: '', kind: 'uncertain', consent: false },
+            caseEvidence: { originJobId: source?.originJobId ?? null, contextStatus: source?.status ?? 'legacy_incomplete', suggestionId: associatedSuggestionId ?? null, previousMessage, counterpartMessage: message, timing, copyReceiptId: copy?.id ?? null, actualSend: 'inferred_from_followup', outcomeSource: 'user_reported' } };
           run('INSERT INTO feedback VALUES(?,?,?,?,?,NULL,NULL,?,?)', id, userId, counterpartId, 'raw_untrusted', json(envelope), createdAt, createdAt);
           feedback = { id, stage: 'raw_untrusted' };
           audit(userId, 'followup_feedback_received', id, { stage: 'raw_untrusted', consent: false, actualSend: 'inferred_from_followup', outcome: 'unknown' });
         }
         touch(counterpartId);
         const result = { message, previousMessage, feedback, timing };
-        run('INSERT INTO followup_receipts(id,user_id,counterpart_id,request_id,payload_hash,result_json,created_at,previous_suggestion_id,previous_reply_hash,counterpart_text_hash) VALUES(?,?,?,?,?,?,?,?,?,?)', randomUUID(), userId, counterpartId, requestId, payloadHash, json(result), createdAt, previousSuggestionId ?? null, previousReplyText ? digest(previousReplyText) : null, digest(text));
-        audit(userId, 'followup_recorded', message.id, { previousSuggestionId: previousSuggestionId ?? null, inferredPreviousReply: Boolean(previousMessage) });
+        run('INSERT INTO followup_receipts(id,user_id,counterpart_id,request_id,payload_hash,result_json,created_at,previous_suggestion_id,previous_reply_hash,counterpart_text_hash,copy_receipt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), userId, counterpartId, requestId, payloadHash, json(result), createdAt, associatedSuggestionId ?? null, associatedReplyText ? digest(associatedReplyText) : null, digest(text), copy?.id ?? null);
+        audit(userId, 'followup_recorded', message.id, { previousSuggestionId: associatedSuggestionId ?? null, ignoredSuggestionId: previousSuggestionId && !associatedSuggestionId ? previousSuggestionId : null, inferredPreviousReply: Boolean(previousMessage) });
         return { ...result, cached: false };
       });
     },

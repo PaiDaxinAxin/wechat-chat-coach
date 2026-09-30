@@ -358,3 +358,147 @@ test('model failure diagnostics preserve only allowlisted fixed categories and s
   assert.equal(detail.modelContext.classificationAttempted, true); assert.doesNotMatch(JSON.stringify(detail), /diagnostics|private-model-or-input/);
   assert.equal(calls, 1);
 });
+
+test('manual self wording supersedes a prior AI draft atomically even with equal timestamps and a directly stale API body', async (t) => {
+  const f = await fixture(t); const id = await f.addContext();
+  const a = (await f.call('POST', `/api/counterparts/${id}/reply`, { requestId: 'manual_priority_a' }, f.session)).data.suggestion;
+  assert.equal(a.pendingEligible, true); assert.equal(a.pendingCopyReceiptId, null);
+  const originalCase = f.server.betaStore.getSuggestionCase(f.owner.id, id, a.id).snapshot;
+  const copy = (await f.call('POST', `/api/counterparts/${id}/suggestions/${a.id}/copied`, { requestId: 'manual_priority_old_copy', copiedText: a.reply }, f.session)).data.copyReceipt;
+  const b = (await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: 'B：这是我真正录入的本人原话。' }, f.session)).data.message;
+  const detail = (await f.call('GET', `/api/counterparts/${id}`, undefined, f.session)).data;
+  assert.equal(detail.suggestions.find(({ id: sid }) => sid === a.id).pendingEligible, false);
+  const body = { requestId: 'manual_priority_c', text: 'C：对方继续的话。', previousSuggestionId: a.id, previousReplyText: a.reply, previousCopyReceiptId: copy.id };
+  const responses = await Promise.all(Array.from({ length: 4 }, () => f.call('POST', `/api/counterparts/${id}/followup`, body, f.session)));
+  assert.equal(responses.filter(({ data }) => !data.cached).length, 1);
+  const c = responses[0].data;
+  assert.equal(c.previousMessage, null); assert.equal(c.feedback, null); assert.equal(c.timing.fromAt, null); assert.equal(c.timing.reliability, 'unknown');
+  assert.deepEqual(f.server.betaStore.listMessages(f.owner.id, id).map(({ speaker, text }) => [speaker, text]), [['other', '最近一直忙工作，你呢？'], ['self', b.text], ['other', body.text]]);
+  await f.call('PATCH', `/api/counterparts/${id}/messages/${b.id}/timing`, { actualWechatAt: new Date(f.clock - 3_600_000).toISOString() }, f.session);
+  const timed = (await f.call('PATCH', `/api/counterparts/${id}/messages/${c.message.id}/timing`, { actualWechatAt: new Date(f.clock).toISOString() }, f.session)).data.message;
+  assert.equal(timed.replyInterval.elapsedMs, 3_600_000); assert.equal(timed.replyInterval.reliability, 'user_reported_interval');
+  assert.equal(timed.replyInterval.interpretation, 'not_verified_wechat_latency');
+  assert.equal(timed.recordedAt, c.message.recordedAt);
+  assert.deepEqual(f.server.betaStore.getSuggestionCase(f.owner.id, id, a.id).snapshot, originalCase);
+  await f.restart();
+  assert.equal((await f.call('POST', `/api/counterparts/${id}/followup`, body, f.session)).data.cached, true);
+  assert.equal(f.server.betaStore.listMessages(f.owner.id, id).length, 3);
+  const next = (await f.call('POST', `/api/counterparts/${id}/reply`, { requestId: 'new_reply_after_manual_b' }, f.session)).data.suggestion;
+  assert.equal(next.pendingEligible, true);
+  const continued = await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'new_reply_followup', text: '新的回应。', previousSuggestionId: next.id, previousReplyText: '本轮编辑草稿。' }, f.session);
+  assert.equal(continued.data.previousMessage.text, '本轮编辑草稿。'); assert.equal(continued.data.previousMessage.provenance, 'inferred_from_followup');
+  assert.equal(f.calls, 2);
+});
+
+test('a new matching history copy restores a superseded draft, while text mismatch does not, and each copy has separate consumption', async (t) => {
+  const f = await fixture(t); const id = await f.addContext();
+  const suggestion = (await f.call('POST', `/api/counterparts/${id}/reply`, { requestId: 'history_copy_reply' }, f.session)).data.suggestion;
+  await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '后录入的本人原话。' }, f.session);
+  // A same-millisecond copy cannot establish that it occurred after that self record.
+  await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: 'history_copy_tie', copiedText: '历史编辑草稿。' }, f.session);
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, false);
+  f.advance(1);
+  const copy = (await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: 'history_copy_fresh', copiedText: '历史编辑草稿。' }, f.session)).data.copyReceipt;
+  const restored = f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id);
+  assert.equal(restored.pendingEligible, true); assert.equal(restored.pendingCopyReceiptId, copy.id); assert.equal(restored.pendingReplyText, '历史编辑草稿。');
+  const mismatched = await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'history_copy_mismatch', text: '并未对应复制草稿的新句。', previousSuggestionId: suggestion.id, previousReplyText: '复制后又编辑的不同草稿。', previousCopyReceiptId: copy.id }, f.session);
+  assert.equal(mismatched.data.previousMessage, null); assert.equal(mismatched.data.feedback, null); assert.equal(mismatched.data.timing.fromAt, null);
+  f.advance(1);
+  const firstBody = { requestId: 'history_copy_first_followup', text: '第一轮回应。', previousSuggestionId: suggestion.id, previousReplyText: '历史编辑草稿。', previousCopyReceiptId: copy.id };
+  const first = (await f.call('POST', `/api/counterparts/${id}/followup`, firstBody, f.session)).data;
+  assert.equal(first.previousMessage.text, '历史编辑草稿。'); assert.equal(first.timing.fromSource, 'clipboard_copied');
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, false);
+  const duplicate = await f.call('POST', `/api/counterparts/${id}/followup`, { ...firstBody, requestId: 'history_copy_same_quote' }, f.session);
+  assert.equal(duplicate.data.cached, true); assert.equal(duplicate.data.message.id, first.message.id); assert.deepEqual(duplicate.data.timing, first.timing);
+  f.advance(1);
+  const secondCopy = (await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: 'history_copy_again', copiedText: '历史编辑草稿。' }, f.session)).data.copyReceipt;
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, true);
+  f.advance(1);
+  const secondBody = { ...firstBody, requestId: 'history_copy_second_followup', text: '第二轮回应。', previousCopyReceiptId: secondCopy.id };
+  const second = (await f.call('POST', `/api/counterparts/${id}/followup`, secondBody, f.session)).data;
+  assert.equal(second.cached, false); assert.notEqual(second.message.id, first.message.id); assert.equal(second.timing.fromAt, secondCopy.copiedAt);
+  await f.restart();
+  assert.equal((await f.call('POST', `/api/counterparts/${id}/followup`, secondBody, f.session)).data.message.id, second.message.id);
+  assert.equal(f.server.betaStore.getFeedback(f.owner.id, second.feedback.id).raw.caseEvidence.copyReceiptId, secondCopy.id);
+  assert.equal(f.server.betaStore.getFeedback(f.owner.id, second.feedback.id).raw.caseEvidence.actualSend, 'inferred_from_followup');
+  assert.equal(f.calls, 1);
+});
+
+test('legacy suggestions conservatively yield to later self records without fabricating a missing snapshot', async (t) => {
+  const f = await fixture(t); const id = await f.addContext();
+  const reserved = f.server.betaStore.reserveJob({ userId: f.owner.id, counterpartId: id, operation: 'reply', requestId: 'manual_legacy', contextHash: 'legacy', knowledgeHash: 'legacy', workerId: 'fixture', providerModel: 'fixture' });
+  f.server.betaStore.markJobRunning(reserved.job.id);
+  const suggestion = { ...reply(), id: 'manual-legacy-suggestion', contextHash: 'legacy', knowledgeHash: 'legacy' };
+  f.server.betaStore.completeJob(reserved.job.id, { suggestion }, suggestion);
+  f.advance(1);
+  await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '本人的后来原话。' }, f.session);
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, false);
+  const source = f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id);
+  assert.equal(source.status, 'legacy_incomplete'); assert.equal(source.snapshot, null);
+  const followup = await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'manual_legacy_followup', text: '对方下一句。', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply }, f.session);
+  assert.equal(followup.data.previousMessage, null); assert.equal(followup.data.timing.fromAt, null); assert.equal(followup.data.feedback, null);
+});
+
+test('editing a baseline speaker or self text supersedes old drafts, and copying before that edit cannot restore them', async (t) => {
+  const f = await fixture(t);
+  for (const change of ['speaker', 'text']) {
+    const id = await f.addContext();
+    let target = f.server.betaStore.listMessages(f.owner.id, id)[0];
+    if (change === 'text') target = (await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '生成时已有的本人旧原话。' }, f.session)).data.message;
+    const suggestion = (await f.call('POST', `/api/counterparts/${id}/reply`, { requestId: `edit_baseline_reply_${change}` }, f.session)).data.suggestion;
+    const original = f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id).snapshot;
+    f.advance(1);
+    const beforeEdit = (await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: `edit_baseline_copy_${change}`, copiedText: suggestion.reply }, f.session)).data.copyReceipt;
+    f.advance(1);
+    await f.call('PUT', `/api/counterparts/${id}/messages/${target.id}`, { speaker: 'self', text: '修改后的本人原话。' }, f.session);
+    assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, false);
+    const stale = (await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: `edit_baseline_followup_${change}`, text: '对方接着说。', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply, previousCopyReceiptId: beforeEdit.id }, f.session)).data;
+    assert.equal(stale.previousMessage, null); assert.equal(stale.feedback, null); assert.equal(stale.timing.fromAt, null);
+    assert.deepEqual(f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id).snapshot, original);
+    await f.call('PATCH', `/api/counterparts/${id}/messages/${target.id}/timing`, { actualWechatAt: new Date(f.clock - 1_000).toISOString() }, f.session);
+    await f.call('PATCH', `/api/counterparts/${id}/messages/${stale.message.id}/timing`, { actualWechatAt: new Date(f.clock).toISOString() }, f.session);
+    assert.equal(f.server.betaStore.listMessages(f.owner.id, id).find(({ id: mid }) => mid === stale.message.id).replyInterval.elapsedMs, 1_000);
+    await f.call('PUT', `/api/counterparts/${id}/messages/${target.id}`, { speaker: 'other', text: '角色修正为对方。' }, f.session);
+    assert.equal(f.server.betaStore.listMessages(f.owner.id, id).find(({ id: mid }) => mid === stale.message.id).replyInterval, null);
+  }
+});
+
+test('draft-free followup links only the immediately preceding self record, never an older self across another counterpart message', async (t) => {
+  const f = await fixture(t); const id = await f.addContext();
+  const b = (await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '本人原话。' }, f.session)).data.message;
+  const first = (await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'manual_pair_first', text: '第一句回应。' }, f.session)).data;
+  const second = (await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'manual_pair_second', text: '连续第二句。' }, f.session)).data;
+  assert.equal(first.previousMessage, null); assert.equal(first.feedback, null); assert.equal(first.timing.reliability, 'unknown');
+  await f.call('PATCH', `/api/counterparts/${id}/messages/${b.id}/timing`, { actualWechatAt: new Date(f.clock - 1_000).toISOString() }, f.session);
+  await f.call('PATCH', `/api/counterparts/${id}/messages/${first.message.id}/timing`, { actualWechatAt: new Date(f.clock).toISOString() }, f.session);
+  await f.call('PATCH', `/api/counterparts/${id}/messages/${second.message.id}/timing`, { actualWechatAt: new Date(f.clock).toISOString() }, f.session);
+  const messages = f.server.betaStore.listMessages(f.owner.id, id);
+  assert.equal(messages.find(({ id: mid }) => mid === first.message.id).replyInterval.reliability, 'user_reported_interval');
+  assert.equal(messages.find(({ id: mid }) => mid === second.message.id).replyInterval.reliability, 'unknown');
+  assert.equal(messages.find(({ id: mid }) => mid === second.message.id).replyInterval.elapsedMs, null);
+});
+
+test('legacy same-ID edits use update time conservatively and a later matching copy restores without backfilling a case', async (t) => {
+  const f = await fixture(t); const id = await f.addContext();
+  const original = f.server.betaStore.listMessages(f.owner.id, id)[0];
+  f.advance(1_000);
+  const job = f.server.betaStore.reserveJob({ userId: f.owner.id, counterpartId: id, operation: 'reply', requestId: 'legacy_edit_source', contextHash: 'legacy-edit', knowledgeHash: 'legacy-edit', workerId: 'fixture', providerModel: 'fixture' });
+  f.server.betaStore.markJobRunning(job.job.id);
+  const suggestion = { ...reply(), id: 'legacy-edit-suggestion', contextHash: 'legacy-edit', knowledgeHash: 'legacy-edit' };
+  f.server.betaStore.completeJob(job.job.id, { suggestion }, suggestion);
+  f.advance(1_000);
+  await f.call('PUT', `/api/counterparts/${id}/messages/${original.id}`, { speaker: 'self', text: '更早消息后来改成的本人原话。' }, f.session);
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, false);
+  const skipped = (await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'legacy_edit_stale', text: '下一句。', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply }, f.session)).data;
+  assert.equal(skipped.previousMessage, null); assert.equal(skipped.feedback, null); assert.equal(skipped.timing.fromAt, null);
+  assert.deepEqual(f.server.betaStore.listMessages(f.owner.id, id).map(({ speaker }) => speaker), ['self', 'other']);
+  const before = f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id);
+  assert.equal(before.status, 'legacy_incomplete'); assert.equal(before.snapshot, null);
+  f.advance(1_000);
+  const copied = (await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: 'legacy_edit_new_copy', copiedText: suggestion.reply }, f.session)).data.copyReceipt;
+  assert.equal(f.server.betaStore.getSuggestion(f.owner.id, id, suggestion.id).pendingEligible, true);
+  const next = (await f.call('POST', `/api/counterparts/${id}/followup`, { requestId: 'legacy_edit_restored', text: '重新复制后的回应。', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply, previousCopyReceiptId: copied.id }, f.session)).data;
+  assert.equal(next.previousMessage.provenance, 'inferred_from_followup'); assert.equal(next.timing.fromSource, 'clipboard_copied');
+  const after = f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id);
+  assert.equal(after.status, 'legacy_incomplete'); assert.equal(after.snapshot, null); assert.equal(f.calls, 0);
+});
