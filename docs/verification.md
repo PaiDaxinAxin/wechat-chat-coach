@@ -10,6 +10,12 @@ Persistence checks cover whole-body UUID replay across restart, revision conflic
 
 The separate UI journey verifies editable-case capture, inactive candidates, explicit adoption and cross-object use, current/growth separation, replacement/stopping, profile/composer/pending-reply/plan preservation, lost-response replay, conflict recovery and delayed-response account/object isolation. Day/night screenshots use only fictional test records at 1280 px; narrow checks use 320 px. Reports and screenshots stay ignored under `runs/browser-style/`. This establishes the private technical loop, not actual personal-style likeness or dating effectiveness. Public hosting and access remain unselected.
 
+An independent non-author review of the frozen source passed the 13 focused tests and an actual synthetic browser check, with no unresolved P1/P2. It rechecked competing replacement rollback, account/private-read boundaries, the adopted-only projection, exact-version response observations and both themes at 320/437/1280 px.
+
+At fixed code commit `f5bd7f741c48a9565dd6ad6cde9854166c8c6cb8`, one deliberate live Agnes reply using a temporary fictional account passed. The immutable input contained the adopted preference and unchanged base style/growth fields, the private archive matched the complete **50,579-byte** knowledge, and identical request replay reused the result without another provider attempt. Sanitized evidence remains ignored in `runs/live-style/result.json`. This is transport/input/storage evidence, not a measured personal-style or dating effect.
+
+The persistent native loopback demo was gracefully restarted with those assets and code. UI readback confirmed 场外教练, its expression-preference entry and all pre-update composer/reply/intent/plan values. Reload retained the existing three direction weights and saved plan result. Its job counts remained one failed and three succeeded, with zero active jobs and zero additional provider calls; the synthetic adopted preference was not written into the owner's persistent data.
+
 ## Recorded self wording takes priority
 
 [PR #6](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/6) delivered the 场外教练 and natural-followup baseline at `d394443`; its [PR CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36750734600) and [main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36751021474) succeeded.
