@@ -4,7 +4,7 @@ const state = {
   selectedId: null, detail: null, selectedDirection: null, suggestion: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
-  feedbackDrafts: new Map(), feedbackKey: null, intentDrafts: new Map(),
+  intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
@@ -14,6 +14,9 @@ const levelNames = { unknown: '未知', negative: '有负向信号', passive: '�
 const heatNames = { pause: '建议暂停', insufficient_evidence: '信息不足', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
 const confidenceNames = { limited: '证据有限', moderate: '证据中等', strong: '证据较充分' };
 const channelNames = { app: '交友软件认识', offline: '线下认识', other: '其他渠道' };
+const topicStatusNames = { developing: '话题正在展开', repetitive: '话题有重复迹象', closing: '可以自然收尾', unknown: '话题阶段待判断' };
+const planVerdictNames = { suitable: '这个方向合适', adjust: '建议调整', wait: '先等一等', needs_context: '还需要背景' };
+const planTimingNames = { now: '现在可以考虑', after_response: '等对方回应后', after_topic: '当前话题自然结束后', wait: '先等待', unknown: '时机尚不确定' };
 const meetingNames = { none: '尚无安排', proposed: '已提出邀约', alternative: '协商其他时间', confirmed: '双方已确认', declined: '本次未接受' };
 
 // Every data value becomes a text node or a form value, never HTML.
@@ -62,7 +65,7 @@ async function api(path, { method = 'GET', body } = {}) {
   }
   return payload.data;
 }
-async function perform(button, label, callback) {
+async function perform(button, label, callback, scope) {
   if (button?.disabled) return;
   const original = button?.textContent;
   const form = button?.closest('form');
@@ -71,6 +74,7 @@ async function perform(button, label, callback) {
   if (button) { button.disabled = true; button.textContent = label; }
   try { return await callback(); }
   catch (error) {
+    if (scope && (state.me?.user.id !== scope.userId || state.selectedId !== scope.counterpartId)) return;
     const message = error.message || '操作未完成，请重试。';
     announce(message, 'error');
     if (form?.isConnected) {
@@ -84,7 +88,7 @@ async function perform(button, label, callback) {
 function post(path, body) { return api(path, { method: 'POST', body }); }
 function put(path, body) { return api(path, { method: 'PUT', body }); }
 function counterpartPath(id = state.selectedId) { return `/api/counterparts/${encodeURIComponent(id)}`; }
-const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'feedback-panel', 'admin-view'];
+const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'admin-view'];
 function closeInlineCards({ restoreFocus = false } = {}) {
   const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
   const trigger = state.inlineTrigger;
@@ -127,7 +131,6 @@ function updateComposer() {
   $('save-message').textContent = state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
   $('message-text').placeholder = $('message-speaker').value === 'self' ? '填写你已经发出的原话…' : '粘贴对方刚说的话…';
   for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
-  $('open-feedback').disabled = !ready || !state.suggestion;
 }
 function initializeTheme() {
   const system = window.matchMedia('(prefers-color-scheme: dark)');
@@ -253,25 +256,33 @@ function renderDirectory() {
   if (!state.counterparts.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
   $('counterpart-select').value = state.selectedId || '';
 }
-async function loadCounterpart(id) {
-  saveFeedbackDraft();
+async function loadCounterpart(id, { autoAnalyze = true, preserveComposer = false } = {}) {
+  const serial = ++state.detailRequestSerial;
+  const userId = state.me?.user.id;
   const previousId = state.detail?.counterpart.id;
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  if (changed) closeInlineCards();
+  const keepComposer = preserveComposer && !changed;
+  if (changed) { closeInlineCards(); closeFieldCoach(); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
-  if (changed) { state.detail = null; state.suggestion = null; updateComposer(); }
+  if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
   renderDirectory();
   const detail = await api(counterpartPath(id));
-  if (state.selectedId !== id) return;
+  if (state.selectedId !== id || state.me?.user.id !== userId || serial !== state.detailRequestSerial) return;
   state.detail = detail;
+  if (!state.planDrafts.has(planDraftKey()) && detail.latestCoachPlan) {
+    state.planDrafts.set(planDraftKey(), detail.latestCoachPlan.plan);
+    state.planResults.set(JSON.stringify([currentContextKey(), detail.latestCoachPlan.plan]), { planAssessment: detail.latestCoachPlan.planAssessment });
+  }
   if (changed) $('intent').value = state.intentDrafts.get(id) || '';
   state.selectedDirection = null;
-  state.editingMessageId = null;
-  $('message-form').reset();
-  $('editing-message').textContent = '';
-  $('cancel-message-edit').hidden = true;
+  if (!keepComposer) {
+    state.editingMessageId = null;
+    $('message-form').reset();
+    $('editing-message').textContent = '';
+    $('cancel-message-edit').hidden = true;
+  }
   $('empty-state').hidden = true;
   $('counterpart-workspace').hidden = false;
   $('counterpart-title').textContent = '模拟微信';
@@ -280,6 +291,7 @@ async function loadCounterpart(id) {
   $('counterpart-background').textContent = detail.counterpart.background || '';
   renderHeat(detail.heat);
   renderTranscript();
+  renderTiming();
   renderClassification(detail.classification);
   renderJobs(detail.jobs || []);
   const currentId = state.suggestion?.id;
@@ -289,6 +301,9 @@ async function loadCounterpart(id) {
   fillMeeting(detail.meeting);
   updateComposer();
   if (changed) scrollToLatest();
+  updateCoachBusy();
+  renderFieldCoachPlan();
+  if (autoAnalyze) maybeAutoCoach();
 }
 function renderJobs(jobs) {
   let history = $('job-history');
@@ -299,12 +314,12 @@ function renderJobs(jobs) {
   history.hidden = !jobs.length;
   const states = { reserved: '等待处理', running: '正在处理', linked: '关联已有操作', succeeded: '已完成', failed: '已失败' };
   const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '方向试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
-  const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
-  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${job.operation === 'classify' ? '方向分析' : '回复生成'} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
+  const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
+  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
-async function refreshCounterpart(id) {
+async function refreshCounterpart(id, { autoAnalyze = false, preserveComposer = false } = {}) {
   await loadCounterparts();
-  if (state.selectedId === id) await loadCounterpart(id);
+  if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze, preserveComposer });
 }
 function renderHeat(heat) {
   $('heat-status').textContent = heatNames[heat?.status] || '信息不足';
@@ -335,10 +350,53 @@ function renderTranscript() {
     const controls = el('details', { class: 'message-menu chat-menu' });
     controls.append(el('summary', { 'aria-label': `${message.speaker === 'self' ? '我的' : '对方的'}消息操作` }, '⋯'), el('div', { class: 'chat-menu-items' },
       el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => { controls.open = false; editMessage(message); } }, '编辑'),
+      el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
       el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => { closeMenu(controls, { restoreFocus: true }); void perform(event.currentTarget, '删除中…', () => deleteMessage(message)); } }, '删除')));
-    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label' }, message.speaker === 'self' ? '我' : state.detail.counterpart.alias), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls));
+    const recordedAt = message.recordedAt || message.createdAt;
+    const date = new Date(recordedAt);
+    const recordedTime = Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date) : '';
+    const reportedDate = new Date(message.wechatTime?.at);
+    const reportedTime = message.wechatTime?.source === 'user_reported' && Number.isFinite(reportedDate.getTime()) ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(reportedDate) : '';
+    const label = message.speaker === 'self' ? message.provenance === 'inferred_from_followup' ? '我 · 推定使用' : '我' : state.detail.counterpart.alias;
+    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `本人标注的微信时间 ${message.wechatTime.at}（未核验）；原软件录入时间 ${recordedAt}` : recordedAt ? `本软件录入时间 ${recordedAt}，不是微信实际收发时间` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls));
   }));
   if (!messages.length) $('transcript').append(el('p', { class: 'helper' }, '还没有对话。按说话人逐条加入原文，也可以先补充此前背景。'));
+}
+function editMessageTiming(message, menu) {
+  const id = state.selectedId, userId = state.me?.user.id;
+  document.querySelectorAll('.message-time-edit').forEach((form) => form.remove());
+  const input = el('input', { type: 'datetime-local', 'aria-label': '本人补充的微信消息时间', step: '60' });
+  const existing = new Date(message.wechatTime?.at || message.recordedAt || message.createdAt);
+  if (Number.isFinite(existing.getTime())) {
+    const local = new Date(existing.getTime() - existing.getTimezoneOffset() * 60000);
+    input.value = local.toISOString().slice(0, 16);
+  }
+  const form = el('form', { class: 'message-time-edit message-time-editor' }, el('label', {}, '本人补充的微信时间（未核验）', input), el('p', { class: 'small muted' }, '原录入时间保留；留空可清除标注。'));
+  const save = el('button', { type: 'submit', class: 'quiet-button' }, '保存时间');
+  const cancel = el('button', { type: 'button', class: 'quiet-button', onclick: () => { form.remove(); menu.querySelector('summary').focus({ preventScroll: true }); } }, '收起');
+  form.append(el('div', { class: 'button-row' }, save, cancel));
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void perform(save, '保存时间…', async () => {
+      const actualWechatAt = input.value ? new Date(input.value).toISOString() : null;
+      await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
+      if (state.selectedId !== id || state.me?.user.id !== userId) return;
+      await refreshCounterpart(id, { preserveComposer: true });
+      if (state.selectedId === id) { announce('时间标注已保存，原录入时间保留。方向判断已失效，可重新分析。'); $('message-text').focus({ preventScroll: true }); }
+    }, { userId, counterpartId: id });
+  });
+  menu.closest('.message').append(form);
+  input.focus({ preventScroll: true });
+  form.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+}
+function renderTiming() {
+  const timing = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'other')?.replyInterval;
+  $('timing-note').hidden = !timing;
+  if (!timing) { $('timing-note').textContent = ''; return; }
+  const elapsed = timing.elapsedMs;
+  const elapsedText = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed < 60000 ? '不足 1 分钟' : elapsed < 3600000 ? `约 ${Math.floor(elapsed / 60000)} 分钟` : `约 ${(elapsed / 3600000).toFixed(1)} 小时` : '未知';
+  const from = timing.fromSource === 'user_reported_wechat_sent' ? '本人标注的上一轮发送' : timing.fromSource === 'clipboard_copied' ? '上一轮复制' : timing.fromSource === 'suggestion_prepared' ? '上一轮建议生成' : '上一轮表达';
+  $('timing-note').textContent = `距${from}${elapsedText}（${timing.reliability === 'user_reported_interval' ? '本人补充的收发间隔，未核验' : timing.reliability === 'weak_preparation_estimate' ? '生成到录入的弱估计' : timing.reliability === 'unknown' ? '间隔未知' : '录入估计'}，非微信实际回复速度）。`;
 }
 function editMessage(message) {
   state.editingMessageId = message.id;
@@ -364,19 +422,63 @@ async function deleteMessage(message) {
   await refreshCounterpart(id);
   announce('消息已删除，后续辅助将使用更新后的记录。');
 }
+function classificationUnavailable() {
+  return state.me?.user.plan !== 'paid' && state.me?.quota?.classificationRemaining === 0;
+}
 function renderClassification(classification) {
-  $('direction-options').replaceChildren();
-  $('chosen-reply').hidden = true;
-  $('classification-summary').textContent = '';
-  state.selectedDirection = null;
-  if (!classification?.options?.length) return;
-  $('classification-summary').textContent = `${confidenceNames[classification.confidence] || '证据有限'}${classification.status === 'needs_context' ? ' · 还需要更多背景' : ''}。请选择一个方向；较低权重也可以生成。`;
-  const preferred = [...classification.options].sort((a, b) => b.weight - a.weight)[0]?.topicMove;
-  for (const option of classification.options) {
-    const button = el('button', { type: 'button', class: 'direction-option', 'aria-pressed': 'false', 'data-direction': option.topicMove, onclick: () => chooseDirection(option.topicMove) }, el('span', { class: 'direction-name' }, directionNames[option.topicMove] || option.topicMove, el('span', { class: 'weight' }, `${Math.round(option.weight * 100)}%`)), el('p', {}, `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}`));
-    $('direction-options').append(button);
-  }
-  chooseDirection(preferred);
+  renderFieldCoach(classification);
+  const busy = state.modelCalls.get(currentContextKey());
+  const options = new Map((classification?.options || []).map((option) => [option.topicMove, option]));
+  const available = options.size === 3;
+  $('classification-summary').textContent = available
+    ? `${confidenceNames[classification.confidence] || '证据有限'}${classification.status === 'needs_context' ? ' · 还需要更多背景' : ''}。建议占比是相对推荐，尚未校准；点任一方向生成。`
+    : classificationUnavailable() ? '方向分析试用已用完，直接给一句；本轮不展示虚构百分比。'
+      : busy?.type === 'classify' ? '正在分析三个方向…' : '等待方向分析；暂无建议占比。';
+  $('direction-options').replaceChildren(...['up', 'down', 'sideways'].map((direction) => {
+    const option = options.get(direction);
+    const button = el('button', { type: 'button', class: 'direction-option', disabled: !option || Boolean(busy), 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}，${option ? `建议占比 ${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'}`, 'data-direction': direction,
+      onclick: () => { chooseDirection(direction); void coachCall('reply', button, { direction }); } },
+      el('span', { class: 'direction-name' }, directionNames[direction].split(' · ')[0]),
+      el('span', { class: 'weight' }, option ? `${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'));
+    button.title = option ? `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}` : directionNames[direction];
+    button.classList.toggle('selected', state.selectedDirection === direction);
+    return button;
+  }));
+}
+function closeFieldCoach({ restoreFocus = false } = {}) {
+  const inside = $('field-coach').contains(document.activeElement);
+  $('field-coach').dataset.open = 'false';
+  $('toggle-field-coach').setAttribute('aria-expanded', 'false');
+  if (restoreFocus && inside) $('toggle-field-coach').focus({ preventScroll: true });
+}
+function renderFieldCoach(classification) {
+  const coach = classification?.fieldCoach;
+  $('field-coach-topic').textContent = coach?.currentTopic || '当前话题待判断';
+  $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}` : '记录对方的新话后，结合完整对话判断。';
+  $('field-coach-initiative').textContent = coach?.initiative || '结合完整话题，给出下一步主导建议。';
+  $('field-coach-next').textContent = coach ? `${coach.nextAction}${coach.reason ? ` · ${coach.reason}` : ''}` : '';
+  const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
+  const evidence = (coach?.topicMessageIds || []).map((id) => messages.get(id)).filter(Boolean);
+  $('field-coach-evidence').textContent = evidence.length ? `依据 ${evidence.length} 条话题记录：${evidence.slice(-3).map((message) => `${message.speaker === 'self' ? '我' : '对方'}：${message.text}`).join(' / ')}` : '';
+}
+function planDraftKey() { return JSON.stringify([state.me?.user.id, state.selectedId]); }
+function renderFieldCoachPlan() {
+  const key = planDraftKey();
+  $('field-coach-plan').value = state.planDrafts.get(key) || '';
+  const busy = state.planCalls.has(currentContextKey());
+  const ready = Boolean(state.me && state.detail && state.selectedId);
+  $('field-coach-plan-submit').disabled = !ready || busy;
+  $('field-coach-plan-submit').textContent = busy ? '教练正在看…' : '问场外教练';
+  const result = state.planResults.get(JSON.stringify([currentContextKey(), $('field-coach-plan').value.trim()]));
+  $('field-coach-plan-result').replaceChildren();
+  if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; return; }
+  if (!result) return;
+  if (result.error) { $('field-coach-plan-result').textContent = result.error; return; }
+  const assessment = result.planAssessment;
+  $('field-coach-plan-result').append(el('p', {}, `${planVerdictNames[assessment.verdict] || '建议待判断'} · ${assessment.reason}`),
+    el('p', {}, `${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}：${assessment.timingSuggestion?.guidance || '还没有足够的时机依据。'}`));
+  if (assessment.adjustedPlan) $('field-coach-plan-result').append(el('p', {}, `可以改成：${assessment.adjustedPlan}`));
+  $('field-coach-plan-result').append(el('p', {}, `下一步：${assessment.nextAction}`));
 }
 function chooseDirection(direction) {
   state.selectedDirection = direction;
@@ -384,32 +486,48 @@ function chooseDirection(direction) {
     button.classList.toggle('selected', button.dataset.direction === direction);
     button.setAttribute('aria-pressed', String(button.dataset.direction === direction));
   });
-  $('chosen-reply').hidden = !direction;
-  $('chosen-reply').textContent = direction ? `按${directionNames[direction].split(' · ')[0]}方向生成回复` : '按所选方向生成';
+  const option = state.detail?.classification?.options?.find((item) => item.topicMove === direction);
+  if (option) $('classification-summary').textContent = `建议占比尚未校准。${actionNames[option.relationAction] || '当前动作'} · ${option.reason}`;
 }
+function currentContextKey() { return JSON.stringify([state.me?.user.id, state.selectedId, state.detail?.counterpart, state.detail?.messages, state.detail?.meeting, state.me?.profile]); }
 function requestId(type, id, direction = '', intent = '') {
-  const contextKey = JSON.stringify([type, id, direction, intent, state.detail?.counterpart, state.detail?.messages, state.me?.profile]);
+  const contextKey = JSON.stringify([type, id, direction, intent, currentContextKey()]);
   if (!state.requestIds.has(contextKey)) state.requestIds.set(contextKey, crypto.randomUUID());
   return { id: state.requestIds.get(contextKey), key: contextKey };
 }
-function currentContextKey() { return JSON.stringify([state.selectedId, state.detail?.counterpart, state.detail?.messages, state.me?.profile]); }
-async function coachCall(type, button) {
-  if (button.disabled) return;
+function updateCoachBusy() {
+  const busy = state.modelCalls.get(currentContextKey());
+  $('coach-loading').hidden = !busy;
+  if (busy) $('coach-loading').textContent = busy.type === 'classify' ? '正在结合完整体系与当前背景分析三个方向…' : '正在生成回复，请稍候。';
+  $('coach-panel').setAttribute('aria-busy', String(Boolean(busy)));
+  $('classify').disabled = Boolean(busy);
+  $('direct-reply').disabled = Boolean(busy);
+  renderClassification(state.detail?.classification);
+}
+function maybeAutoCoach() {
+  if (!state.me?.profile?.background || state.me.requiresQuestionnaireUpdate || state.me.profile.requiresQuestionnaireUpdate || !state.detail?.messages?.some(({ speaker }) => speaker === 'other')) return;
+  if (state.detail.classification) return;
+  const context = currentContextKey();
+  if (state.autoAttempts.has(context) || state.modelCalls.has(context)) return;
+  const exhausted = classificationUnavailable();
+  const attempted = state.detail.modelContext?.[exhausted ? 'directReplyAttempted' : 'classificationAttempted'];
+  if (attempted || exhausted && state.detail.directReply) return;
+  state.autoAttempts.add(context);
+  void coachCall(exhausted ? 'reply' : 'classify', null, { automatic: true });
+}
+async function coachCall(type, button, { direction, automatic = false } = {}) {
+  if (button?.disabled || !state.selectedId || !state.detail || !state.me) return;
+  const id = state.selectedId, userId = state.me.user.id, inputContext = currentContextKey();
+  if (state.modelCalls.has(inputContext)) return;
+  state.autoAttempts.add(inputContext);
+  state.modelCalls.set(inputContext, { type, id });
   closeInlineCards();
-  const id = state.selectedId;
-  if (!id) return;
-  const userId = state.me?.user.id;
-  const inputContext = currentContextKey();
-  const direction = type === 'reply' && button.id === 'chosen-reply' ? state.selectedDirection : undefined;
-  const intent = $('intent').value.trim();
+  const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
   const request = requestId(type, id, direction, intent);
   let localError = $('coach-error');
   if (!localError) { localError = el('p', { id: 'coach-error', class: 'form-error', role: 'alert' }); $('coach-loading').after(localError); }
   localError.hidden = true;
-  $('coach-loading').hidden = false;
-  $('coach-loading').textContent = type === 'classify' ? '正在结合完整体系与当前背景分析，通常需要十几秒。失败可重试，不重复消耗同一上下文额度。' : '正在组织表达，请稍候。你可以在收到后修改再发送。';
-  $('coach-panel')?.setAttribute('aria-busy', 'true');
-  for (const control of [$('classify'), $('direct-reply'), $('chosen-reply')]) control.disabled = true;
+  updateCoachBusy();
   try {
     const data = await post(`${counterpartPath(id)}/${type}`, { requestId: request.id, ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) });
     state.requestIds.delete(request.key);
@@ -417,66 +535,53 @@ async function coachCall(type, button) {
     updateQuota(data.quota);
     if (state.selectedId === id && currentContextKey() === inputContext) {
       if (type === 'classify') {
-        state.detail.classification = data.classification;
-        state.detail.heat = data.heat;
+        state.detail.classification = data.classification; state.detail.heat = data.heat;
         renderHeat(data.heat);
-        renderClassification(data.classification);
       } else {
         state.suggestion = data.suggestion;
         const suggestions = state.detail.suggestions || (state.detail.suggestions = []);
         if (!suggestions.some((item) => item.id === data.suggestion.id)) suggestions.push(data.suggestion);
-        renderSuggestion();
-        scrollToLatest();
+        if (!direction && !intent) state.detail.directReply = data.suggestion;
+        renderSuggestion(); scrollToLatest();
       }
+      announce(data.cached ? '已取回保存结果，没有重复调用模型。' : type === 'classify' ? '' : '建议已生成，修改后自行发到微信；粘贴对方下一句即可继续。');
     }
     await loadCounterparts();
-    announce(data.cached ? '已取回同一上下文的保存结果，没有重复调用模型。' : type === 'classify' ? '方向分析已保存。权重仅表示相对建议程度。' : '建议已保存；编辑后由你手动发送。');
   } catch (error) {
     if (state.me?.user.id !== userId) return;
     const recoverExisting = !error.status || error.code === 'JOB_IN_PROGRESS';
     if (!recoverExisting) state.requestIds.delete(request.key);
-    const retryMessage = `${error.message} ${recoverExisting ? '稍后点击同一按钮取回该操作的结果。' : '可手动再次尝试，下一次会创建新操作。'}不会自动重试。`;
-    announce(retryMessage, 'error');
-    if (state.selectedId === id) { localError.textContent = retryMessage; localError.hidden = false; }
-    try { await reloadMe(); } catch { /* Preserve the actionable original error. */ }
-    if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
-      try { await loadCounterpart(id); } catch { /* Keep the prior context readable. */ }
+    const retryMessage = `${error.message} ${recoverExisting ? '可点击按钮取回结果。' : '可手动重新尝试。'}不会自动重试。`;
+    if (state.selectedId === id && currentContextKey() === inputContext) {
+      announce(retryMessage, 'error'); localError.textContent = retryMessage; localError.hidden = false;
     }
-    if (error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') { fillProfile(); showView('profile'); }
+    try { await reloadMe(); } catch { /* Preserve the original recovery state. */ }
+    if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
+      try { await loadCounterpart(id, { autoAnalyze: false }); } catch { /* No automatic retry. */ }
+    }
+    if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
+    if (error.code === 'CLASSIFICATION_QUOTA_EXHAUSTED' && automatic && state.selectedId === id && currentContextKey() === inputContext) {
+      state.modelCalls.delete(inputContext); updateCoachBusy();
+      void coachCall('reply', null, { automatic: true });
+    }
     if (state.selectedId === id) {
-      try { const detail = await api(counterpartPath(id)); if (state.selectedId === id) renderJobs(detail.jobs || []); } catch { /* A failed read does not trigger another model operation. */ }
+      try { const detail = await api(counterpartPath(id)); if (state.selectedId === id) renderJobs(detail.jobs || []); } catch { /* Read only. */ }
     }
   } finally {
-    $('coach-loading').hidden = true;
-    $('coach-panel')?.removeAttribute('aria-busy');
-    for (const control of [$('classify'), $('direct-reply'), $('chosen-reply')]) control.disabled = false;
+    if (state.modelCalls.get(inputContext)?.type === type) state.modelCalls.delete(inputContext);
+    if (state.selectedId === id && currentContextKey() === inputContext) updateCoachBusy();
   }
 }
-function saveFeedbackDraft() {
-  if (!state.feedbackKey) return;
-  state.feedbackDrafts.set(state.feedbackKey, { sent: $('feedback-sent').value, reply: $('feedback-reply').value, observation: $('feedback-observation').value, kind: $('feedback-kind').value, consent: $('feedback-consent').checked, receipt: $('feedback-state').textContent });
-}
 function renderSuggestion() {
-  saveFeedbackDraft();
   const suggestion = state.suggestion;
   $('suggestion-panel').hidden = !suggestion;
-  $('feedback-panel').hidden = !suggestion || state.activeInlineCard !== 'feedback-panel';
-  if (!suggestion) { state.feedbackKey = null; $('feedback-form').reset(); updateComposer(); return; }
+  if (!suggestion) { updateComposer(); return; }
   const relatedMessage = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'self' && message.suggestionId === suggestion.id);
   $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? relatedMessage?.text ?? suggestion.reply ?? '';
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
   $('suggestion-reason').textContent = suggestion.reason || '';
   $('suggestion-style').textContent = suggestion.styleNote || '';
   updateSentState();
-  state.feedbackKey = `${state.selectedId}:${suggestion.id}`;
-  const feedback = state.feedbackDrafts.get(state.feedbackKey);
-  $('feedback-form').reset();
-  $('feedback-sent').value = feedback?.sent ?? relatedMessage?.text ?? $('suggestion-text').value;
-  $('feedback-reply').value = feedback?.reply || '';
-  $('feedback-observation').value = feedback?.observation || '';
-  $('feedback-kind').value = feedback?.kind || 'uncertain';
-  $('feedback-consent').checked = feedback?.consent || false;
-  $('feedback-state').textContent = feedback?.receipt || '';
   const suggestions = state.detail?.suggestions || [];
   $('suggestion-history').hidden = suggestions.length < 2;
   $('suggestion-list').replaceChildren(...[...suggestions].reverse().map((item) => el('button', { type: 'button', class: 'history-button', onclick: () => { state.suggestionDrafts.set(suggestion.id, $('suggestion-text').value); state.suggestion = item; renderSuggestion(); } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
@@ -484,13 +589,9 @@ function renderSuggestion() {
 }
 function updateSentState() {
   if (!state.suggestion) return;
-  const text = $('suggestion-text').value.trim();
-  const matching = (state.detail?.messages || []).filter((message) => message.speaker === 'self' && message.suggestionId === state.suggestion.id && message.text.trim() === text);
-  const confirmed = matching.some((message) => message.provenance === 'user_confirmed_record');
-  $('record-sent').disabled = confirmed || !text;
-  $('record-sent').dataset.locked = String(confirmed || !text);
-  $('suggestion-title').textContent = confirmed ? '我 · AI 建议，已记录发送' : '我 · AI 建议，待发送';
-  $('sent-state').textContent = confirmed ? '已记录你确认发送的这个版本，后续可以补充对方反馈。' : matching.some((message) => message.provenance === 'user_entered_edit') ? '此前记录已被修改。请确认你实际发送的是这个版本，再重新记录。' : '请手动发到微信；这里仅记录你实际发送的版本。';
+  const inferred = state.detail?.messages?.some((message) => message.speaker === 'self' && message.suggestionId === state.suggestion.id && message.provenance === 'inferred_from_followup');
+  $('suggestion-title').textContent = inferred ? '我 · 上一轮建议' : '我 · AI 建议';
+  $('sent-state').textContent = inferred ? '后续回应已记录；此前表达为推定使用，尚未核实实际发送。' : '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。';
 }
 function fillMeeting(meeting) {
   $('meeting-kind').value = meeting?.status || 'none';
@@ -524,9 +625,9 @@ function openCounterpart(person = null) {
   $('intake-alias').focus();
 }
 async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。') {
-  if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return; }
-  try { await navigator.clipboard.writeText(text); announce(confirmation); }
-  catch { announce('浏览器未允许复制。请选中文本手动复制。', 'error'); }
+  if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return false; }
+  try { await navigator.clipboard.writeText(text); announce(confirmation); return true; }
+  catch { announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
 }
 async function loadAdmin() {
   if (state.localDemo || state.me.user.role !== 'owner') return;
@@ -553,9 +654,10 @@ async function loadAdmin() {
   $('admin-feedback-list').replaceChildren(...feedback.map(renderAdminFeedback));
   if (!feedback.length) $('admin-feedback-list').append(el('p', { class: 'helper' }, '尚未收到反馈。收到后先清洗，再决定是否采用。'));
 }
+function inferredFeedback(record) { return record.raw?.sourceMode === 'beta_followup' || record.raw?.caseEvidence?.actualSend === 'inferred_from_followup'; }
 function feedbackText(record) {
   const raw = record.raw?.payload || record.raw?.feedback || record.raw || {};
-  return [raw.actualSentText ? `实际发送：${raw.actualSentText}` : '', raw.counterpartReply ? `对方后续：${raw.counterpartReply}` : '', raw.observation ? `用户观察：${raw.observation}` : '', `类型：${{ positive: '有效做法', pitfall: '雷点', uncertain: '不确定' }[raw.kind] || '待确认'}`, `使用许可：${raw.consent ? '已同意清洗审阅' : '未获得许可'}`].filter(Boolean).join('\n\n');
+  return [raw.actualSentText ? `${inferredFeedback(record) ? '推定上一轮草稿（发送未确认）' : '实际发送'}：${raw.actualSentText}` : '', raw.counterpartReply ? `对方后续：${raw.counterpartReply}` : '', raw.observation ? `用户观察：${raw.observation}` : '', `类型：${{ positive: '有效做法', pitfall: '雷点', uncertain: '不确定' }[raw.kind] || '待确认'}`, `使用许可：${raw.consent ? '已同意清洗审阅' : '未获得许可'}`].filter(Boolean).join('\n\n');
 }
 function renderAdminFeedback(record) {
   const stageNames = { raw_untrusted: '未清洗', clean_candidate: '已清洗候选', cleaned_candidate: '已清洗候选', approved_candidate: '已批准候选', owner_reviewed: '已审阅', approved_use: '已批准使用', rejected: '已拒绝', quarantined: '隔离待补充' };
@@ -569,7 +671,7 @@ function renderAdminFeedback(record) {
     for (const [key, name] of [['transformations', '处理'], ['missing', '缺失依据'], ['flags', '问题'], ['missingEvidence', '缺失依据'], ['issues', '问题'], ['reasons', '说明'], ['unresolved', '待确认']]) {
       if (cleaning[key]?.length) summary.append(el('p', { class: 'helper' }, `${name}：${Array.isArray(cleaning[key]) ? cleaning[key].map((item) => typeof item === 'string' ? issueNames[item] || item : `${transformNames[item.kind] || '敏感信息'}已替换 ${item.count || 0} 处`).join('；') : cleaning[key]}`));
     }
-    if (cleaning.cleaned) summary.append(el('pre', {}, [`清洗后实际发送：${cleaning.cleaned.actualSentText || ''}`, `清洗后回应：${cleaning.cleaned.counterpartReply || ''}`, `清洗后观察：${cleaning.cleaned.observation || ''}`].join('\n\n')));
+    if (cleaning.cleaned) summary.append(el('pre', {}, [`${inferredFeedback(record) ? '清洗后推定上一轮草稿（发送未确认）' : '清洗后实际发送'}：${cleaning.cleaned.actualSentText || ''}`, `清洗后回应：${cleaning.cleaned.counterpartReply || ''}`, `清洗后观察：${cleaning.cleaned.observation || ''}`].join('\n\n')));
     card.append(summary);
     const form = el('form', {}, el('h3', {}, '人工审阅'));
     const purpose = el('select', {}, el('option', { value: 'knowledge' }, '知识补充'), el('option', { value: 'evaluation' }, '独立评估'));
@@ -618,17 +720,17 @@ $('auth-form').addEventListener('submit', (event) => {
 function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
-  state.feedbackDrafts.clear(); state.feedbackKey = null; state.intentDrafts.clear(); state.questionnaireAnswers = {};
+  state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
-  $('feedback-form').reset(); $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
+  $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
   for (const id of ['counterpart-select', 'transcript', 'direction-options', 'suggestion-list', 'questionnaire', 'admin-feedback-list', 'admin-users']) $(id).replaceChildren();
   for (const id of ['counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
   $('counterpart-title').textContent = '模拟微信';
   $('generated-invite').value = ''; $('invite-result').hidden = true;
   $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('job-history')?.remove(); $('coach-error')?.remove();
   document.querySelectorAll('form .form-error').forEach((node) => node.remove());
-  closeInlineCards(); updateComposer();
+  closeInlineCards(); closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
   if (!state.localDemo) $('username').focus();
 }
 $('logout').addEventListener('click', () => void perform($('logout'), '退出中…', async () => {
@@ -640,7 +742,44 @@ $('logout').addEventListener('click', () => void perform($('logout'), '退出中
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeInlineCards({ restoreFocus: true })));
 document.addEventListener('click', (event) => { document.querySelectorAll('.chat-menu[open]').forEach((menu) => { if (!menu.contains(event.target)) closeMenu(menu); }); });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.querySelectorAll('.chat-menu[open]').forEach((menu) => closeMenu(menu, { restoreFocus: true })); });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const menus = [...document.querySelectorAll('.chat-menu[open]')];
+  if (menus.length) menus.forEach((menu) => closeMenu(menu, { restoreFocus: true }));
+  else if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
+});
+$('toggle-field-coach').addEventListener('click', () => {
+  const open = $('field-coach').dataset.open !== 'true';
+  $('field-coach').dataset.open = String(open);
+  $('toggle-field-coach').setAttribute('aria-expanded', String(open));
+  if (open) $('field-coach-plan').focus({ preventScroll: true });
+});
+$('close-field-coach').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
+$('field-coach-plan').addEventListener('input', () => { state.planDrafts.set(planDraftKey(), $('field-coach-plan').value); $('field-coach-plan-result').replaceChildren(); });
+$('field-coach-plan-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const id = state.selectedId, userId = state.me?.user.id, context = currentContextKey(), plan = $('field-coach-plan').value.trim();
+  if (!id || !state.detail || !userId || state.planCalls.has(context)) return;
+  if (!plan) { $('field-coach-plan-result').textContent = '先写下你打算怎么主导这个话题。'; $('field-coach-plan').focus(); return; }
+  const resultKey = JSON.stringify([context, plan]);
+  const request = requestId('coach-plan', id, '', plan);
+  state.planCalls.set(context, true); renderFieldCoachPlan();
+  void (async () => {
+    try {
+      const data = await post(`${counterpartPath(id)}/coach-plan`, { requestId: request.id, plan });
+      state.requestIds.delete(request.key);
+      if (state.me?.user.id !== userId) return;
+      state.planResults.set(resultKey, data); updateQuota(data.quota);
+    } catch (error) {
+      if (state.me?.user.id !== userId) return;
+      if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(request.key);
+      state.planResults.set(resultKey, { error: `${error.message} 可手动再问；不会自动重试。` });
+    } finally {
+      state.planCalls.delete(context);
+      if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === context) renderFieldCoachPlan();
+    }
+  })();
+});
 $('counterpart-select').addEventListener('change', async (event) => {
   const id = event.target.value;
   if (!id || id === state.selectedId) return;
@@ -649,8 +788,8 @@ $('counterpart-select').addEventListener('change', async (event) => {
   catch (error) { announce(error.message, 'error'); }
   finally { event.target.disabled = false; }
 });
-for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'meeting-panel'], ['open-feedback', 'feedback-panel'], ['reply-feedback', 'feedback-panel']]) $(button).addEventListener('click', () => {
-  if (!state.detail || card === 'feedback-panel' && !state.suggestion) return;
+for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'meeting-panel']]) $(button).addEventListener('click', () => {
+  if (!state.detail) return;
   openInlineCard(card);
 });
 $('questionnaire-kind').addEventListener('change', () => { captureAnswers(); renderQuestionnaire($('questionnaire-kind').value); });
@@ -682,10 +821,9 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   const id = state.selectedId;
   await api(counterpartPath(id), { method: 'DELETE' });
   for (const suggestion of state.detail?.suggestions || []) state.suggestionDrafts.delete(suggestion.id);
-  for (const key of state.feedbackDrafts.keys()) if (key.startsWith(`${id}:`)) state.feedbackDrafts.delete(key);
-  state.intentDrafts.delete(id); state.feedbackKey = null; state.requestIds.clear();
+  state.intentDrafts.delete(id); state.requestIds.clear();
   state.selectedId = null; state.detail = null; state.suggestion = null;
-  $('feedback-form').reset(); $('suggestion-text').value = ''; $('intent').value = '';
+  $('suggestion-text').value = ''; $('intent').value = '';
   for (const element of ['transcript', 'direction-options', 'suggestion-list', 'heat-dimensions']) $(element).replaceChildren();
   $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
@@ -701,47 +839,60 @@ $('message-text').addEventListener('keydown', (event) => {
 });
 $('message-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
   void perform(event.submitter, '保存消息…', async () => {
-    const id = state.selectedId;
+    const id = state.selectedId, userId = state.me?.user.id;
     if (!id || !state.detail) throw new Error('先添加或选择一位聊天对象。');
     const body = { speaker: $('message-speaker').value, text: $('message-text').value.trim() };
-    if (state.editingMessageId) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(state.editingMessageId)}`, body);
-    else await post(`${counterpartPath(id)}/messages`, body);
-    cancelMessageEdit(); await refreshCounterpart(id); closeInlineCards(); scrollToLatest(); announce('原话已记录。需要建议时，点击对话里的“分析三个方向”。');
-  });
+    const editing = state.editingMessageId;
+    if (editing) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(editing)}`, body);
+    else if (body.speaker === 'other') {
+      const draftText = state.suggestion ? $('suggestion-text').value.trim() : '';
+      const alreadyInferred = state.suggestion && state.detail.messages.some((message) => message.suggestionId === state.suggestion.id && message.provenance === 'inferred_from_followup');
+      const previousReplyText = alreadyInferred ? '' : draftText;
+      const copyReceipt = previousReplyText && state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText]));
+      const followup = { text: body.text, ...(previousReplyText ? { previousSuggestionId: state.suggestion.id, previousReplyText, ...(copyReceipt ? { previousCopyReceiptId: copyReceipt } : {}) } : {}) };
+      const key = JSON.stringify(['followup', userId, id, followup]);
+      if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
+      await post(`${counterpartPath(id)}/followup`, { ...followup, requestId: state.requestIds.get(key) });
+      state.requestIds.delete(key);
+    } else await post(`${counterpartPath(id)}/messages`, body);
+    if (state.me?.user.id !== userId || state.selectedId !== id) return;
+    cancelMessageEdit(); await refreshCounterpart(id, { autoAnalyze: !editing && body.speaker === 'other' });
+    if (state.selectedId !== id) return;
+    closeInlineCards(); scrollToLatest();
+    announce(body.speaker === 'other' && !editing ? '对方的新消息已记录，后续回应只作为未核实反馈保存。' : '原话已记录。');
+  }, scope);
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
 $('direct-reply').addEventListener('click', () => void coachCall('reply', $('direct-reply')));
-$('chosen-reply').addEventListener('click', () => void coachCall('reply', $('chosen-reply')));
 $('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateSentState(); });
-$('copy-reply').addEventListener('click', () => void copyText($('suggestion-text').value));
-$('record-sent').addEventListener('click', () => void perform($('record-sent'), '记录中…', async () => {
-  const suggestion = state.suggestion;
-  if (!suggestion || !$('suggestion-text').value.trim()) throw new Error('请先填写你实际发送的文本；建议等待时不需要记录消息。');
-  const id = state.selectedId;
-  const actualSentText = $('suggestion-text').value.trim();
-  await post(`${counterpartPath(id)}/sent`, { suggestionId: suggestion.id, actualSentText });
-  await refreshCounterpart(id); if (state.selectedId === id) $('feedback-sent').value = actualSentText; announce('已记录你确认发送的这个版本，未替你向微信发送。');
+$('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '复制中…', async () => {
+  const id = state.selectedId, userId = state.me?.user.id, suggestionId = state.suggestion?.id, copiedText = $('suggestion-text').value;
+  if (!id || !suggestionId || !copiedText.trim()) return;
+  const copied = await copyText(copiedText);
+  if (!copied) return;
+  const key = JSON.stringify(['copy', userId, id, suggestionId, copiedText]);
+  if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
+  try {
+    const data = await post(`${counterpartPath(id)}/suggestions/${encodeURIComponent(suggestionId)}/copied`, { copiedText, requestId: state.requestIds.get(key) });
+    state.requestIds.delete(key);
+    if (state.me?.user.id === userId) state.copyReceipts.set(JSON.stringify([userId, id, suggestionId, copiedText.trim()]), data.copyReceipt.id);
+  } catch (error) {
+    if (state.me?.user.id === userId && state.selectedId === id) announce(`文本已复制，但复制时间未保存：${error.message} 仍可粘贴对方下一句继续。`, 'error');
+  }
 }));
-$('feedback-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  void perform(event.submitter, '提交反馈…', async () => {
-    if (!state.suggestion) throw new Error('请先选择一条已保存的建议。');
-    const id = state.selectedId;
-    const feedbackKey = state.feedbackKey;
-    const data = await post(`${counterpartPath(id)}/feedback`, { suggestionId: state.suggestion.id, actualSentText: $('feedback-sent').value.trim(), counterpartReply: $('feedback-reply').value.trim(), observation: $('feedback-observation').value.trim(), kind: $('feedback-kind').value, consent: $('feedback-consent').checked });
-    if (state.feedbackKey === feedbackKey) { $('feedback-state').textContent = `已收到，状态：未清洗原始反馈。编号：${data.id}。收件成功不表示内容已验证或被采用。`; saveFeedbackDraft(); }
-    announce('反馈已隔离保存。清洗与人工审阅后才能决定是否使用。');
-  });
-});
 $('meeting-kind').addEventListener('change', updateMeetingRequirements);
 $('meeting-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(event.submitter, '保存安排…', async () => {
     const id = state.selectedId;
     const data = await put(`${counterpartPath(id)}/meeting`, { status: $('meeting-kind').value, time: $('meeting-time').value.trim(), place: $('meeting-place').value.trim(), note: $('meeting-note').value.trim() });
-    if (state.selectedId === id) { state.detail.meeting = data.meeting; fillMeeting(data.meeting); }
-    announce('见面安排已记录，确认状态应以双方实际约定为准。');
+    if (state.selectedId === id) {
+      state.detail.meeting = data.meeting; fillMeeting(data.meeting);
+      await refreshCounterpart(id);
+      if (state.selectedId === id) announce('见面安排已记录，确认状态应以双方实际约定为准。');
+    }
   });
 });
 $('reload-admin').addEventListener('click', () => void perform($('reload-admin'), '读取中…', loadAdmin));
@@ -805,7 +956,7 @@ async function boot() {
   } finally { state.bootLoading = false; $('startup-retry').disabled = false; }
 }
 // Keep client limits within the authoritative domain schema.
-for (const [id, maximum] of Object.entries({ password: 128, 'profile-style': 10000, 'profile-growth': 10000, 'profile-goal': 10000, 'intake-alias': 80, 'suggestion-text': 5000, 'feedback-sent': 5000, 'feedback-reply': 5000, 'feedback-observation': 5000 })) $(id).maxLength = maximum;
+for (const [id, maximum] of Object.entries({ password: 128, 'profile-style': 10000, 'profile-growth': 10000, 'profile-goal': 10000, 'intake-alias': 80, 'suggestion-text': 5000 })) $(id).maxLength = maximum;
 $('intent').parentElement.firstChild.textContent = '本轮意图（用于回复生成）';
 initializeTheme();
 void boot();

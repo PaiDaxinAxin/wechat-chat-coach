@@ -8,6 +8,9 @@ import packageMetadata from '../package.json' with { type: 'json' };
 import { createBetaStore, BetaError, seedOwner } from './beta-store.mjs';
 import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './knowledge.mjs';
 import { ensureLocalDemoSeed, assertLocalDemoRequest } from './demo.mjs';
+import { archiveKnowledgeVersion } from './case-snapshot.mjs';
+import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs';
+import { generateFieldCoachPlan } from './field-coach.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import {
   QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree,
@@ -25,8 +28,13 @@ const LoginSchema = z.strictObject({ username: z.string(), password: z.string() 
 const RequestId = z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const ClassifySchema = z.strictObject({ requestId: RequestId });
 const ReplySchema = z.strictObject({ requestId: RequestId, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().max(2_000).optional() });
+const PlanInputSchema = z.strictObject({ requestId: RequestId, plan: z.string().trim().min(1).max(2_000) });
 const MessageSchema = z.strictObject({ speaker: z.enum(['self', 'other']), text: z.string().trim().min(1).max(20_000) });
 const SentSchema = z.strictObject({ suggestionId: z.string().min(1).max(128), actualSentText: z.string().trim().min(1).max(20_000) });
+const FollowupSchema = z.strictObject({ text: z.string().trim().min(1).max(20_000), requestId: RequestId, previousSuggestionId: z.string().min(1).max(128).optional(), previousReplyText: z.string().trim().min(1).max(20_000).optional(), previousCopyReceiptId: z.string().min(1).max(128).optional() })
+  .refine((input) => (!input.previousSuggestionId || input.previousReplyText) && (!input.previousCopyReceiptId || input.previousSuggestionId), { message: 'Previous source requires a draft.' });
+const CopySchema = z.strictObject({ copiedText: z.string().trim().min(1).max(20_000).optional(), requestId: RequestId });
+const MessageTimeSchema = z.strictObject({ actualWechatAt: z.iso.datetime({ offset: true }).nullable() });
 const PlanSchema = z.strictObject({ plan: z.enum(['free', 'paid']) });
 
 const MESSAGES = {
@@ -40,8 +48,13 @@ const MESSAGES = {
   USERNAME_INVALID: '用户名需为2至40字符，可用中文、字母、数字、下划线、点或连字符。',
   RATE_LIMITED: '操作过于频繁，请稍后再试。', REQUEST_TOO_LARGE: '提交内容过长。',
   MODEL_OPERATION_FAILED: '模型请求未完成，请查看记录并重试。',
+  INVALID_MODEL_OUTPUT: '模型结果未通过格式或证据校验，请手动重试。',
   CONTEXT_REQUIRED: '请先保存至少一句对方说的话，再请求聊天建议。',
   FEEDBACK_SOURCE_CHANGED: '实际发送记录已变化，请重新清理反馈后再审阅。',
+  FOLLOWUP_REQUEST_CONFLICT: '这次录入编号已用于其他内容，请为新一轮创建新请求。',
+  FOLLOWUP_SOURCE_ALREADY_LINKED: '上一轮草稿已关联过后续消息，请直接录入新的一句或选择本轮回复。',
+  COPY_REQUEST_CONFLICT: '复制记录编号已用于其他内容，请重新复制。',
+  MESSAGE_TIME_INVALID: '请填写有效的过去时间；录入时间会保留。',
 };
 
 function parse(schema, value, code = 'INPUT_INVALID') {
@@ -63,6 +76,26 @@ function normalizedError(error) {
   const providerCodes = new Set(['missing_api_key', 'invalid_configuration', 'provider_timeout', 'invalid_provider_response', 'truncated_model_output', 'invalid_model_json', 'provider_unreachable', 'invalid_model_output', 'missing_model_tool_call', 'multiple_model_tool_calls', 'invalid_model_tool_call', 'unexpected_model_tool_call']);
   if (providerCodes.has(error?.code)) return new BetaError(error.code.toUpperCase(), 502);
   return new BetaError('MODEL_OPERATION_FAILED', 500);
+}
+const DIAGNOSTIC_CODES = new Set([
+  'invalid_type', 'too_small', 'too_big', 'invalid_format', 'invalid_value', 'invalid_union', 'invalid_key', 'invalid_element', 'not_multiple_of', 'unrecognized_keys', 'custom',
+  'invalid_direction_set', 'invalid_weight_sum', 'duplicate_evidence', 'invalid_evidence_reference', 'unknown_heat_with_evidence', 'observed_heat_without_evidence',
+  'private_knowledge_excerpt', 'unknown_topic_with_evidence', 'unknown_topic_with_asserted_label', 'observed_topic_without_evidence', 'refusal_with_warming', 'unsupported_private_warming',
+  'unknown_timing_with_evidence', 'unknown_timing_with_precision', 'missing_context_with_asserted_timing', 'adjusted_plan_required', 'unexpected_adjusted_plan',
+]);
+const DIAGNOSTIC_FIELDS = new Set([
+  'status', 'confidence', 'phase', 'obstacle', 'type', 'evidenceIds', 'reason', 'heat', 'activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough', 'level',
+  'options', 'topicMove', 'relationAction', 'weight', 'uncertainties', 'recommendationKind', 'fieldCoach', 'currentTopic', 'topicStatus', 'topicMessageIds', 'initiative', 'nextAction', 'warmingLayer',
+  'reply', 'action', 'styleNote', 'verdict', 'timingSuggestion', 'guidance', 'adjustedPlan',
+]);
+function safeModelDiagnostics(error) {
+  if (error?.code !== 'invalid_model_output' || !Array.isArray(error.diagnostics)) return [];
+  return error.diagnostics.slice(0, 12).flatMap((item) => {
+    if (!DIAGNOSTIC_CODES.has(item?.code) || !Array.isArray(item.path) || item.path.length > 8) return [];
+    if (!item.path.every((part) => typeof part === 'string' ? DIAGNOSTIC_FIELDS.has(part) : Number.isInteger(part) && part >= 0 && part <= 1_000)) return [];
+    // Never persist Zod messages, invalid values, model text or arbitrary keys.
+    return [{ code: item.code, path: [...item.path] }];
+  });
 }
 function errorBody(error) {
   const normalized = normalizedError(error);
@@ -131,7 +164,7 @@ async function serviceLock(dataDir) {
 
 export async function createBetaServer({
   dataDir, knowledgePath, webDir = join(PROJECT_ROOT, 'dist/public'), publicOrigin,
-  classifyFn = classifyChat, replyFn = generateReply, storeKnowledge,
+  classifyFn = classifyChat, replyFn = generateReply, planFn = generateFieldCoachPlan, storeKnowledge,
   localDemoMode = false,
   providerEnv = process.env,
   freeProviderDailyLimit = 10, paidProviderDailyLimit = 10, globalProviderDailyLimit = 100,
@@ -193,7 +226,8 @@ export async function createBetaServer({
     return buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: store.getMeeting(userId, counterpartId) });
   }
   function contextHash(context, knowledgeHash, operation, options = {}) {
-    return digest(JSON.stringify({ context, knowledgeHash, operation, direction: options.direction ?? null }));
+    const providerModel = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
+    return digest(JSON.stringify({ context, knowledgeHash, operation, direction: options.direction ?? null, ...(options.plan === undefined ? {} : { plan: options.plan }), contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION, providerModel }));
   }
   async function currentClassification(userId, counterpartId, knowledgeSnapshot) {
     try {
@@ -206,12 +240,34 @@ export async function createBetaServer({
       throw error;
     }
   }
+  function currentModelContext(userId, counterpartId, knowledgeSnapshot) {
+    try {
+      const context = chatSnapshot(userId, counterpartId);
+      const classificationHash = contextHash(context, knowledgeSnapshot.hash, 'classify');
+      const directHash = contextHash(context, knowledgeSnapshot.hash, 'reply');
+      const directJob = store.latestSuccessful(userId, counterpartId, 'reply', directHash);
+      return { directReply: directJob?.result?.suggestion ?? null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, contextHash(context, knowledgeSnapshot.hash, 'conversation')), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
+    } catch (error) {
+      if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
+      throw error;
+    }
+  }
 
   async function runModel(userId, counterpartId, operation, input) {
     const knowledgeSnapshot = await knowledge.read();
     const context = chatSnapshot(userId, counterpartId, { intent: operation === 'reply' ? input.intent : undefined });
     const hash = contextHash(context, knowledgeSnapshot.hash, operation, input);
-    const reserved = store.reserveJob({ userId, counterpartId, operation, requestId: input.requestId, contextHash: hash, knowledgeHash: knowledgeSnapshot.hash, workerId: lock.workerId, providerModel: providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash' });
+    const model = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
+    const profileUpdatedAt = store.getProfile(userId).updatedAt;
+    const counterpartRevision = store.getCounterpart(userId, counterpartId).revision;
+    const classificationContext = { ...context }; delete classificationContext.intent;
+    const classified = operation === 'reply' ? store.latestSuccessful(userId, counterpartId, 'classify', contextHash(classificationContext, knowledgeSnapshot.hash, 'classify')) : null;
+    const capturedAt = new Date(now()).toISOString();
+    const archived = await archiveKnowledgeVersion(directory, knowledgeSnapshot);
+    const contextSnapshot = { schemaVersion: 'coach-case-1', capturedAt, modelInput: context, profileUpdatedAt, counterpartRevision, baseContextHash: contextHash(classificationContext, knowledgeSnapshot.hash, 'conversation'), ...(input.plan === undefined ? {} : { request: { plan: input.plan } }),
+      knowledge: archived, model: { name: model, contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION },
+      choice: { requestedDirection: input.direction ?? null, source: operation === 'classify' ? 'classification' : operation === 'coach_plan' ? 'user_plan' : input.direction ? 'user_choice' : 'direct_reply', classificationJobId: classified?.id ?? null, classificationResult: classified?.result ?? null } };
+    const reserved = store.reserveJob({ userId, counterpartId, operation, requestId: input.requestId, contextHash: hash, knowledgeHash: knowledgeSnapshot.hash, workerId: lock.workerId, providerModel: model, contextSnapshot });
     if (!reserved.fresh) {
       if (reserved.job.state === 'succeeded') return { ...reserved.job.result, cached: true, quota: store.quota(userId) };
       if (reserved.job.state === 'failed') throw new BetaError(reserved.job.errorCode ?? 'JOB_INTERRUPTED', 409);
@@ -227,6 +283,7 @@ export async function createBetaServer({
         const options = { knowledgeText: knowledgeSnapshot.text, env: providerEnv };
         const output = operation === 'classify'
           ? await classifyFn(context, options)
+          : operation === 'coach_plan' ? await planFn({ context, plan: input.plan }, options)
           : await replyFn({ context, ...(input.direction === undefined ? {} : { direction: input.direction }) }, options);
         guardRestrictedOutput(output, knowledgeSnapshot.text);
         const currentKnowledge = await knowledge.read();
@@ -237,15 +294,16 @@ export async function createBetaServer({
           const previous = store.previousClassification(userId, counterpartId);
           const classification = { ...output, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
           result = { classification, heat: computeHeat(output, { history: previous ? [previous.result.heat] : [], observedAt: new Date(now()).toISOString() }) };
-        } else {
+        } else if (operation === 'reply') {
           suggestion = { ...output, id: randomUUID(), direction: input.direction ?? null, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
           result = { suggestion };
-        }
+        } else result = { planAssessment: output };
         store.completeJob(job.id, result, suggestion);
         return result;
       } catch (error) {
+        const diagnostics = safeModelDiagnostics(error);
         const safe = normalizedError(error);
-        store.failJob(job.id, safe.code);
+        store.failJob(job.id, safe.code, diagnostics.length ? { diagnostics } : undefined);
         throw safe;
       }
     })();
@@ -308,16 +366,22 @@ export async function createBetaServer({
         const knowledgeSnapshot = await knowledge.read();
         const observed = await currentClassification(userId, id, knowledgeSnapshot);
         const jobs = store.listJobs(userId, id).map(({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cacheOf }) => ({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cached: Boolean(cacheOf) }));
-        return { counterpart, messages: store.listMessages(userId, id), suggestions: store.listSuggestions(userId, id), ...observed, meeting: store.getMeeting(userId, id), jobs };
+        return { counterpart, messages: store.listMessages(userId, id), suggestions: store.listSuggestions(userId, id), ...observed, ...currentModelContext(userId, id, knowledgeSnapshot), meeting: store.getMeeting(userId, id), jobs };
       }
       if (!action && method === 'PUT') return { counterpart: store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART'), id) };
       if (!action && method === 'DELETE') { store.deleteCounterpart(userId, id); return { deleted: true }; }
       if (action === 'messages' && method === 'POST') return { message: store.putMessage(userId, id, parse(MessageSchema, input)) };
+      if (action === 'followup' && method === 'POST') return store.recordFollowup(userId, id, parse(FollowupSchema, input));
+      const copied = /^suggestions\/([^/]+)\/copied$/.exec(action ?? '');
+      if (copied && method === 'POST') return store.recordReplyCopy(userId, id, copied[1], parse(CopySchema, input));
+      const messageTime = /^messages\/([^/]+)\/timing$/.exec(action ?? '');
+      if (messageTime && method === 'PATCH') return { message: store.putMessageTime(userId, id, messageTime[1], parse(MessageTimeSchema, input).actualWechatAt) };
       const message = /^messages\/([^/]+)$/.exec(action ?? '');
       if (message && method === 'PUT') return { message: store.putMessage(userId, id, parse(MessageSchema, input), message[1]) };
       if (message && method === 'DELETE') { store.deleteMessage(userId, id, message[1]); return { deleted: true }; }
       if (action === 'classify' && method === 'POST') return runModel(userId, id, 'classify', parse(ClassifySchema, input));
       if (action === 'reply' && method === 'POST') return runModel(userId, id, 'reply', parse(ReplySchema, input));
+      if (action === 'coach-plan' && method === 'POST') return runModel(userId, id, 'coach_plan', parse(PlanInputSchema, input));
       if (action === 'sent' && method === 'POST') {
         const sent = parse(SentSchema, input);
         store.getSuggestion(userId, id, sent.suggestionId);
@@ -345,10 +409,12 @@ export async function createBetaServer({
         if (feedbackAction[2] === 'clean') {
           parse(z.strictObject({}), input);
           const payload = feedback.raw.payload;
-          const suggestion = store.getSuggestion(feedback.user.id, feedback.counterpartId, payload.suggestionId);
-          const sent = store.findSentMessage(feedback.user.id, feedback.counterpartId, payload.suggestionId, payload.actualSentText);
+          const inferred = feedback.raw.sourceMode === 'beta_followup';
+          const suggestion = payload.suggestionId ? store.getSuggestion(feedback.user.id, feedback.counterpartId, payload.suggestionId) : undefined;
+          const sent = inferred ? feedback.raw.caseEvidence?.previousMessage : store.findSentMessage(feedback.user.id, feedback.counterpartId, payload.suggestionId, payload.actualSentText);
           const counterpart = store.getCounterpart(feedback.user.id, feedback.counterpartId);
-          const candidate = cleanFeedback(payload, { suggestion, actualSentMessage: sent, sourceId: feedback.id, identifiers: [feedback.user.username, counterpart.alias] });
+          let candidate = cleanFeedback(payload, { suggestion, actualSentMessage: sent, sourceId: feedback.id, identifiers: [feedback.user.username, counterpart.alias] });
+          if (inferred) candidate = { ...candidate, stage: 'quarantined', consent: false, allowedPurposes: [], flags: [...new Set([...(candidate.flags ?? []), 'inferred_followup', 'sending_unverified', 'no_training_consent'])] };
           return { feedback: store.saveCleaning(userId, feedback.id, candidate) };
         }
         const reviewInput = parse(ReviewInputSchema, input, 'INVALID_FEEDBACK_REVIEW');

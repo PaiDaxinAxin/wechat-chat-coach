@@ -1,6 +1,6 @@
 # Single conversation design
 
-The owner requested one simulated WeChat conversation on 2026-09-30: the counterpart's messages and the user's pending reply are the main content; AI advice appears inside that conversation. The alternative of a separate conversation with an AI coach was explicitly declined. The owner also requested day and night colors and deferred email, login and website authorization work for the local demo.
+The owner requested one simulated WeChat conversation on 2026-09-30: the counterpart's messages and the user's pending reply are the main content; AI advice appears inside that conversation. The owner initially declined a separate AI chat; on 2026-10-01 the owner explicitly added a companion part named 场外教练 for whole-topic monitoring and evaluating the user’s initiative plans. The owner also requested day and night colors and deferred email, login and website authorization work for the local demo.
 
 ## Reference and scope
 
@@ -11,16 +11,28 @@ The personal project's visual values have one implementation home, `web/styles.c
 ## Composition and behavior
 
 - One conversation surface: counterpart messages on the left, self messages and editable pending replies on the right. AI analysis, direction choices and next-step advice are identified as advice within the thread.
-- A small header selects the counterpart and opens supplementary actions. No always-visible directory, heat dashboard, questionnaire or separate assistant pane.
-- Personal profile, counterpart background, meeting arrangements and feedback open only when needed, inside the same conversation. Unknown observations remain unknown; lower-weight directions remain selectable.
-- The composer records pasted messages; generated suggestions require explicit action. A recorded message is a user statement, not a claim that the software sent anything to WeChat.
+- A small header selects the counterpart and opens supplementary actions. No always-visible directory, heat dashboard or questionnaire. The companion field coach follows the owner’s later explicit addition.
+- Personal profile, counterpart background and meeting arrangements open only when needed, inside the same conversation. Follow-up messages automatically form raw feedback for the preceding draft. Unknown observations remain unknown; lower-weight directions remain selectable.
+- The composer records pasted messages and continues the previous round without separate sent-confirmation or feedback buttons. Eligible complete contexts automatically obtain three direction weights once; a direction click generates that reply. Generated and inferred texts retain their source status; the software does not send messages to WeChat.
 - Day/night switching preserves the current conversation and unsaved drafts. Only the theme preference belongs in browser local storage; private profiles, chats, tokens and API credentials do not.
 - Local demo stays explicitly fictional and loopback-only, with separate private data. Its automatic session never becomes a public authentication bypass. Public access and personal email delivery remain deferred.
 
 ## Acceptance
 
-Check the actual rendered day and night conversation on desktop and narrow mobile sizes. Exercise object selection/intake, profile completion, message insertion, direction selection, editable reply, manual sent confirmation, feedback and meeting details. Check keyboard controls, focus visibility, minimum touch targets, overflow, reload and error recovery. Synthetic browser checks use a temporary database and knowledge copy and make no paid calls. Source merge, the live local page and chat effectiveness are separate evidence classes.
+Check the actual rendered day and night conversation on desktop and narrow mobile sizes. Exercise object selection/intake, profile completion, message insertion, direction selection, editable reply, automatic inferred follow-up/feedback linkage, timing annotations and meeting details. Check keyboard controls, focus visibility, minimum touch targets, overflow, reload and error recovery. Synthetic browser checks use a temporary database and knowledge copy and make no paid calls. Source merge, the live local page and chat effectiveness are separate evidence classes.
 
 ## Bubble color amendment — 2026-10-01
 
 The owner explicitly rejected green self-message bubbles. Self messages and editable pending replies now use the Nocturne accent scale: a pale lavender fill in day mode and a brighter blue-violet fill in night mode. The owner also requested obvious differentiation: counterpart bubbles retain the neutral surface, self bubbles remain right-aligned with a distinct label, inline AI cards retain their AI identifier, and pending replies add a dashed outline beside the explicit pending/sent label. This applies to this personal chat product; it does not remove semantic success colors from unrelated surfaces or amend the company standard. Both versions retain legible text, speaker alignment and explicit sent/pending labels.
+
+## Conversation spacing amendment — 2026-10-01
+
+The owner found the spacing and proportions awkward. Message groups now use a 12px gap and a 3px label-to-bubble gap. Empty direction options consume no space; the AI card has 12px padding and its closed secondary details share a line where space allows. Pending replies place only the editable text inside the accent bubble, with copying and explanation below; earlier manual send and feedback controls were removed by the subsequent owner correction. Reply height follows the content where supported, with a two-row editable fallback and a 240px cap; long text remains scrollable and manually resizable. Day/night speaker colors, explicit pending labels and 44px controls remain in place.
+
+## Natural follow-up and timing amendment — 2026-10-01
+
+Three direction cards remain visible in all states, with actual recommendation percentages when available and no invented fallback weights. Automatic analysis is bounded to a complete current context and reads persistent attempts/results; it does not automatically retry failures. Selecting a direction generates that reply. Pasting the next counterpart message atomically links the previous editable draft and an untrusted feedback receipt, preserving inferred-use provenance rather than claiming a verified WeChat send. No separate send-confirmation or feedback button appears. Copy and message-entry times are observable application events; inferred intervals stay labeled as estimates. The requested frequency/interval reminder appears by the composer. Time corrections retain original recorded timestamps and their own declared source.
+
+## Field coach amendment — 2026-10-01
+
+The owner added a companion part named 场外教练, overriding the earlier single-part restriction. Desktop places it beside the simulated conversation; narrower layouts open the same part from the header so the message composer remains available. It monitors the complete topic, initiative, warming/obstacle cadence and evidence, and accepts the user’s proposed plan for explicit evaluation. Routine monitoring shares direction-analysis results; plan evaluation is a separate deliberate model call, bounded by daily budgets and never inserted as a WeChat reply. One round means a complete topic. A 10–20-message topic checkpoint is an experience-based prompt to inspect repetition and engagement, not a fixed boredom threshold. User-corrected timestamps replace the primary visible time and analysis reference, with original entry receipts retained privately.

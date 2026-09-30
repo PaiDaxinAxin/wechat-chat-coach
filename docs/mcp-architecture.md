@@ -22,6 +22,10 @@ Authenticate before dispatch, enforce Host/Origin policy, size and rate limits, 
 
 Feedback goes to raw isolation, not knowledge or model input. Apply the [cleaning contract](feedback-data.md) before promotion. Unknown tools, malformed outputs, incomplete responses and blocked source excerpts fail closed. Do not retry calls or shorten knowledge automatically.
 
+Web followup receipts associate the previous editable draft with the next pasted counterpart message as `inferred_from_followup`, unknown outcome and no consent. They remain quarantined; they do not become confirmed sending through an MCP call. Provenance and user-reported versus application-recorded time sources stay in the shared model context. Slow timing is only one heat signal.
+
+Fresh beta jobs preserve immutable private input/choice snapshots and a full server-side knowledge archive per hash. Ordinary account clients receive neither case snapshots nor knowledge text or archive paths. Legacy jobs retain an explicit missing-context state. Cache identity includes context/protocol version and provider model as well as complete input and knowledge hash. The beta account MCP still has only its four listed tools; the new web followup/copy/time-edit/manual-plan routes do not add owner, export, resources or arbitrary-context capabilities.
+
 Exact-excerpt filtering is supplementary. The design prevents direct source reads, but cannot guarantee resistance to inference, paraphrasing or extraction through repeated calls.
 
 ## Alternatives and release boundary

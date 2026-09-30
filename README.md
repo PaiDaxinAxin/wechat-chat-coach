@@ -6,15 +6,15 @@ The first stage combines the complete game framework, current and desired expres
 
 ## Direct local demo
 
-Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run demo` with the provider environment configured privately. Open `http://127.0.0.1:8788`. The demo enters a fictional account directly and keeps edits in its own private data directory (`data/local-demo` by default). There is no login or registration step. Loading the page makes no model call; requesting analysis or a reply uses the configured provider and complete knowledge.
+Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run demo` with the provider environment configured privately. Open `http://127.0.0.1:8788`. The demo enters a fictional account directly and keeps edits in its own private data directory (`data/local-demo` by default). There is no login or registration step. Opening a complete eligible conversation automatically obtains its direction analysis once per context. Durable attempt/result readback prevents repeat calls on reload; failures need explicit retry. Direction selection generates a reply, and deliberate plan evaluation uses the same configured provider and complete knowledge.
 
-The UI is one simulated WeChat conversation, with AI advice inside it and day/night themes; see [the scoped design record](docs/ui-design.md). Email, login and public website authorization work are deferred by the owner. Do not use company email infrastructure. Demo startup refuses public origins and nonlocal listening; do not expose it through a public proxy.
+The UI centers on a simulated WeChat conversation, with three direction weights and editable replies inside it, a companion 场外教练 for complete-topic monitoring and initiative plans, and day/night themes; see [the scoped design record](docs/ui-design.md). Email, login and public website authorization work are deferred by the owner. Do not use company email infrastructure. Demo startup refuses public origins and nonlocal listening; do not expose it through a public proxy.
 
 ## Invite-only web beta
 
 Use Node.js 26. Run `npm ci --ignore-scripts`, `npm run build`, then `npm run beta:admin -- init --username owner`. Read the generated owner credentials locally from the private file reported by the command. Set the provider environment securely and run `npm run start:beta`; the default address is `http://127.0.0.1:8788`.
 
-The owner issues individual free or paid-beta invitations in the management view. Accounts have separate profiles, counterpart records, conversations and persisted jobs. The application includes original 10/30-item questionnaires, three selectable directions, evidence-based heat and top-three ordering, editable replies, manual sent records, meeting arrangements, and a raw → cleaning → owner-review feedback flow. A paid-beta grant enables the full questionnaire and classifier; it does not process payments.
+The owner issues individual free or paid-beta invitations in the management view. Accounts have separate profiles, counterpart records, conversations and persisted jobs. The application includes original 10/30-item questionnaires, three selectable directions, evidence-based heat and top-three ordering, editable replies, automatic inferred follow-up linkage, user-correctable message times, meeting arrangements, and a raw → cleaning → owner-review feedback flow. A paid-beta grant enables the full questionnaire and classifier; it does not process payments.
 
 Free users have three lifetime successful classifications. Persisted context replays and direction changes do not reclassify; failed classifications do not consume those trials. After exhaustion, the user can generate a reply directly with the complete knowledge and without fabricated classifier weights. Provider attempts have separate bounded daily budgets, including failed calls.
 
@@ -61,11 +61,11 @@ This single-token development entry is retained for transport tests and local ex
 
 ## Classification and feedback
 
-Topic moves are `up` (上切), `down` (下切) and `sideways` (平移), distinct from relational actions. Three weights sum to one and are uncalibrated recommendations, not success probabilities. Heat dimensions preserve unknowns and message evidence references. [examples/chat.json](examples/chat.json) is synthetic.
+Topic moves are `up` (上切), `down` (下切) and `sideways` (平移), distinct from relational actions and A/B/C warming intensity. One round means a complete topic. Three weights sum to one and are uncalibrated recommendations, not success probabilities. Heat dimensions preserve unknowns and message evidence references. [examples/chat.json](examples/chat.json) is synthetic.
 
 Heat has five observed dimensions, distinct message evidence, unknowns, coverage, qualitative confidence and a comparable-history trend. Explicit negative resistance overrides a high score. Rules and recommendation weights remain provisional; no real chat effectiveness or classification accuracy is established.
 
-All submitted feedback starts as raw, untrusted observations in private storage. Cleaning checks provenance, actual sent versions, duplicates, common identity patterns, obvious instructions, conflicting labels and missing outcomes. An owner reviews permitted candidates with explicit conditions and limits before approving a knowledge supplement or evaluation use. Approval is traceable and repeat-safe; it does not update model weights. Automatic cleaning is conservative and still needs owner inspection.
+All submitted feedback starts as raw, untrusted observations in private storage. Pasting a follow-up associates the preceding editable draft automatically, records inferred-use provenance and an unknown outcome, and never silently grants training consent. Copy/entry intervals are estimates; user-corrected times replace the main display/analysis reference while original receipts remain private. Cleaning checks provenance, actual sent versions, duplicates, common identity patterns, obvious instructions, conflicting labels and missing outcomes. An owner reviews permitted candidates with explicit conditions and limits before approving a knowledge supplement or evaluation use. Approval is traceable and repeat-safe; it does not update model weights. Automatic cleaning is conservative and still needs owner inspection.
 
 ## Checks
 
