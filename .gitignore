@@ -1,0 +1,12 @@
+node_modules/
+.env*
+*.pem
+*.key
+*.log
+.DS_Store
+data/
+runs/
+profiles/
+coverage/
+knowledge/*.lock
+knowledge/.knowledge-*.tmp
