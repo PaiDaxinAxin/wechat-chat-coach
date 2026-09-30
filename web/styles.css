@@ -1,12 +1,12 @@
 /* Personal chat composition; LYNCA Design Standard 1.3.0, 2026-09-29.
    Nocturne 2026-09-07: night base, accent, spacing and radii.
-   Day roles and speaker-green bubbles are this project's scoped additions.
+   Day roles and accent-tinted speaker bubbles are this project's scoped additions.
    Visual tokens have one home in this file. */
 :root {
   color-scheme:light; --color-canvas:#eaecef; --color-bg:#f4f5f7;
   --color-surface:#fff; --color-text:#222531; --color-muted:#686d7c;
   --color-accent:#5d5294; --color-accent-soft:#f5f4ff; --color-line:#dcdfe6;
-  --color-self:#d8eedb; --color-self-text:#24372a;
+  --color-self:#e7e5fe; --color-self-text:#222531;
   --color-error:#9d3c42; --color-error-soft:#fceef0; --color-success:#386845;
   --font-body:Inter,"PingFang SC","Noto Sans SC",system-ui,sans-serif;
   --font-display:"Source Serif 4","Songti SC","Noto Serif SC",Georgia,serif;
@@ -22,7 +22,7 @@
   color-scheme:dark; --color-canvas:#10121c; --color-bg:#161826;
   --color-surface:#232532; --color-text:#e9e9ed; --color-muted:#a5a8b8;
   --color-accent:#9184d9; --color-accent-soft:#2b2741; --color-line:#3d4052;
-  --color-self:#294333; --color-self-text:#e2efe5;
+  --color-self:#423a6a; --color-self-text:#e9e9ed;
   --color-error:#f1a4a8; --color-error-soft:#3a2630; --color-success:#a3d6ad;
   --shadow:0 9px 36px rgb(0 0 0 / 16%);
 }
@@ -99,3 +99,7 @@ dialog{color:inherit;background:var(--color-surface);border:1px solid var(--colo
 .suggestion-bubble .quiet-button,.suggestion-bubble .helper,.suggestion-bubble .small,.suggestion-bubble summary{color:var(--color-self-text)}
 .suggestion-bubble .primary,.suggestion-bubble .primary:hover{background:var(--color-surface)}
 .startup-status{max-width:400px;margin:var(--space-24) auto;padding:var(--space-8);background:var(--color-surface);border:1px solid var(--color-line);border-radius:var(--radius-md);font-size:13px}
+
+.message.self .message-label{color:var(--color-accent);font-weight:500}
+.suggestion-bubble{border:1px dashed var(--color-accent)}
+.coach-mark{font-weight:600}
