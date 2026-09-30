@@ -26,4 +26,6 @@ The user adopted [LYNCA Development Standard v1.0](https://linear.app/lynca/docu
 
 ## Setup and checks
 
-Node.js >=22; development runtime is Node.js 26. Use `npm ci`, `npm test`, `npm start` (owner stdio), and `npm run start:restricted` (authenticated HTTP). Remote hosting and production targets are not selected. See README and `docs/mcp-architecture.md` for access contracts.
+Owner MCP requires Node.js >=22; the SQLite web beta and verification runtime use Node.js 26. Use `npm ci --ignore-scripts`, `npm test`, `npm run build`, and `npm run test:browser` after installing the Playwright browser. `npm start` runs owner stdio; `npm run start:beta` runs the invite-only web and per-account MCP server. `start:restricted` is the legacy single-token development interface. Remote cloud hosting and production targets are not selected. See README, `docs/beta-runbook.md` and `docs/mcp-architecture.md` for access contracts.
+
+Keep browser/feedback/provider checks isolated in temporary databases and knowledge copies. Never append a synthetic acceptance case to the real knowledge. CI makes zero paid model calls; deliberate live verification must have a bounded call count and sanitize its report. Review the final candidate independently before merging changes to authorization, persistence or model policy.

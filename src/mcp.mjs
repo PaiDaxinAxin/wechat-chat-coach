@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/server';
+import packageMetadata from '../package.json' with { type: 'json' };
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { NodeStreamableHTTPServerTransport, hostHeaderValidation, localhostOriginValidation } from '@modelcontextprotocol/node';
 import { z } from 'zod';
@@ -54,7 +55,7 @@ export function createMcpServer({
 } = {}) {
   if (!['owner', 'restricted'].includes(mode)) throw new Error('MCP_MODE_INVALID');
   const store = createKnowledgeStore({ knowledgePath });
-  const server = new McpServer({ name: 'wechat-chat-coach', version: '0.1.0' });
+  const server = new McpServer({ name: 'wechat-chat-coach', version: packageMetadata.version });
   const coach = async (fn, input) => {
     const knowledge = await store.read();
     const output = await fn(input, { knowledgeText: knowledge.text });
