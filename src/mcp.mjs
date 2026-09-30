@@ -26,6 +26,7 @@ const SAFE_ERRORS = new Set([
   'invalid_input', 'missing_api_key', 'invalid_configuration', 'missing_knowledge',
   'provider_http_error', 'provider_timeout', 'invalid_provider_response',
   'truncated_model_output', 'invalid_model_json', 'provider_unreachable', 'invalid_model_output',
+  'missing_model_tool_call', 'multiple_model_tool_calls', 'invalid_model_tool_call', 'unexpected_model_tool_call',
 ]);
 
 function result(value) {

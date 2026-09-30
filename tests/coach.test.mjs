@@ -33,7 +33,16 @@ function validClassification() {
 function mockResponse(value, options = {}) {
   return async () => ({
     ok: true,
-    json: async () => ({ choices: [{ finish_reason: options.finishReason ?? 'stop', message: { content: options.raw ?? JSON.stringify(value) } }] }),
+    json: async () => ({ choices: [{
+      finish_reason: options.finishReason ?? 'tool_calls',
+      message: options.message ?? {
+        content: null,
+        tool_calls: options.calls ?? [{
+          type: 'function',
+          function: { name: 'submit_coaching_result', arguments: options.raw ?? JSON.stringify(value) },
+        }],
+      },
+    }] }),
   });
 }
 
@@ -41,13 +50,25 @@ test('classification sends the complete knowledge and known Agnes request shape'
   let calls = 0;
   const fetchImpl = async (url, request) => {
     calls += 1;
-    assert.equal(url, 'https://api.agnes-ai.cn/v1/chat/completions');
+    assert.equal(url, 'https://apihub.agnes-ai.com/v1/chat/completions');
     assert.equal(request.method, 'POST');
     assert.equal(request.headers.Authorization, 'Bearer mock-key');
     const body = JSON.parse(request.body);
     assert.equal(body.messages[1].content, knowledgeText);
     assert.equal(body.model, 'agnes-3.0-flash');
     assert.equal(body.chat_template_kwargs.enable_thinking, false);
+    assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
+    assert.equal(body.parallel_tool_calls, false);
+    assert.equal(body.tools.length, 1);
+    assert.equal(body.tools[0].type, 'function');
+    assert.equal(body.tools[0].function.name, 'submit_coaching_result');
+    const parameters = body.tools[0].function.parameters;
+    assert.equal(parameters.type, 'object');
+    assert.equal(parameters.additionalProperties, false);
+    assert.deepEqual(parameters.properties.status.enum, ['ready', 'needs_context']);
+    assert.equal(Object.hasOwn(parameters.properties, 'reply'), false);
+    assert.equal(parameters.properties.options.minItems, 3);
+    assert.equal(parameters.properties.options.maxItems, 3);
     return mockResponse(validClassification())();
   };
   const result = await classifyChat(input, { knowledgeText, env, fetchImpl });
@@ -79,6 +100,23 @@ test('malformed JSON and truncated output are rejected without retries', async (
   await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(validClassification(), { finishReason: 'length' }) }), { code: 'truncated_model_output' });
 });
 
+test('only one expected function submission is accepted; model tools are never executed', async (t) => {
+  const validCall = { type: 'function', function: { name: 'submit_coaching_result', arguments: JSON.stringify(validClassification()) } };
+  const cases = [
+    ['plain text instead of tool submission', { message: { content: JSON.stringify(validClassification()) } }, 'missing_model_tool_call'],
+    ['empty tool calls', { calls: [] }, 'missing_model_tool_call'],
+    ['more than one submission', { calls: [validCall, validCall] }, 'multiple_model_tool_calls'],
+    ['unexpected function name', { calls: [{ ...validCall, function: { ...validCall.function, name: 'read_private_knowledge' } }] }, 'unexpected_model_tool_call'],
+    ['wrong tool type', { calls: [{ ...validCall, type: 'other' }] }, 'invalid_model_tool_call'],
+    ['arguments must be a JSON string', { calls: [{ ...validCall, function: { ...validCall.function, arguments: validClassification() } }] }, 'invalid_model_tool_call'],
+  ];
+  for (const [name, options, code] of cases) {
+    await t.test(name, async () => {
+      await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(null, options) }), { code });
+    });
+  }
+});
+
 test('weights, direction uniqueness, evidence IDs and observed heat are strictly checked', async (t) => {
   const mutations = [
     ['weights do not add to one', (value) => { value.options[0].weight = 0.7; }],
@@ -104,6 +142,13 @@ test('reply respects requested direction and allows an empty pause', async () =>
     const body = JSON.parse(request.body);
     assert.equal(body.messages[1].content, knowledgeText);
     assert.match(body.messages[2].content, /"direction":"down"/);
+    const parameters = body.tools[0].function.parameters;
+    assert.equal(body.tools.length, 1);
+    assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
+    assert.equal(parameters.additionalProperties, false);
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ['action', 'reason', 'reply', 'styleNote']);
+    assert.equal(parameters.properties.reply.maxLength, 350);
+    assert.deepEqual(parameters.properties.action.enum, ['reply', 'wait', 'clarify', 'invite', 'pause']);
     return mockResponse(value)();
   };
   assert.deepEqual(await generateReply({ context: input, direction: 'down' }, { knowledgeText, env, fetchImpl }), value);
@@ -122,6 +167,23 @@ test('provider failures reveal categories/status, never raw error bodies or keys
   const key = 'mock-secret-never-return';
   await assert.rejects(classifyChat(input, { knowledgeText, env: { AGNES_API_KEY: key }, fetchImpl: async () => { throw new Error(key); } }), (error) => error instanceof CoachError && error.code === 'provider_unreachable' && !error.message.includes(key));
   await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: async () => ({ ok: false, status: 429, json: () => { throw new Error('must not read'); } }) }), { code: 'provider_http_error', status: 429 });
+});
+
+test('schema and semantic diagnostics contain only fixed categories and schema paths', async () => {
+  const value = validClassification();
+  value.options[0].relationAction = 'private-source-never-echo';
+  await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(value) }), (error) => {
+    assert.equal(error.code, 'invalid_model_output');
+    assert.deepEqual(error.diagnostics, [{ code: 'invalid_value', path: ['options', 0, 'relationAction'] }]);
+    assert.doesNotMatch(JSON.stringify(error), /private-source-never-echo/);
+    return true;
+  });
+  const invalidWeights = validClassification();
+  invalidWeights.options[0].weight = 0.9;
+  await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(invalidWeights) }), (error) => {
+    assert.deepEqual(error.diagnostics, [{ code: 'invalid_weight_sum', path: [] }]);
+    return true;
+  });
 });
 
 test('configured endpoint must not contain credentials or use insecure remote HTTP', async () => {

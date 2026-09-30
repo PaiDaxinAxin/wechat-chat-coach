@@ -124,6 +124,23 @@ test('known provider HTTP errors expose only the safe category and integer statu
   assert.ok(!JSON.stringify(output).includes('private upstream'));
 });
 
+test('native submission errors retain their safe category through MCP', async (t) => {
+  const fixture_ = await fixture(t);
+  let code;
+  const client = await localClient(t, { ...fixture_, mode: 'restricted', replyFn: async () => {
+    const error = new Error('private provider payload');
+    error.code = code;
+    error.diagnostics = [{ code: 'private value must not pass through', path: [] }];
+    throw error;
+  } });
+  for (code of ['missing_model_tool_call', 'multiple_model_tool_calls', 'invalid_model_tool_call', 'unexpected_model_tool_call']) {
+    const output = await client.callTool({ name: 'coach_reply', arguments: { context } });
+    assert.equal(output.isError, true);
+    assert.deepEqual(JSON.parse(output.content[0].text), { error: code });
+    assert.ok(!JSON.stringify(output).includes('private'));
+  }
+});
+
 test('HTTP refuses unauthenticated requests before protocol metadata or model execution', async (t) => {
   let calls = 0;
   const fixture_ = await httpFixture(t, { mcpOptions: { classifyFn: async () => { calls++; return {}; } } });
