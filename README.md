@@ -20,7 +20,7 @@ Requires Node.js >=22. Run `npm ci`, `npm test`, then `npm start`.
 
 The owner stdio entry is intended for the owner's computer. Codex/CloudCode can read the complete knowledge, use the client's stronger model to discuss it, submit feedback and append reviewed supplements. Configuration example: [examples/mcp-config.json](examples/mcp-config.json). Use the actual absolute project path and Node executable. Protocol tests do not establish integration with every host.
 
-Optional server-side tools read `AGNES_API_KEY` from the process environment. Defaults: `AGNES_BASE_URL=https://api.agnes-ai.cn/v1`, `AGNES_MODEL=agnes-3.0-flash`; `AGNES_TIMEOUT_MS` sets the deadline. The [official Agnes documentation](https://www.agnes-ai.cn/zh-Hans/docs/agnes-30-flash) defines the compatible transport. Never put credentials in committed examples. Each model request sends the complete current knowledge; malformed/incomplete responses fail visibly without automatic retries or knowledge truncation.
+Optional server-side tools read `AGNES_API_KEY` from the process environment. Defaults: `AGNES_BASE_URL=https://apihub.agnes-ai.com/v1` (owner-selected gateway), `AGNES_MODEL=agnes-3.0-flash`; `AGNES_TIMEOUT_MS` sets the deadline. The [official Agnes documentation](https://www.agnes-ai.cn/zh-Hans/docs/agnes-30-flash) defines the compatible transport. Never put credentials in committed examples. Each model request sends the complete current knowledge and submits its result through one forced function using a mechanically derived JSON Schema; malformed/incomplete responses fail visibly without automatic retries or knowledge truncation.
 
 ## Restricted MCP
 
