@@ -39,3 +39,7 @@ Topic moves are `up` (上切), `down` (下切) and `sideways` (平移), distinct
 No real chat effectiveness or classification accuracy is established. The free three-trial and paid questionnaire rules remain product requirements; account/billing enforcement is not implemented.
 
 All submitted feedback is isolated in ignored `data/` as raw, untrusted observations. It never updates knowledge or enters training/evaluation automatically. Provenance validation, deduplication, privacy processing and owner review are required before promotion. A receipt is not a clean sample.
+
+## Knowledge write recovery
+
+Concurrent owner processes use a fixed `knowledge/game-system.md.lock` and expected knowledge hash. A conflict requires re-reading the latest document before reviewing a new append. If a process exits while holding the lock, inspect its PID and creation time, confirm that process has stopped, and remove the abandoned lock locally. The service never automatically deletes an existing lock. Originals remain immutable; temporary and lock files are ignored by Git.

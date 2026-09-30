@@ -1,0 +1,19 @@
+{
+  "name": "wechat-chat-coach",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "个人聊天教练：完整体系知识库、反馈与 MCP 接入",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/mcp.mjs",
+    "start:restricted": "node src/mcp.mjs --http",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.2.0",
+    "@modelcontextprotocol/node": "2.1.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": { "@modelcontextprotocol/client": "2.2.0" }
+}

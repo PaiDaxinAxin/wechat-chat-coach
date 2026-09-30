@@ -1,6 +1,6 @@
 # ADR-001: Owner and restricted coaching MCP
 
-Status: Accepted access boundary; initial implementation under verification. Date: 2026-09-30. Decider: project owner.
+Status: Accepted access boundary; initial implementation verified locally. Date: 2026-09-30. Decider: project owner.
 
 ## Context and decision
 
