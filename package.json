@@ -12,8 +12,10 @@
     "start:restricted": "node src/mcp.mjs --http",
     "build": "node scripts/build.mjs",
     "start:beta": "node src/beta.mjs",
+    "demo": "node src/beta.mjs --demo",
     "beta:admin": "node scripts/beta-admin.mjs",
     "test:browser": "node scripts/verify-browser.mjs",
+    "test:demo": "node scripts/verify-demo.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {

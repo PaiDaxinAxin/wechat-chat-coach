@@ -1,10 +1,11 @@
 const $ = (id) => document.getElementById(id);
 const state = {
-  meta: null, me: null, csrf: '', authMode: 'login', counterparts: [], topThree: [],
+  meta: null, me: null, csrf: '', authMode: 'login', localDemo: false, counterparts: [], topThree: [],
   selectedId: null, detail: null, selectedDirection: null, suggestion: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
   feedbackDrafts: new Map(), feedbackKey: null, intentDrafts: new Map(),
+  activeInlineCard: null, inlineTrigger: null, bootLoading: false,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
@@ -35,6 +36,9 @@ function announce(message, kind = 'success') {
   notice.textContent = message;
   notice.className = `notice ${kind}`;
   notice.hidden = !message;
+  $('auth-status').textContent = message;
+  $('auth-status').className = kind === 'error' ? 'form-error' : 'helper';
+  $('auth-status').hidden = $('auth').hidden || !message;
 }
 async function api(path, { method = 'GET', body } = {}) {
   const headers = { accept: 'application/json' };
@@ -50,7 +54,10 @@ async function api(path, { method = 'GET', body } = {}) {
     const error = new Error(payload.error?.message || '操作未完成，请稍后重试。');
     error.code = payload.error?.code;
     error.status = response.status;
-    if (response.status === 401 && state.me) clearSessionUI();
+    if (response.status === 401 && state.me) {
+      clearSessionUI();
+      if (state.localDemo) showStartup('演示会话已结束，请重新打开聊天后继续。不会自动调用模型。', { failed: true });
+    }
     throw error;
   }
   return payload.data;
@@ -72,12 +79,87 @@ async function perform(button, label, callback) {
       localError.scrollIntoView({ block: 'nearest' });
     }
   }
-  finally { if (button?.isConnected) { button.disabled = button.dataset.locked === 'true'; button.textContent = original; } }
+  finally { if (button?.isConnected) { button.disabled = button.dataset.locked === 'true'; button.textContent = original; if (button.id === 'save-message') updateComposer(); } }
 }
 function post(path, body) { return api(path, { method: 'POST', body }); }
 function put(path, body) { return api(path, { method: 'PUT', body }); }
 function counterpartPath(id = state.selectedId) { return `/api/counterparts/${encodeURIComponent(id)}`; }
+const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'feedback-panel', 'admin-view'];
+function closeInlineCards({ restoreFocus = false } = {}) {
+  const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
+  const trigger = state.inlineTrigger;
+  for (const id of inlineCards) $(id).hidden = true;
+  state.activeInlineCard = null; state.inlineTrigger = null;
+  if (restoreFocus && focusedInCard) {
+    const triggerMenu = trigger?.closest('.chat-menu');
+    const menuSummary = triggerMenu?.querySelector(':scope > summary');
+    const insideClosedMenu = triggerMenu && !triggerMenu.open && trigger !== menuSummary;
+    const visibleTrigger = !insideClosedMenu && trigger?.isConnected && trigger.matches('button,input,textarea,select,a[href],summary,[tabindex]') && trigger.getClientRects().length ? trigger : menuSummary || $('chat-menu').querySelector('summary');
+    visibleTrigger?.focus({ preventScroll: true });
+  }
+}
+function openInlineCard(id) {
+  if (!inlineCards.includes(id)) return;
+  const trigger = document.activeElement;
+  closeInlineCards();
+  $(id).hidden = false;
+  state.activeInlineCard = id; state.inlineTrigger = trigger;
+  $('chat-menu').open = false;
+  $(id).tabIndex = -1;
+  $(id).scrollIntoView({ block: 'start', behavior: 'auto' });
+  const firstField = $(id).querySelector('input:not([hidden]):not([disabled]),textarea:not([disabled]),select:not([disabled])');
+  (firstField?.getClientRects().length ? firstField : $(id)).focus({ preventScroll: true });
+}
+function closeMenu(menu, { restoreFocus = false } = {}) {
+  const focusedInside = menu.contains(document.activeElement);
+  menu.open = false;
+  if (restoreFocus && focusedInside) menu.querySelector('summary')?.focus({ preventScroll: true });
+}
+function scrollToLatest() {
+  requestAnimationFrame(() => { $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
+}
+function updateComposer() {
+  const ready = Boolean(state.selectedId && state.detail);
+  $('message-text').disabled = !ready;
+  $('message-speaker').disabled = !ready;
+  $('save-message').disabled = !ready;
+  $('save-message').dataset.locked = String(!ready);
+  $('save-message').textContent = state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
+  $('message-text').placeholder = $('message-speaker').value === 'self' ? '填写你已经发出的原话…' : '粘贴对方刚说的话…';
+  for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
+  $('open-feedback').disabled = !ready || !state.suggestion;
+}
+function initializeTheme() {
+  const system = window.matchMedia('(prefers-color-scheme: dark)');
+  let chosen = null;
+  try { const saved = localStorage.getItem('chat-coach-theme'); if (saved === 'day' || saved === 'night') chosen = saved; } catch { /* Theme storage is optional. */ }
+  function apply(theme) {
+    document.documentElement.dataset.theme = theme;
+    $('theme-toggle').textContent = theme === 'night' ? '日间' : '夜间';
+    $('theme-toggle').setAttribute('aria-label', theme === 'night' ? '切换日间主题' : '切换夜间主题');
+  }
+  apply(chosen || (system.matches ? 'night' : 'day'));
+  $('theme-toggle').addEventListener('click', () => {
+    chosen = document.documentElement.dataset.theme === 'night' ? 'day' : 'night';
+    apply(chosen);
+    try { localStorage.setItem('chat-coach-theme', chosen); } catch { /* Keep the selected theme for this page. */ }
+  });
+  system.addEventListener('change', (event) => { if (!chosen) apply(event.matches ? 'night' : 'day'); });
+}
+function applyDemoMode() {
+  state.localDemo = state.meta?.localDemo?.enabled === true && state.meta.localDemo.synthetic === true;
+  $('demo-banner').hidden = !state.localDemo;
+  $('logout').hidden = state.localDemo;
+  if (state.localDemo) {
+    $('auth').hidden = true;
+    $('admin-nav').hidden = true;
+    $('admin-view').hidden = true;
+    $('profile-title').textContent = '演示画像：表达风格与练习目标';
+    $('profile-intro').textContent = '以下是预置的虚构背景，可修改后观察建议如何变化。这份演示画像不代表你的真实情况。';
+  }
+}
 function setAuthMode(mode) {
+  if (state.localDemo) return;
   state.authMode = mode;
   const register = mode === 'register';
   $('invite-field').hidden = !register;
@@ -91,33 +173,31 @@ function setAuthMode(mode) {
   }
 }
 function showView(view) {
-  if (view === 'admin' && state.me?.user.role !== 'owner') return;
-  for (const name of ['coach', 'profile', 'admin']) $(`${name}-view`).hidden = name !== view;
-  document.querySelectorAll('[data-view]').forEach((button) => {
-    const active = button.dataset.view === view;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', String(active));
-  });
+  if (view === 'admin' && (state.localDemo || state.me?.user.role !== 'owner')) return;
+  if (view === 'coach') { closeInlineCards({ restoreFocus: true }); scrollToLatest(); }
+  if (view === 'profile') openInlineCard('profile-view');
+  if (view === 'admin') openInlineCard('admin-view');
   if (view === 'admin') void perform($('reload-admin'), '读取中…', loadAdmin);
 }
 function updateQuota(quota = state.me?.quota) {
   if (!quota || !state.me) return;
   state.me.quota = quota;
   const remaining = quota.classificationRemaining;
-  $('quota-summary').textContent = `${remaining === null ? '付费内测方向分析' : `方向分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
+  $('quota-summary').textContent = `${remaining === null ? state.localDemo ? 'Demo 方向分析' : '付费内测方向分析' : `方向分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
   const unavailable = state.me.user.plan !== 'paid' && remaining === 0;
   $('classify').hidden = unavailable;
   $('classify-availability').textContent = unavailable
     ? '三次方向分析试用已用完。你仍可直接生成回复；本轮不调用分类器，也不展示虚构权重。'
     : '方向分析依据已保存的双方背景与当前对话；一次完整分析计一次，同一上下文或切换方向不重复计次。权重不是成功率。';
+  updateComposer();
 }
 async function reloadMe() {
   const me = await api('/api/me');
   state.me = me;
   state.csrf = me.csrfToken;
-  $('account-name').textContent = me.user.username;
-  $('plan-badge').textContent = me.user.plan === 'paid' ? '付费内测' : '免费内测';
-  $('admin-nav').hidden = me.user.role !== 'owner';
+  $('account-name').textContent = state.localDemo ? '虚构演示账号' : me.user.username;
+  $('plan-badge').textContent = state.localDemo ? '本机 Demo' : me.user.plan === 'paid' ? '付费内测' : '免费内测';
+  $('admin-nav').hidden = state.localDemo || me.user.role !== 'owner';
   $('questionnaire-kind').querySelector('[value="full"]').disabled = me.user.plan !== 'paid';
   updateQuota();
   return me;
@@ -129,7 +209,7 @@ function fillProfile() {
   const kind = profile.questionnaire?.kind === 'full' && state.me.user.plan === 'paid' ? 'full' : 'short';
   $('questionnaire-kind').value = kind;
   renderQuestionnaire(kind);
-  $('profile-saved').textContent = profile.background ? '已保存的画像可随时修改。' : '完成画像后开始：当前风格和成长目标会分别进入辅助背景。';
+  $('profile-saved').textContent = state.localDemo ? '这是虚构演示画像。修改只影响本机 Demo，后续 AI 会使用更新后的内容。' : profile.background ? '已保存的画像可随时修改。' : '完成画像后开始：当前风格和成长目标会分别进入辅助背景。';
 }
 function captureAnswers() {
   $('questionnaire').querySelectorAll('select[data-question-id]').forEach((select) => {
@@ -166,22 +246,22 @@ async function loadCounterparts() {
   if (!state.selectedId && state.counterparts.length) await loadCounterpart(state.counterparts[0].id);
 }
 function renderDirectory() {
-  $('counterpart-list').replaceChildren(...state.counterparts.map((person) => {
+  $('counterpart-select').replaceChildren(...state.counterparts.map((person) => {
     const rank = state.topThree.indexOf(person.id);
-    const heading = el('span', { class: 'person-heading' }, person.alias);
-    if (rank >= 0) heading.append(el('span', { class: 'rank' }, `优先 ${rank + 1}`));
-    const button = el('button', { type: 'button', class: `person-button${person.id === state.selectedId ? ' active' : ''}`, 'aria-pressed': String(person.id === state.selectedId), onclick: () => void perform(button, '读取对话…', () => loadCounterpart(person.id)) }, heading, el('span', { class: 'person-meta' }, `${heatNames[person.heat?.status] || '待观察'} · ${channelNames[person.channel] || '背景待补充'}`));
-    return button;
+    return el('option', { value: person.id }, `${person.alias}${rank >= 0 ? ` · 优先 ${rank + 1}` : ''}`);
   }));
-  if (!state.counterparts.length) $('counterpart-list').append(el('p', { class: 'helper' }, '还没有对象，先添加认识背景。'));
+  if (!state.counterparts.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
+  $('counterpart-select').value = state.selectedId || '';
 }
 async function loadCounterpart(id) {
   saveFeedbackDraft();
   const previousId = state.detail?.counterpart.id;
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
+  if (changed) closeInlineCards();
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
+  if (changed) { state.detail = null; state.suggestion = null; updateComposer(); }
   renderDirectory();
   const detail = await api(counterpartPath(id));
   if (state.selectedId !== id) return;
@@ -192,10 +272,10 @@ async function loadCounterpart(id) {
   $('message-form').reset();
   $('editing-message').textContent = '';
   $('cancel-message-edit').hidden = true;
-  $('save-message').textContent = '加入对话';
   $('empty-state').hidden = true;
   $('counterpart-workspace').hidden = false;
-  $('counterpart-title').textContent = detail.counterpart.alias;
+  $('counterpart-title').textContent = '模拟微信';
+  $('counterpart-select').setAttribute('aria-label', `选择聊天对象，当前是${detail.counterpart.alias}`);
   $('counterpart-channel').textContent = `${channelNames[detail.counterpart.channel] || '认识背景'} · 此前约 ${detail.counterpart.rounds ?? 0} 轮`;
   $('counterpart-background').textContent = detail.counterpart.background || '';
   renderHeat(detail.heat);
@@ -207,6 +287,8 @@ async function loadCounterpart(id) {
   state.suggestion = suggestions.find((item) => item.id === currentId) || suggestions.at(-1) || null;
   renderSuggestion();
   fillMeeting(detail.meeting);
+  updateComposer();
+  if (changed) scrollToLatest();
 }
 function renderJobs(jobs) {
   let history = $('job-history');
@@ -244,19 +326,19 @@ function renderHeat(heat) {
     return card;
   }));
   const trend = heat?.trend?.status;
-  $('heat-confidence').textContent = `${confidenceNames[heat?.confidence] || '证据有限'} · 已观察 ${known}/5 个维度 · ${trend === 'up' || trend === 'rising' ? '有上升迹象' : trend === 'down' || trend === 'falling' ? '有下降迹象' : '趋势暂不确定'}。阶段与权重尚未校准。`;
+  $('heat-confidence').textContent = `${confidenceNames[heat?.confidence] || '证据有限'} · 已观察 ${known}/5 个维度 · ${trend === 'up' || trend === 'rising' ? '有上升迹象' : trend === 'down' || trend === 'falling' ? '有下降迹象' : trend === 'stable' ? '目前变化不明显' : '趋势暂不确定'}。阶段与权重尚未校准。`;
 }
 function renderTranscript() {
   const messages = state.detail?.messages || [];
   $('message-count').textContent = `${messages.length} 条记录`;
   $('transcript').replaceChildren(...messages.map((message) => {
-    const controls = el('div', { class: 'message-controls' },
-      el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => editMessage(message) }, '编辑'),
-      el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => void perform(event.currentTarget, '删除中…', () => deleteMessage(message)) }, '删除'));
-    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}` }, el('span', { class: 'message-label' }, message.speaker === 'self' ? '我' : state.detail.counterpart.alias), el('div', { class: 'message-bubble' }, message.text), controls);
+    const controls = el('details', { class: 'message-menu chat-menu' });
+    controls.append(el('summary', { 'aria-label': `${message.speaker === 'self' ? '我的' : '对方的'}消息操作` }, '⋯'), el('div', { class: 'chat-menu-items' },
+      el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => { controls.open = false; editMessage(message); } }, '编辑'),
+      el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => { closeMenu(controls, { restoreFocus: true }); void perform(event.currentTarget, '删除中…', () => deleteMessage(message)); } }, '删除')));
+    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label' }, message.speaker === 'self' ? '我' : state.detail.counterpart.alias), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls));
   }));
   if (!messages.length) $('transcript').append(el('p', { class: 'helper' }, '还没有对话。按说话人逐条加入原文，也可以先补充此前背景。'));
-  $('transcript').scrollTop = $('transcript').scrollHeight;
 }
 function editMessage(message) {
   state.editingMessageId = message.id;
@@ -265,6 +347,7 @@ function editMessage(message) {
   $('editing-message').textContent = '正在编辑已有消息';
   $('cancel-message-edit').hidden = false;
   $('save-message').textContent = '保存修改';
+  updateComposer();
   $('message-text').focus();
 }
 function cancelMessageEdit() {
@@ -272,7 +355,7 @@ function cancelMessageEdit() {
   $('message-form').reset();
   $('editing-message').textContent = '';
   $('cancel-message-edit').hidden = true;
-  $('save-message').textContent = '加入对话';
+  updateComposer();
 }
 async function deleteMessage(message) {
   if (!confirm('删除这条对话记录？相关的旧判断将失效。')) return;
@@ -312,6 +395,7 @@ function requestId(type, id, direction = '', intent = '') {
 function currentContextKey() { return JSON.stringify([state.selectedId, state.detail?.counterpart, state.detail?.messages, state.me?.profile]); }
 async function coachCall(type, button) {
   if (button.disabled) return;
+  closeInlineCards();
   const id = state.selectedId;
   if (!id) return;
   const userId = state.me?.user.id;
@@ -342,7 +426,7 @@ async function coachCall(type, button) {
         const suggestions = state.detail.suggestions || (state.detail.suggestions = []);
         if (!suggestions.some((item) => item.id === data.suggestion.id)) suggestions.push(data.suggestion);
         renderSuggestion();
-        $('suggestion-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        scrollToLatest();
       }
     }
     await loadCounterparts();
@@ -376,8 +460,8 @@ function renderSuggestion() {
   saveFeedbackDraft();
   const suggestion = state.suggestion;
   $('suggestion-panel').hidden = !suggestion;
-  $('feedback-panel').hidden = !suggestion;
-  if (!suggestion) { state.feedbackKey = null; $('feedback-form').reset(); return; }
+  $('feedback-panel').hidden = !suggestion || state.activeInlineCard !== 'feedback-panel';
+  if (!suggestion) { state.feedbackKey = null; $('feedback-form').reset(); updateComposer(); return; }
   const relatedMessage = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'self' && message.suggestionId === suggestion.id);
   $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? relatedMessage?.text ?? suggestion.reply ?? '';
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
@@ -396,6 +480,7 @@ function renderSuggestion() {
   const suggestions = state.detail?.suggestions || [];
   $('suggestion-history').hidden = suggestions.length < 2;
   $('suggestion-list').replaceChildren(...[...suggestions].reverse().map((item) => el('button', { type: 'button', class: 'history-button', onclick: () => { state.suggestionDrafts.set(suggestion.id, $('suggestion-text').value); state.suggestion = item; renderSuggestion(); } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
+  updateComposer();
 }
 function updateSentState() {
   if (!state.suggestion) return;
@@ -404,6 +489,7 @@ function updateSentState() {
   const confirmed = matching.some((message) => message.provenance === 'user_confirmed_record');
   $('record-sent').disabled = confirmed || !text;
   $('record-sent').dataset.locked = String(confirmed || !text);
+  $('suggestion-title').textContent = confirmed ? '我 · AI 建议，已记录发送' : '我 · AI 建议，待发送';
   $('sent-state').textContent = confirmed ? '已记录你确认发送的这个版本，后续可以补充对方反馈。' : matching.some((message) => message.provenance === 'user_entered_edit') ? '此前记录已被修改。请确认你实际发送的是这个版本，再重新记录。' : '请手动发到微信；这里仅记录你实际发送的版本。';
 }
 function fillMeeting(meeting) {
@@ -433,7 +519,8 @@ function openCounterpart(person = null) {
   for (const [id, key] of [['intake-alias', 'alias'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = person?.[key] || (key === 'channel' ? 'app' : '');
   $('intake-rounds').value = person?.rounds ?? 0;
   updateIntakeChannel();
-  $('counterpart-dialog').showModal();
+  $('delete-counterpart').hidden = !person;
+  openInlineCard('counterpart-dialog');
   $('intake-alias').focus();
 }
 async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。') {
@@ -442,7 +529,7 @@ async function copyText(text, confirmation = '已复制。请检查表达，再�
   catch { announce('浏览器未允许复制。请选中文本手动复制。', 'error'); }
 }
 async function loadAdmin() {
-  if (state.me.user.role !== 'owner') return;
+  if (state.localDemo || state.me.user.role !== 'owner') return;
   const [records, users] = await Promise.all([api('/api/admin/feedback'), api('/api/admin/users')]);
   $('admin-users').replaceChildren(...users.users.map((user) => {
     const select = el('select', { 'aria-label': `${user.username}的内测权限` }, el('option', { value: 'free' }, '免费'), el('option', { value: 'paid' }, '付费内测'));
@@ -518,6 +605,7 @@ $('login-tab').addEventListener('click', () => setAuthMode('login'));
 $('register-tab').addEventListener('click', () => setAuthMode('register'));
 $('auth-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  if (state.localDemo) return;
   void perform($('auth-submit'), '正在进入…', async () => {
     if (state.authMode === 'register' && ($('password').value.length < 10 || !/[\p{L}]/u.test($('password').value) || !/\d/.test($('password').value))) throw new Error('密码需至少 10 个字符，并同时包含字母和数字。');
     const data = await post(`/api/${state.authMode}`, { username: $('username').value.trim(), password: $('password').value, ...(state.authMode === 'register' ? { invite: $('invite').value.trim() } : {}) });
@@ -531,24 +619,42 @@ function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.feedbackDrafts.clear(); state.feedbackKey = null; state.intentDrafts.clear(); state.questionnaireAnswers = {};
-  $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = false;
+  $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
   $('feedback-form').reset(); $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
-  for (const id of ['counterpart-list', 'transcript', 'direction-options', 'suggestion-list', 'questionnaire', 'admin-feedback-list', 'admin-users']) $(id).replaceChildren();
-  for (const id of ['counterpart-title', 'counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
+  for (const id of ['counterpart-select', 'transcript', 'direction-options', 'suggestion-list', 'questionnaire', 'admin-feedback-list', 'admin-users']) $(id).replaceChildren();
+  for (const id of ['counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
+  $('counterpart-title').textContent = '模拟微信';
   $('generated-invite').value = ''; $('invite-result').hidden = true;
   $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('job-history')?.remove(); $('coach-error')?.remove();
-  document.querySelectorAll('.form-error').forEach((node) => node.remove());
-  if ($('counterpart-dialog').open) $('counterpart-dialog').close();
-  $('username').focus();
+  document.querySelectorAll('form .form-error').forEach((node) => node.remove());
+  closeInlineCards(); updateComposer();
+  if (!state.localDemo) $('username').focus();
 }
 $('logout').addEventListener('click', () => void perform($('logout'), '退出中…', async () => {
+  if (state.localDemo) return;
   await post('/api/logout', {});
   clearSessionUI();
   announce('已退出。');
 }));
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
+document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeInlineCards({ restoreFocus: true })));
+document.addEventListener('click', (event) => { document.querySelectorAll('.chat-menu[open]').forEach((menu) => { if (!menu.contains(event.target)) closeMenu(menu); }); });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.querySelectorAll('.chat-menu[open]').forEach((menu) => closeMenu(menu, { restoreFocus: true })); });
+$('counterpart-select').addEventListener('change', async (event) => {
+  const id = event.target.value;
+  if (!id || id === state.selectedId) return;
+  event.target.disabled = true;
+  try { await loadCounterpart(id); }
+  catch (error) { announce(error.message, 'error'); }
+  finally { event.target.disabled = false; }
+});
+for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'meeting-panel'], ['open-feedback', 'feedback-panel'], ['reply-feedback', 'feedback-panel']]) $(button).addEventListener('click', () => {
+  if (!state.detail || card === 'feedback-panel' && !state.suggestion) return;
+  openInlineCard(card);
+});
 $('questionnaire-kind').addEventListener('change', () => { captureAnswers(); renderQuestionnaire($('questionnaire-kind').value); });
+$('profile-form').addEventListener('invalid', (event) => { const details = event.target.closest('details'); if (details) details.open = true; }, true);
 $('profile-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(event.submitter, '保存画像…', async () => {
@@ -556,19 +662,19 @@ $('profile-form').addEventListener('submit', (event) => {
     const kind = $('questionnaire-kind').value;
     const answers = Object.fromEntries((state.meta.questionnaires[kind] || []).map((question) => [question.id, state.questionnaireAnswers[question.id]]));
     await put('/api/profile', { background: $('profile-background').value.trim(), style: $('profile-style').value.trim(), growthGoals: $('profile-growth').value.trim(), relationshipGoal: $('profile-goal').value.trim(), questionnaire: { kind, answers } });
-    await reloadMe(); showView('coach'); if (state.selectedId) await loadCounterpart(state.selectedId); announce('画像已保存，后续辅助会使用更新后的真实背景与成长目标。');
+    await reloadMe(); showView('coach'); if (state.selectedId) await loadCounterpart(state.selectedId); announce(state.localDemo ? '演示画像已保存，后续 AI 会使用更新后的演示内容。' : '画像已保存，后续辅助会使用更新后的真实背景与成长目标。');
   });
 });
 for (const id of ['add-counterpart', 'empty-add']) $(id).addEventListener('click', () => openCounterpart());
-$('edit-counterpart').addEventListener('click', () => openCounterpart(state.detail.counterpart));
+$('edit-counterpart').addEventListener('click', () => { if (state.detail) openCounterpart(state.detail.counterpart); });
 $('intake-channel').addEventListener('change', updateIntakeChannel);
-for (const id of ['close-counterpart-dialog', 'cancel-counterpart-dialog']) $(id).addEventListener('click', () => $('counterpart-dialog').close());
+for (const id of ['close-counterpart-dialog', 'cancel-counterpart-dialog']) $(id).addEventListener('click', () => closeInlineCards({ restoreFocus: true }));
 $('counterpart-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(event.submitter, '保存中…', async () => {
     const input = { alias: $('intake-alias').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: Number($('intake-rounds').value) };
     const data = state.editingCounterpartId ? await put(counterpartPath(state.editingCounterpartId), input) : await post('/api/counterparts', input);
-    $('counterpart-dialog').close(); state.selectedId = data.counterpart.id; await loadCounterparts(); await loadCounterpart(data.counterpart.id); showView('coach'); announce('认识背景已保存。自己的猜测仍需要实际互动验证。');
+    closeInlineCards({ restoreFocus: true }); state.selectedId = data.counterpart.id; await loadCounterparts(); await loadCounterpart(data.counterpart.id); showView('coach'); announce('认识背景已保存。自己的猜测仍需要实际互动验证。');
   });
 });
 $('delete-counterpart').addEventListener('click', () => void perform($('delete-counterpart'), '删除中…', async () => {
@@ -581,19 +687,27 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   state.selectedId = null; state.detail = null; state.suggestion = null;
   $('feedback-form').reset(); $('suggestion-text').value = ''; $('intent').value = '';
   for (const element of ['transcript', 'direction-options', 'suggestion-list', 'heat-dimensions']) $(element).replaceChildren();
-  $('counterpart-title').textContent = ''; $('counterpart-background').textContent = '';
+  $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
+  closeInlineCards(); updateComposer();
   await loadCounterparts(); announce('对象及其关联记录已删除。');
 }));
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);
+$('message-speaker').addEventListener('change', updateComposer);
+$('message-text').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+  event.preventDefault();
+  if (!$('save-message').disabled) $('message-form').requestSubmit($('save-message'));
+});
 $('message-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(event.submitter, '保存消息…', async () => {
     const id = state.selectedId;
+    if (!id || !state.detail) throw new Error('先添加或选择一位聊天对象。');
     const body = { speaker: $('message-speaker').value, text: $('message-text').value.trim() };
     if (state.editingMessageId) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(state.editingMessageId)}`, body);
     else await post(`${counterpartPath(id)}/messages`, body);
-    cancelMessageEdit(); await refreshCounterpart(id); announce('对话已保存。旧判断会随上下文变化失效，请按新记录继续分析。');
+    cancelMessageEdit(); await refreshCounterpart(id); closeInlineCards(); scrollToLatest(); announce('原话已记录。需要建议时，点击对话里的“分析三个方向”。');
   });
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
@@ -642,21 +756,56 @@ $('invite-form').addEventListener('submit', (event) => {
 });
 $('copy-invite').addEventListener('click', () => void copyText($('generated-invite').value, '邀请码已复制。'));
 
+function showStartup(message, { failed = false, restoreFocus = false } = {}) {
+  const hadFocus = $('startup-status').contains(document.activeElement);
+  $('startup-status').hidden = !message;
+  $('startup-message').textContent = message;
+  $('startup-message').className = failed ? 'form-error' : 'helper';
+  $('startup-retry').hidden = !failed;
+  if (!message && (hadFocus || restoreFocus)) {
+    const next = !$('auth').hidden ? $('username') : $('message-text').disabled ? $('add-counterpart') : $('message-text');
+    next.focus({ preventScroll: true });
+  }
+}
+$('startup-retry').addEventListener('click', () => void boot());
 async function boot() {
+  if (state.bootLoading) return;
+  const retryHadFocus = document.activeElement === $('startup-retry');
+  state.bootLoading = true;
+  $('startup-retry').disabled = true;
+  $('auth').hidden = true;
+  showStartup('正在打开聊天…');
   announce('正在连接内测工作区…', 'progress');
   try {
     state.meta = await api('/api/meta');
+    applyDemoMode();
     const privacy = state.meta.privacy;
     if (typeof privacy === 'string') $('privacy-note').textContent = privacy;
     else if (privacy?.summary) $('privacy-note').textContent = privacy.summary;
-    try { await enterWorkspace(); announce(''); }
-    catch (error) {
-      if (error.status === 401) { $('auth').hidden = false; announce(''); }
-      else { $('auth').hidden = false; throw error; }
+    if (state.localDemo) {
+      announce('正在打开本机演示…', 'progress');
+      const session = await post('/api/demo/session', {});
+      state.csrf = session.csrfToken;
+      await enterWorkspace();
+      if (typeof session.counterpartId === 'string' && state.counterparts.some(({ id }) => id === session.counterpartId) && state.selectedId !== session.counterpartId) await loadCounterpart(session.counterpartId);
+      showStartup('', { restoreFocus: retryHadFocus });
+      announce('');
+      return;
     }
-  } catch (error) { $('auth').hidden = false; announce(error.message, 'error'); }
+    try { await enterWorkspace(); showStartup('', { restoreFocus: retryHadFocus }); announce(''); }
+    catch (error) {
+      if (error.status === 401) { $('auth').hidden = false; showStartup('', { restoreFocus: retryHadFocus }); announce(''); }
+      else throw error;
+    }
+  } catch (error) {
+    $('workspace').hidden = true;
+    $('auth').hidden = true;
+    announce(error.message, 'error');
+    showStartup(`${error.message} 可重试打开；不会自动调用模型。`, { failed: true });
+  } finally { state.bootLoading = false; $('startup-retry').disabled = false; }
 }
 // Keep client limits within the authoritative domain schema.
 for (const [id, maximum] of Object.entries({ password: 128, 'profile-style': 10000, 'profile-growth': 10000, 'profile-goal': 10000, 'intake-alias': 80, 'suggestion-text': 5000, 'feedback-sent': 5000, 'feedback-reply': 5000, 'feedback-observation': 5000 })) $(id).maxLength = maximum;
 $('intent').parentElement.firstChild.textContent = '本轮意图（用于回复生成）';
+initializeTheme();
 void boot();

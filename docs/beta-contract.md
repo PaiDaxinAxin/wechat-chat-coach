@@ -2,11 +2,13 @@
 
 Status: implemented; local synthetic browser and bounded Agnes integration verified. Personal project; 2026-09-30. External access is a separate delivery gate in the acceptance matrix.
 
-The deliverable is a working invite-only web application, not just the MCP or a static mock. The same server owns profiles, conversation history, quotas, calls, untrusted feedback and review. Every provider call contains the complete current source knowledge and all approved supplements. No client bundle contains knowledge or credentials.
+The application has a direct local demo and a retained invited-user mode. The owner currently deferred email, login and public authorization work and requested one simulated WeChat thread with inline AI advice and day/night themes. The same server owns profiles, conversation history, quotas, calls, untrusted feedback and review. Every provider call contains the complete current source knowledge and all approved supplements. No client bundle contains knowledge or credentials.
 
 ## User journey
 
-An owner issues a single-use free or paid-beta invite. Registration stores a password hash and creates an isolated account. The user fills a short custom questionnaire and real background/style/growth goals; paid accounts may fill the full questionnaire. The user creates counterpart records with meeting channel, app profile or offline scene, previous rounds and background, then adds self/other messages. Each message is editable/deletable. Suggestions are editable and copyable; actual sent versions and later observations are recorded separately. Concrete meeting arrangements have their own state. A directory ranks the three strongest observed interactions, marks insufficient evidence and recommends pausing explicit negative resistance. No display-profile or offline course is included.
+Local demo opens a fixed fictional profile and conversation with no login or onboarding barrier, using a dedicated private database. It stays loopback-only and disables login, registration, management and HTTP MCP routes. Edits survive reload and restart. It never invokes a model automatically at startup or when recording a message.
+
+In retained invited-user mode, an owner issues a single-use free or paid-beta invite. Registration stores a password hash and creates an isolated account. The user fills a short custom questionnaire and real background/style/growth goals; paid accounts may fill the full questionnaire. The user creates counterpart records with meeting channel, app profile or offline scene, previous rounds and background, then adds self/other messages. Each message is editable/deletable. Suggestions are editable and copyable; actual sent versions and later observations are recorded separately. Concrete meeting arrangements have their own state. The header selector marks the three strongest supported interactions; heat evidence and supplemental forms open inside the same thread. Explicit negative resistance recommends pausing. No display-profile or offline course is included.
 
 Free classification has three lifetime successful context analyses. A replay of the same context or switching direction does not consume another classification trial. Failed classifications do not consume successful classification trials. Reserved concurrent calls cannot overspend remaining trials. After exhaustion, generation runs directly without a classification call or fabricated weights. Paid-beta access is owner-granted for testing; this is not a payment processor. Both tiers have configurable bounded provider-call budgets that count started attempts, including provider failures.
 
@@ -14,7 +16,8 @@ Free classification has three lifetime successful context analyses. A replay of 
 
 All JSON responses use `{data: ...}`; failures `{error: {code, message}}`. Cookies carry the session; mutations also require `x-csrf-token` from `/api/me` and same-origin requests. Register/login are same-origin and rate limited. No client-supplied role, plan or user ID grants authority.
 
-- `GET /api/meta` → `{name, questionnaires: {short, full}, privacy}`. Each questionnaire item: `{id, text, dimension, reverse?}`; choices 1–5.
+- `GET /api/meta` → `{name, questionnaires: {short, full}, localDemo:{enabled,synthetic}, privacy}`. Each questionnaire item: `{id, text, dimension, reverse?}`; choices 1–5.
+- Local demo only: `POST /api/demo/session` with the strict empty object `{}` creates the fixed fictional session and returns `{user,csrfToken,counterpartId,synthetic:true}`. Caller identity fields are rejected. Ordinary invited mode returns 404. Loopback socket, Host, Origin and proxy-header checks precede session creation.
 - `POST /api/register` `{invite, username, password}` → session and `{user, csrfToken}`.
 - `POST /api/login` `{username,password}` → `{user,csrfToken}`; `POST /api/logout`.
 - `GET /api/me` → `{user:{id,username,plan,role},csrfToken,profile,quota:{classificationRemaining,providerRemaining}}`.

@@ -26,6 +26,8 @@ The user adopted [LYNCA Development Standard v1.0](https://linear.app/lynca/docu
 
 ## Setup and checks
 
+Current owner direction: direct local demo, a single simulated WeChat thread with inline AI advice, and day/night themes. Email, login and public authorization work are deferred; do not use company mail configuration. See `docs/ui-design.md` for the scoped adoption of the current LYNCA design standard. `npm run demo` is a loopback-only fictional account with a separate database, never an external authentication bypass.
+
 Owner MCP requires Node.js >=22; the SQLite web beta and verification runtime use Node.js 26. Use `npm ci --ignore-scripts`, `npm test`, `npm run build`, and `npm run test:browser` after installing the Playwright browser. `npm start` runs owner stdio; `npm run start:beta` runs the invite-only web and per-account MCP server. `start:restricted` is the legacy single-token development interface. Remote cloud hosting and production targets are not selected. See README, `docs/beta-runbook.md` and `docs/mcp-architecture.md` for access contracts.
 
 Keep browser/feedback/provider checks isolated in temporary databases and knowledge copies. Never append a synthetic acceptance case to the real knowledge. CI makes zero paid model calls; deliberate live verification must have a bounded call count and sanitize its report. Review the final candidate independently before merging changes to authorization, persistence or model policy.
