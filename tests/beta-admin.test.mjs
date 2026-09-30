@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, stat, access, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createBetaStore } from '../src/beta-store.mjs';
+
+const script = fileURLToPath(new URL('../scripts/beta-admin.mjs', import.meta.url));
+test('owner initialization privately preserves usable credentials and refuses silent reset', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'coach-admin-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const receipt = join(dataDir, 'access.json');
+  const first = spawnSync(process.execPath, [script, 'init', '--data-dir', dataDir, '--username', 'owner', '--credentials-file', receipt], { encoding: 'utf8' });
+  assert.equal(first.status, 0);
+  const credentials = JSON.parse(await readFile(receipt, 'utf8'));
+  assert.ok(!first.stdout.includes(credentials.password));
+  assert.equal((await stat(receipt)).mode & 0o777, 0o600);
+  const alternate = join(dataDir, 'new-access.json');
+  const second = spawnSync(process.execPath, [script, 'init', '--data-dir', dataDir, '--username', 'owner', '--credentials-file', alternate], { encoding: 'utf8' });
+  assert.equal(second.status, 1);
+  assert.ok(second.stderr.includes('OWNER_ALREADY_EXISTS'));
+  await assert.rejects(access(alternate));
+  assert.deepEqual(JSON.parse(await readFile(receipt, 'utf8')), credentials);
+  const store = createBetaStore({ dataDir });
+  t.after(() => store.close());
+  const owner = await store.authenticate(credentials);
+  assert.equal(owner.role, 'owner');
+  assert.equal(store.listUsers(owner.id).length, 1);
+});
