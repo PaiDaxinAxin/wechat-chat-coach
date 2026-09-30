@@ -18,7 +18,8 @@ try {
   await mkdir(evidenceDir, { recursive: true });
   let classifications = 0, replies = 0, plans = 0, nextFailure = false, holdClassification = null;
   let releaseClassification, releasePlan, holdPlan;
-  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true,
+  // The expanded mock journey exceeds ten operations; production budget defaults stay unchanged.
+  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 20,
     classifyFn: async (context, options) => {
       classifications++; assert.equal(options.knowledgeText, knowledge);
       if (nextFailure) { nextFailure = false; throw Object.assign(new Error('Synthetic classification timeout'), { code: 'PROVIDER_TIMEOUT' }); }
@@ -273,8 +274,77 @@ try {
   assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
   assert.equal(classifications, 7);
+  await page.locator('#cancel-message-edit').click();
+  const suggestedA = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
+  assert.equal(suggestedA.pendingEligible, true);
+  const feedbackBeforeManual = server.betaStore.listFeedback(me.user.id).length;
+  const manualB = '这是我自己真正发送的 B，不是 AI 的 A。';
+  await page.locator('#message-speaker').selectOption('self'); await page.locator('#message-text').fill(manualB);
+  await response(`/api/counterparts/${secondId}/messages`, 'POST', () => page.locator('#save-message').click());
+  await page.locator('.message-bubble').filter({ hasText: manualB }).waitFor();
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Manual self text supersedes the old AI pending bubble');
+  assert.equal(await page.locator('#suggestion-history').isVisible(), true, 'A single historical suggestion stays reachable');
+  async function viewHistoricalA() {
+    const history = page.locator(`[data-suggestion-id="${suggestedA.id}"]`);
+    if (!await history.isVisible()) await page.locator('#suggestion-history > summary').click();
+    await history.click();
+    await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
+  }
+  await viewHistoricalA();
+  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  const counterpartC = '这是对我实际 B 的后续 C。';
+  await page.locator('#message-speaker').selectOption('other'); await page.locator('#message-text').fill(counterpartC);
+  const cRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${secondId}/followup`) && r.method() === 'POST');
+  const cResult = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
+  assert.equal((await cRequest).postDataJSON().previousSuggestionId, undefined, 'Browsing old A does not select its feedback source');
+  assert.equal(cResult.previousMessage, null); assert.equal(cResult.feedback, null);
+  assert.equal(cResult.timing.fromSource, 'unknown');
+  await page.locator('.message-bubble').filter({ hasText: counterpartC }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  const afterC = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
+  assert.deepEqual(afterC.messages.slice(-2).map((message) => message.text), [manualB, counterpartC]);
+  assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeManual, 'No stale A feedback anchor is created');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await page.waitForFunction(() => !document.getElementById('message-text').disabled);
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Reload never restores superseded A as pending');
+  const newAfterB = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
+  assert.equal(newAfterB.pendingEligible, true, 'A new reply after B remains eligible');
+  await viewHistoricalA();
+  const copiedHistoricalText = '旧建议重新使用时，这个修改版本只按复制记录推定。';
+  await page.locator('#suggestion-text').fill(copiedHistoricalText);
+  await page.locator('#message-text').fill('复制失败也不能擦掉的草稿');
+  await page.route('**/suggestions/*/copied', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SYNTHETIC_COPY_FAILURE', message: '合成复制记录故障。' } }) }));
+  await page.locator('#copy-reply').click();
+  await page.locator('#notice').filter({ hasText: '复制时间未保存' }).waitFor();
+  assert.equal(await page.locator('#message-text').inputValue(), '复制失败也不能擦掉的草稿');
+  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  await page.unroute('**/suggestions/*/copied');
+  const firstRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
+  await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await page.waitForFunction(() => !document.getElementById('message-text').disabled);
+  assert.equal(await page.locator('#suggestion-text').inputValue(), copiedHistoricalText, 'Reload restores the eligible edited copy');
+  await page.locator('#message-text').fill('历史建议新复制后的回应一。');
+  const recopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
+  assert.equal(recopyFollowup.previousMessage.suggestionId, suggestedA.id);
+  assert.equal(recopyFollowup.previousMessage.text, copiedHistoricalText);
+  assert.equal(recopyFollowup.timing.fromSource, 'clipboard_copied');
+  await page.locator('.message-bubble').filter({ hasText: '历史建议新复制后的回应一。' }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await viewHistoricalA();
+  const secondRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
+  assert.notEqual(secondRecopy.copyReceipt.id, firstRecopy.copyReceipt.id);
+  await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
+  await page.locator('#message-text').fill('同一历史建议另一次新复制后的回应二。');
+  const secondRecopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
+  assert.equal(secondRecopyFollowup.previousMessage.suggestionId, suggestedA.id);
+  assert.notEqual(secondRecopyFollowup.feedback.id, recopyFollowup.feedback.id, 'A different fresh copy can support another unverified followup');
+  await page.locator('.message-bubble').filter({ hasText: '同一历史建议另一次新复制后的回应二。' }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, checks: ['direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft'], pageErrors }, null, 2) + '\n');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, checks: ['direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse'], pageErrors }, null, 2) + '\n');
   console.log('Direct single-chat demo journey passed: day/night, inline advice, editable reply, automatic directions, inferred followup feedback, mobile and reload. Zero paid calls.');
 } finally {
   await browser?.close();

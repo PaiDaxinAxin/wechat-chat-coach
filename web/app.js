@@ -296,7 +296,7 @@ async function loadCounterpart(id, { autoAnalyze = true, preserveComposer = fals
   renderJobs(detail.jobs || []);
   const currentId = state.suggestion?.id;
   const suggestions = detail.suggestions || [];
-  state.suggestion = suggestions.find((item) => item.id === currentId) || suggestions.at(-1) || null;
+  state.suggestion = suggestions.find((item) => item.id === currentId && item.pendingEligible === true) || suggestions.findLast((item) => item.pendingEligible === true && item.pendingCopyReceiptId) || suggestions.findLast((item) => item.pendingEligible === true) || null;
   renderSuggestion();
   fillMeeting(detail.meeting);
   updateComposer();
@@ -574,24 +574,26 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
 }
 function renderSuggestion() {
   const suggestion = state.suggestion;
+  const suggestions = state.detail?.suggestions || [];
+  $('suggestion-history').hidden = !suggestions.length;
+  $('suggestion-list').replaceChildren(...[...suggestions].reverse().map((item) => el('button', { type: 'button', class: 'history-button', 'data-suggestion-id': item.id, onclick: () => {
+    if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value);
+    state.suggestion = item; renderSuggestion();
+  } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
   $('suggestion-panel').hidden = !suggestion;
-  if (!suggestion) { updateComposer(); return; }
+  if (!suggestion) { $('suggestion-text').value = ''; updateComposer(); return; }
   const relatedMessage = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'self' && message.suggestionId === suggestion.id);
-  $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? relatedMessage?.text ?? suggestion.reply ?? '';
+  $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? suggestion.pendingReplyText ?? relatedMessage?.text ?? suggestion.reply ?? '';
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
   $('suggestion-reason').textContent = suggestion.reason || '';
   $('suggestion-style').textContent = suggestion.styleNote || '';
-  updateSentState();
-  const suggestions = state.detail?.suggestions || [];
-  $('suggestion-history').hidden = suggestions.length < 2;
-  $('suggestion-list').replaceChildren(...[...suggestions].reverse().map((item) => el('button', { type: 'button', class: 'history-button', onclick: () => { state.suggestionDrafts.set(suggestion.id, $('suggestion-text').value); state.suggestion = item; renderSuggestion(); } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
-  updateComposer();
+  updateSentState(); updateComposer();
 }
 function updateSentState() {
   if (!state.suggestion) return;
-  const inferred = state.detail?.messages?.some((message) => message.speaker === 'self' && message.suggestionId === state.suggestion.id && message.provenance === 'inferred_from_followup');
-  $('suggestion-title').textContent = inferred ? '我 · 上一轮建议' : '我 · AI 建议';
-  $('sent-state').textContent = inferred ? '后续回应已记录；此前表达为推定使用，尚未核实实际发送。' : '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。';
+  const eligible = state.suggestion.pendingEligible === true;
+  $('suggestion-title').textContent = eligible ? '我 · AI 建议' : '历史 AI 建议 · 仅供查看';
+  $('sent-state').textContent = eligible ? '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。' : '这条历史建议不会默认关联续聊。若重新复制使用，复制记录仍不等于已确认发送。';
 }
 function fillMeeting(meeting) {
   $('meeting-kind').value = meeting?.status || 'none';
@@ -847,10 +849,8 @@ $('message-form').addEventListener('submit', (event) => {
     const editing = state.editingMessageId;
     if (editing) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(editing)}`, body);
     else if (body.speaker === 'other') {
-      const draftText = state.suggestion ? $('suggestion-text').value.trim() : '';
-      const alreadyInferred = state.suggestion && state.detail.messages.some((message) => message.suggestionId === state.suggestion.id && message.provenance === 'inferred_from_followup');
-      const previousReplyText = alreadyInferred ? '' : draftText;
-      const copyReceipt = previousReplyText && state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText]));
+      const previousReplyText = state.suggestion?.pendingEligible === true ? $('suggestion-text').value.trim() : '';
+      const copyReceipt = previousReplyText && (state.suggestion.pendingCopyReceiptId || state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText])));
       const followup = { text: body.text, ...(previousReplyText ? { previousSuggestionId: state.suggestion.id, previousReplyText, ...(copyReceipt ? { previousCopyReceiptId: copyReceipt } : {}) } : {}) };
       const key = JSON.stringify(['followup', userId, id, followup]);
       if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
@@ -878,6 +878,7 @@ $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '�
     const data = await post(`${counterpartPath(id)}/suggestions/${encodeURIComponent(suggestionId)}/copied`, { copiedText, requestId: state.requestIds.get(key) });
     state.requestIds.delete(key);
     if (state.me?.user.id === userId) state.copyReceipts.set(JSON.stringify([userId, id, suggestionId, copiedText.trim()]), data.copyReceipt.id);
+    if (state.me?.user.id === userId && state.selectedId === id) await refreshCounterpart(id, { preserveComposer: true });
   } catch (error) {
     if (state.me?.user.id === userId && state.selectedId === id) announce(`文本已复制，但复制时间未保存：${error.message} 仍可粘贴对方下一句继续。`, 'error');
   }

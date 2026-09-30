@@ -1,5 +1,11 @@
 # Verification — 2026-10-01
 
+## Recorded self wording takes priority
+
+[PR #6](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/6) delivered the 场外教练 and natural-followup baseline at `d394443`; its [PR CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36750734600) and [main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36751021474) succeeded.
+
+The followup correction passed **140/140 Node tests**, the three-asset build, invited-user HTTP browser journey, self-signed loopback HTTPS proxy journey and expanded direct-demo browser journey. Recording self wording B after generating A supersedes A, including same-ID speaker/text edits; past immutable cases remain unchanged. Legacy suggestions without snapshots conservatively use later self update times and remain incomplete without backfill. Reload and stale direct API requests cannot restore A as the inferred send or timing anchor. Only a successful matching server copy strictly after the later self record can restore historical use, and each fresh copy has separate consumption. A failed copy or merely viewing history cannot activate it. Without an eligible draft, counterpart C links only to the immediately preceding recorded self B; its interval remains unknown until both actual times are supplied. Automated verification uses temporary synthetic records and zero real provider calls.
+
 ## Natural followup, time and 场外教练 candidate
 
 The preceding delivered baseline is [PR #5](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/5), merged at `e85fcb2`; its [PR CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36743149997) and [main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36743388192) succeeded. The current change has its own evidence below; earlier CI is historical. See [the requirement matrix](beta-acceptance.md).
