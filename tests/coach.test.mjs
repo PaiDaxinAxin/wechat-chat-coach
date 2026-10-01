@@ -57,6 +57,12 @@ test('classification sends the complete knowledge and known Agnes request shape'
     assert.equal(request.headers.Authorization, 'Bearer mock-key');
     const body = JSON.parse(request.body);
     assert.equal(body.messages[1].content, knowledgeText);
+    assert.match(body.messages[0].content, /只有首句也可以记录有限的积极信号/);
+    assert.match(body.messages[0].content, /主动提问、具体展开或自发联系可能支持当轮观察/);
+    assert.match(body.messages[0].content, /字数多不等于高热度，长篇拒绝仍是拒绝/);
+    assert.match(body.messages[0].content, /敷衍问好、礼貌回应或单独问句也不自动判高或低/);
+    assert.match(body.messages[0].content, /热度初判与范围只是未经校准的参考，不是科学概率/);
+    assert.match(body.messages[0].content, /新增消息、批注或背景后重新综合，允许初判随新证据更新/);
     assert.equal(body.model, 'agnes-3.0-flash');
     assert.equal(body.chat_template_kwargs.enable_thinking, false);
     assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
@@ -387,11 +393,14 @@ test('classification retains inferred provenance and time sources and semantical
     assert.equal(nativeSchema.properties.nextAction.maxLength, 200);
     assert.match(body.messages[2].content, /同一次提交必须提供 fieldCoach/);
     assert.match(body.messages[2].content, /currentTopic 用短话题名/);
-    assert.match(body.messages[2].content, /initiative 用一句说明当前目标/);
-    assert.match(body.messages[2].content, /nextAction 用一句给出具体可执行动作/);
+    assert.match(body.messages[2].content, /initiative 用一句说明后续对话方向，点明接下来聊什么、如何发展/);
+    assert.match(body.messages[2].content, /nextAction 用一句给出紧邻的具体可执行动作/);
     assert.match(body.messages[2].content, /pitfall 用一句说明当前最该避免的动作/);
     assert.match(body.messages[2].content, /这些文字字段建议各40字以内，不堆叠原理或回复示例/);
     assert.match(body.messages[2].content, /不编造对方个人雷点/);
+    for (const rule of ['本轮给出 pitfall', '没有个性依据时明确标“通用提醒”', '低热度默认避免连问催回、长篇证明或强行升温', '中热度默认先承接当前内容', '高热度默认避免过度升温、用试探拉扯破坏回应或忽视边界', '不把未知当低热度', '不泛写“继续聊”“提升热度”“输出价值”等含糊作业', '需要留白或停止时说明再接的真实条件']) {
+      assert.ok(body.messages[2].content.includes(rule), rule);
+    }
     assert.match(body.messages[2].content, /明确拒绝时 warmingLayer 为 none，不再推进同类升级/);
     assert.match(body.messages[2].content, /模糊阻力标 ambiguous，不能当作良性阻力/);
     assert.match(body.messages[2].content, /"provenance":"inferred_from_followup"/);

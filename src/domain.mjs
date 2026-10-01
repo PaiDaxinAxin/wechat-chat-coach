@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { ChatMessageSchema } from './chat-record.mjs';
 import { validateAppliedPersonalStyle } from './style-learning.mjs';
@@ -195,7 +196,7 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
   };
 }
 
-export const HEAT_RULE_VERSION = 'provisional-five-dimensions-2';
+export const HEAT_RULE_VERSION = 'provisional-five-dimensions-3';
 const HEAT_DIMENSIONS = Object.freeze(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough']);
 const LEVEL_VALUE = Object.freeze({ negative: -1, passive: 0, positive: 1, repeated_positive: 2 });
 const DimensionSchema = z.strictObject({ level: z.enum(['unknown', ...Object.keys(LEVEL_VALUE)]), evidenceIds: z.array(requiredText(128)) });
@@ -221,8 +222,53 @@ function heatTrend(current, history) {
   return { status: delta >= 10 ? 'rising' : delta <= -10 ? 'falling' : 'stable', comparableDimensions: names, delta };
 }
 
-export function computeHeat(classification, { history = [], observedAt } = {}) {
+function preliminaryRange(score, dimensions, evidenceIds, history, messageIds) {
+  const make = (lower, upper, label, basis, ids) => ({ lower, upper, label, basis, evidenceIds: [...ids], provisional: true });
+  if (score !== null) return make(Math.max(0, score - 15), Math.min(100, score + 15), '综合初判', 'observed_dimensions', evidenceIds);
+  // A sparse last turn cannot erase a sufficiently evidenced full-history
+  // baseline. Propagated ranges retain that baseline across several sparse turns.
+  for (const entry of history.map((item) => item?.heat ?? item).reverse()) {
+    if (entry?.status === 'pause') break;
+    const supportedIds = Array.isArray(entry?.evidenceIds) ? entry.evidenceIds : [];
+    if (entry?.status !== 'insufficient_evidence' && Number.isFinite(entry?.score) && entry.score >= 0 && entry.score <= 100 && entry.coverage >= .4 && new Set(supportedIds).size >= 2 && (!messageIds || supportedIds.every((id) => messageIds.has(id)))) {
+      return make(Math.max(0, entry.score - 15), Math.min(100, entry.score + 15), '参考此前互动', 'historical_baseline', supportedIds);
+    }
+    const previous = entry?.preliminaryRange;
+    if (previous?.basis === 'historical_baseline' && previous.provisional === true && Number.isFinite(previous.lower) && Number.isFinite(previous.upper) && previous.lower >= 0 && previous.upper <= 100 && previous.lower <= previous.upper && Array.isArray(previous.evidenceIds) && new Set(previous.evidenceIds).size >= 2 && (!messageIds || previous.evidenceIds.every((id) => messageIds.has(id)))) {
+      return make(previous.lower, previous.upper, '参考此前互动', 'historical_baseline', previous.evidenceIds);
+    }
+  }
+  if (!evidenceIds.length) return null;
+  const names = HEAT_DIMENSIONS.filter((name) => dimensions[name].level !== 'unknown');
+  return scoreDimensions(dimensions, names) > 33
+    ? make(35, 75, '积极互动', 'observed_dimensions', evidenceIds)
+    : make(10, 45, '偏低投入', 'observed_dimensions', evidenceIds);
+}
+
+export function heatContextsCompatible(previous, current) {
+  // Only appended turns may extend an old observation. Editing an earlier
+  // message, annotation, time, either profile or meeting invalidates that basis.
+  try {
+    const counterpart = (encoded) => {
+      const value = JSON.parse(encoded);
+      if (value.recordedContext) {
+        const { messageCount, firstMessageId, lastMessageId, ...scope } = value.recordedContext;
+        value.recordedContext = scope;
+      }
+      return value;
+    };
+    return Array.isArray(previous?.messages) && Array.isArray(current?.messages)
+      && previous.messages.length <= current.messages.length
+      && isDeepStrictEqual(JSON.parse(previous.userProfile), JSON.parse(current.userProfile))
+      && isDeepStrictEqual(counterpart(previous.counterpartProfile), counterpart(current.counterpartProfile))
+      && (previous.intent ?? '') === (current.intent ?? '')
+      && previous.messages.every((message, index) => isDeepStrictEqual(message, current.messages[index]));
+  } catch { return false; }
+}
+
+export function computeHeat(classification, { history = [], observedAt, context } = {}) {
   if (!Array.isArray(history)) throw new DomainError('INVALID_HEAT_HISTORY');
+  const messageIds = context === undefined ? null : new Set(parse(z.array(MessageSchema), context?.messages, 'INVALID_HEAT_CONTEXT').map(({ id }) => id));
   const empty = Object.fromEntries(HEAT_DIMENSIONS.map((name) => [name, { level: 'unknown', evidenceIds: [] }]));
   const current = classification === null || classification === undefined ? { confidence: 'limited', obstacle: { type: 'none' }, heat: empty } : parse(HeatClassificationSchema, classification, 'INVALID_CLASSIFICATION');
   const dimensions = current.heat;
@@ -230,6 +276,7 @@ export function computeHeat(classification, { history = [], observedAt } = {}) {
     if (dimension.level === 'unknown' && dimension.evidenceIds.length !== 0) throw new DomainError('INVALID_CLASSIFICATION');
     if (dimension.level !== 'unknown' && dimension.evidenceIds.length === 0) throw new DomainError('INVALID_CLASSIFICATION');
     if (new Set(dimension.evidenceIds).size !== dimension.evidenceIds.length) throw new DomainError('INVALID_CLASSIFICATION');
+    if (messageIds && dimension.evidenceIds.some((id) => !messageIds.has(id))) throw new DomainError('INVALID_CLASSIFICATION');
   }
   const knownNames = HEAT_DIMENSIONS.filter((name) => dimensions[name].level !== 'unknown');
   const evidenceIds = [...new Set(knownNames.flatMap((name) => dimensions[name].evidenceIds))].sort();
@@ -253,8 +300,9 @@ export function computeHeat(classification, { history = [], observedAt } = {}) {
   return {
     ruleVersion: HEAT_RULE_VERSION,
     status, score, coverage, confidence: current.confidence, dimensions, evidenceIds,
+    preliminaryRange: status === 'pause' || classification === null || classification === undefined ? null : preliminaryRange(score, dimensions, evidenceIds, history, messageIds),
     trend: sufficientEvidence ? heatTrend(dimensions, history) : { status: 'unknown', comparableDimensions: [], delta: null }, provisional: true,
-    scoreMeaning: 'Ordinal observed-interaction index, not a success probability; unknown dimensions excluded.',
+    scoreMeaning: 'Ordinal observed-interaction index, not a success probability; unknown dimensions excluded. Preliminary ranges are uncalibrated working estimates, not statistical confidence intervals or consent.',
     explanation,
     ...(observedAt === undefined ? {} : { observedAt }),
   };

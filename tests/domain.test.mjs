@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   QUESTIONNAIRES, QUESTIONNAIRE_VERSION, ProfileInputSchema, CounterpartInputSchema, MeetingInputSchema,
-  validateProfile, analyzeQuestionnaire, buildChatContext, computeHeat, rankTopThree,
+  validateProfile, analyzeQuestionnaire, buildChatContext, computeHeat, rankTopThree, heatContextsCompatible,
   cleanFeedback, reviewFeedback, redactSensitive, buildFeedbackKnowledgeSupplement, DomainError,
 } from '../src/domain.mjs';
 
@@ -117,6 +117,74 @@ test('multiple dimensions and independent observations are needed, rather than o
   assert.equal(sparse.score, null);
   assert.equal(sparse.trend.status, 'unknown');
   assert.equal(computeHeat(classification({ responseEngagement: 'positive', personalInterest: 'positive' })).status, 'potential');
+});
+
+test('a first analyzed greeting or engaged message gets a broad working range without a numeric score or top-three promotion', () => {
+  const first = { id: 'first', speaker: 'other', text: '你好' };
+  const context = buildChatContext(profile(), counterpart(), [first]);
+  assert.equal(computeHeat(null, { context }).preliminaryRange, null, 'A pasted message is not an analyzed observation');
+  assert.equal(computeHeat(classification(), { context }).preliminaryRange, null);
+  const passive = classification({ responseEngagement: 'passive' }, { confidence: 'limited' });
+  passive.heat.responseEngagement.evidenceIds = [first.id];
+  const low = computeHeat(passive, { context });
+  assert.deepEqual(low.preliminaryRange, { lower: 10, upper: 45, label: '偏低投入', basis: 'observed_dimensions', evidenceIds: ['first'], provisional: true });
+  assert.equal(low.status, 'insufficient_evidence'); assert.equal(low.score, null);
+  assert.equal(low.dimensions.personalInterest.level, 'unknown');
+  const positive = classification({ activeInteraction: 'positive', responseEngagement: 'positive' });
+  for (const dimension of Object.values(positive.heat)) if (dimension.level !== 'unknown') dimension.evidenceIds = [first.id];
+  const engaged = computeHeat(positive, { context });
+  assert.deepEqual(engaged.preliminaryRange, { lower: 35, upper: 75, label: '积极互动', basis: 'observed_dimensions', evidenceIds: ['first'], provisional: true });
+  assert.equal(engaged.score, null); assert.equal(engaged.status, 'insufficient_evidence');
+  assert.deepEqual(rankTopThree([{ id: 'first-person', heat: engaged }]), []);
+  assert.match(engaged.scoreMeaning, /not statistical confidence intervals or consent/);
+  for (const text of ['?', '字'.repeat(1_000), '😂', '对方一句简短但结合背景积极的话']) {
+    const other = buildChatContext(profile(), counterpart(), [{ ...first, text }]);
+    assert.deepEqual(computeHeat(passive, { context: other }).preliminaryRange, low.preliminaryRange, 'Range selection uses observed dimensions, never punctuation or text length');
+  }
+});
+
+test('preliminary ranges preserve a mature baseline across sparse turns and stop at explicit negative resistance', () => {
+  const context = buildChatContext(profile(), counterpart(), [...Array.from({ length: 5 }, (_, index) => ({ id: `m${index + 1}`, speaker: 'other', text: '虚构先前的完整互动。' })), { id: 'last', speaker: 'other', text: '哈哈' }]);
+  const established = computeHeat(classification({ activeInteraction: 'positive', responseEngagement: 'positive', personalInterest: 'positive', reciprocalFlirting: 'positive' }), { context });
+  assert.equal(established.score, 67);
+  assert.deepEqual(established.preliminaryRange, { lower: 52, upper: 82, label: '综合初判', basis: 'observed_dimensions', evidenceIds: established.evidenceIds, provisional: true });
+  const isolated = classification({ responseEngagement: 'negative' }); isolated.heat.responseEngagement.evidenceIds = ['last'];
+  const sparse = computeHeat(isolated, { context, history: [established] });
+  assert.equal(sparse.score, null); assert.equal(sparse.preliminaryRange.basis, 'historical_baseline');
+  assert.equal(sparse.preliminaryRange.label, '参考此前互动');
+  assert.deepEqual([sparse.preliminaryRange.lower, sparse.preliminaryRange.upper], [52, 82]);
+  assert.deepEqual(sparse.preliminaryRange.evidenceIds, established.evidenceIds);
+  assert.deepEqual(computeHeat(classification(), { context, history: [sparse] }).preliminaryRange, sparse.preliminaryRange, 'Several sparse turns retain rather than erase the same observed baseline');
+  assert.equal(computeHeat(null, { context, history: [established] }).preliminaryRange, null);
+  assert.equal(computeHeat(undefined, { context, history: [established] }).preliminaryRange, null, 'No fresh analyzed classification is never replaced with a guessed historical result');
+  const pause = computeHeat({ ...isolated, obstacle: { type: 'negative' } }, { context, history: [established] });
+  assert.equal(pause.status, 'pause'); assert.equal(pause.preliminaryRange, null);
+  const noResurrection = computeHeat(isolated, { context, history: [established, pause] });
+  assert.equal(noResurrection.preliminaryRange.basis, 'observed_dimensions', 'An earlier high baseline cannot cross a later explicit negative boundary');
+  assert.throws(() => computeHeat(isolated, { context: { messages: [] } }), { code: 'INVALID_CLASSIFICATION' });
+  const removedBaseline = computeHeat(isolated, { context: { messages: [context.messages.at(-1)] }, history: [established, sparse] });
+  assert.equal(removedBaseline.preliminaryRange.label, '偏低投入', 'Removed evidence cannot support a historical range');
+});
+
+test('historical heat context permits appended messages but rejects corrected facts, annotations, timing or either profile', () => {
+  const original = buildChatContext(profile(), counterpart(), messages, { meeting: { status: 'none', time: '', place: '', note: '' } });
+  const appended = buildChatContext(profile(), counterpart(), [...messages, { id: 'm3', speaker: 'other', text: '哈哈' }], { meeting: { status: 'none', time: '', place: '', note: '' }, topicChangeRequested: true });
+  assert.equal(heatContextsCompatible(original, appended), true);
+  assert.equal(heatContextsCompatible(null, appended), false);
+  assert.equal(heatContextsCompatible({ messages: messages }, appended), false);
+  for (const change of [
+    (value) => { value.messages[0].speaker = 'other'; },
+    (value) => { value.messages[0].text = '更正的原话。'; },
+    (value) => { value.messages[0].annotationRevision = 2; value.messages[0].annotationUpdatedAt = '2026-10-01T10:00:00.000Z'; },
+    (value) => { value.messages[0].wechatTime = { at: '2026-10-01T09:00:00.000Z', source: 'user_reported', editedAt: '2026-10-01T10:00:00.000Z' }; },
+    (value) => { value.userProfile = JSON.stringify({ ...JSON.parse(value.userProfile), currentStyle: '更正的本人表达偏好。' }); },
+    (value) => { value.counterpartProfile = JSON.stringify({ ...JSON.parse(value.counterpartProfile), background: '更正的认识背景。' }); },
+    (value) => { value.counterpartProfile = JSON.stringify({ ...JSON.parse(value.counterpartProfile), meeting: { status: 'declined', time: '', place: '', note: '' } }); },
+    (value) => { value.messages.reverse(); },
+  ]) {
+    const revised = structuredClone(appended); change(revised);
+    assert.equal(heatContextsCompatible(original, revised), false);
+  }
 });
 
 test('a single ambiguous reply cannot manufacture a zero score or falling trend over established evidence', () => {

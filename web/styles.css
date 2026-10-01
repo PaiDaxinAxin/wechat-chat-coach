@@ -140,3 +140,7 @@ dialog{color:inherit;background:var(--color-surface);border:1px solid var(--colo
 @media(max-width:760px){.message-annotation{width:88%}.direction-option .weight{font-size:12px;overflow-wrap:anywhere}}
 
 .coach-failure{display:flex;align-items:center;gap:var(--space-3);margin-top:var(--space-3);font-size:13px;color:var(--color-muted)}.coach-failure p{flex:1;margin:0}.coach-failure button{flex-shrink:0}
+
+/* A compact cue appears only for the current, accepted coaching update. */
+.coach-update-note{display:flex;min-height:var(--touch-target);align-items:center;justify-content:flex-end;gap:var(--space-2);margin:var(--space-3) 0;color:var(--color-accent);font-size:13px}.coach-update-note button{color:var(--color-accent);text-decoration:underline;text-underline-offset:3px}.coach-update-badge{margin-left:auto;padding:2px 8px;border-radius:var(--radius-sm);background:var(--color-coach);color:var(--color-accent);font-size:12px;white-space:nowrap}.field-coach.coach-updated{border-color:var(--color-accent);animation:coach-update-pulse 1.8s ease-out}.coach-temperature-top{flex-wrap:wrap}#field-coach-temperature{font-size:clamp(20px,2.3vw,28px)}
+@keyframes coach-update-pulse{0%,35%{box-shadow:0 0 0 3px var(--color-coach-line)}100%{box-shadow:0 0 0 0 transparent}}

@@ -13,7 +13,7 @@ import { generateFieldCoachPlan } from './field-coach.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import { interpretChatImage, validateChatImage, guardImageBytes, validateImageInterpretation, IMAGE_BODY_LIMIT, IMAGE_INPUT_VERSION } from './image-input.mjs';
 import {
-  QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree,
+  QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree, heatContextsCompatible,
   ProfileInputSchema, CounterpartInputSchema, MeetingInputSchema, FeedbackInputSchema, ReviewInputSchema,
   cleanFeedback, reviewFeedback, buildFeedbackKnowledgeSupplement,
 } from './domain.mjs';
@@ -281,11 +281,18 @@ export async function createBetaServer({
     for (const candidate of topicContexts(context)) if (await store.hasModelAttempt(userId, counterpartId, operation, contextHash(candidate, knowledgeHash, operation))) return true;
     return false;
   }
+  function currentHeatResult(result, context) {
+    if (!result?.classification) return result;
+    const heat = computeHeat(result.classification, { context, history: result.heat ? [result.heat] : [], observedAt: result.heat?.observedAt });
+    // Rehydrate the new display range without changing a persisted observation's
+    // original trend, timestamp or model result, and without another model call.
+    return { ...result, heat: { ...heat, ...(result.heat?.trend ? { trend: result.heat.trend } : {}) } };
+  }
   async function currentClassification(userId, counterpartId, knowledgeSnapshot) {
     try {
       const context = await chatSnapshot(userId, counterpartId);
       const job = await latestContextJob(userId, counterpartId, 'classify', context, knowledgeSnapshot.hash);
-      return job?.result ?? { classification: null, heat: computeHeat(null) };
+      return job?.result ? currentHeatResult(job.result, context) : { classification: null, heat: computeHeat(null, { context }) };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { classification: null, heat: computeHeat(null) };
       throw error;
@@ -309,6 +316,7 @@ export async function createBetaServer({
   async function runModel(userId, counterpartId, operation, input) {
     const currentResult = async (result) => {
       if (operation === 'image_read') guardImageBytes(result.imageInterpretation, input.image);
+      if (operation === 'classify') return currentHeatResult(result, context);
       return result.suggestion ? { ...result, suggestion: await store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
     };
     const knowledgeSnapshot = await knowledge.read();
@@ -354,7 +362,8 @@ export async function createBetaServer({
           if (operation === 'classify') {
             const previous = await store.previousClassification(userId, counterpartId);
             const classification = { ...output, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
-            result = { classification, heat: computeHeat(output, { history: previous ? [previous.result.heat] : [], observedAt: new Date(now()).toISOString() }) };
+            const compatiblePrevious = previous?.contextSnapshot?.knowledge?.hash === knowledgeSnapshot.hash && heatContextsCompatible(previous.contextSnapshot.modelInput, context);
+            result = { classification, heat: computeHeat(output, { context, history: compatiblePrevious ? [previous.result.heat] : [], observedAt: new Date(now()).toISOString() }) };
           } else if (operation === 'reply') {
             suggestion = { ...output, id: randomUUID(), direction: input.direction ?? null, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
             result = { suggestion };

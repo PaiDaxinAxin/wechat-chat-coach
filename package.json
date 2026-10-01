@@ -20,7 +20,8 @@
     "test:a11y": "node scripts/verify-accessibility.mjs",
     "test:topics": "node scripts/verify-topic-workflow.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:recovery": "node scripts/verify-recovery.mjs"
+    "test:recovery": "node scripts/verify-recovery.mjs",
+    "test:coach-updates": "node scripts/verify-coach-updates.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",

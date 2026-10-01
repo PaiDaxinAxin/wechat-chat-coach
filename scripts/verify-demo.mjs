@@ -121,7 +121,7 @@ try {
   assert.equal(computeHeat(coachScenario).score, null);
   assert.equal(computeHeat(coachScenario).status, 'insufficient_evidence');
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'One message does not establish a numeric heat score');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '35–75°', 'One message has a provisional range without establishing an exact score');
   assert.ok((await page.locator('#field-coach-initiative').textContent()).includes('未知时不要推进'), 'Legacy conditions and negations remain intact');
   await page.locator('#field-coach-details > summary').click();
   assert.equal(await page.locator('#field-coach-full-guidance').isVisible(), true);
@@ -141,7 +141,7 @@ try {
   assert.equal(await page.locator('#field-coach-pitfall').textContent(), '别跳过她的真实意愿。');
   coachScenario = scenario('unknown', []);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '线索较少');
   await page.unroute(`**/api/counterparts/${id}`);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '约65°');
@@ -443,7 +443,7 @@ try {
   await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(classifications, recoveredClassificationCalls, 'Changing metadata does not silently call the model');
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '准备分析', 'Correcting time invalidates the previous displayed temperature');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, recoveredClassificationCalls + 1);
   await page.locator('#cancel-message-edit').click();

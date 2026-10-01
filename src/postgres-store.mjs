@@ -555,7 +555,11 @@ export async function createPostgresStore({
       return { plan: parse(row.context_snapshot_json).request.plan, planAssessment: parse(row.result_json).planAssessment };
     },
     async listJobs(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); return (await all('SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 ORDER BY created_at DESC LIMIT 30', userId, counterpartId)).map(jobValue); },
-    async previousClassification(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); return jobValue((await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY updated_at DESC LIMIT 1", userId, counterpartId))); },
+    async previousClassification(userId, counterpartId) {
+      await counterpartRow(userId, counterpartId);
+      const row = await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY _ordinal DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
     async reserveJob({ userId, counterpartId, operation, requestId, contextHash, knowledgeHash, workerId, providerModel, contextSnapshot }) {
       await recoverExpired();
       (await counterpartRow(userId, counterpartId));

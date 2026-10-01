@@ -365,9 +365,16 @@ test('Postgres relational store preserves contracts across independent instances
     for (let index = 0; index < 2; index++) {
       if (index) advance(-1);
       const reserved = await reservation(user, id, 'classify', { contextHash: hashes[index] });
-      await store.markJobRunning(reserved.job.id); await peer.completeJob(reserved.job.id, { ordinal: index });
+      await store.markJobRunning(reserved.job.id); await peer.completeJob(reserved.job.id, { ordinal: index, heat: { status: index ? 'pause' : 'potential' } });
     }
     assert.equal((await peer.latestSuccessfulForContexts(user.id, id, 'classify', hashes)).result.ordinal, 1);
+    const previous = await peer.previousClassification(user.id, id);
+    assert.equal(previous.result.heat.status, 'pause');
+    assert.equal(previous.contextSnapshot.knowledge.hash, 'private-knowledge-hash');
+    assert.ok(!(await peer.listJobs(user.id, id)).some((job) => 'contextSnapshot' in job));
+    const tied = await reservation(user, id, 'classify');
+    await store.markJobRunning(tied.job.id); await peer.completeJob(tied.job.id, { ordinal: 2, heat: { status: 'pause' } });
+    assert.equal((await store.previousClassification(user.id, id)).id, tied.job.id, 'The later durable observation wins a same-clock tie');
     await assert.rejects(peer.latestSuccessfulForContexts(owner.id, id, 'classify', hashes), { code: 'COUNTERPART_NOT_FOUND' });
   });
 

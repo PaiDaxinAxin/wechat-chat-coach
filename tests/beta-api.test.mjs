@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { createAccountMcpServer } from '../src/beta-mcp.mjs';
 import { createBetaServer } from '../src/beta-api.mjs';
 import { createBetaStore, seedOwner } from '../src/beta-store.mjs';
 import { QUESTIONNAIRES } from '../src/domain.mjs';
@@ -123,6 +125,50 @@ test('successful same-context and request replay persist across restart without 
   assert.equal((await user.call('GET', `/api/counterparts/${id}`)).data.classification, null);
   const conflict = await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'request_one' });
   assert.equal(conflict.status, 409); assert.equal(conflict.error.code, 'REQUEST_ID_CONTEXT_CONFLICT');
+});
+
+test('first-message ranges rehydrate legacy cache consistently across detail, list, replay and account MCP without another model call', async (t) => {
+  let calls = 0;
+  const f = await fixture(t, { classifyFn: async (context) => {
+    calls++;
+    const value = classification(context); value.confidence = 'limited';
+    value.heat = Object.fromEntries(Object.keys(value.heat).map((name) => [name, { level: 'unknown', evidenceIds: [] }]));
+    value.heat.responseEngagement = { level: 'passive', evidenceIds: [context.messages[0].id] };
+    return value;
+  } });
+  const user = await f.register('preliminaryRangeUser');
+  const id = await f.addContext(user, '首句虚构对象', { messages: false });
+  await user.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'other', text: '你好' });
+  assert.equal((await user.call('GET', `/api/counterparts/${id}`)).data.heat.preliminaryRange, null);
+  assert.equal(calls, 0, 'Unanalyzed records are not assigned an invented range');
+  const first = await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'preliminary_first' });
+  const expected = first.data.heat.preliminaryRange;
+  assert.deepEqual([expected.lower, expected.upper, expected.label], [10, 45, '偏低投入']);
+  assert.equal(first.data.heat.score, null); assert.equal(first.data.quota.classificationRemaining, 2);
+  const source = f.server.betaStore.listJobs(user.user.id, id).find(({ operation }) => operation === 'classify');
+  const old = structuredClone(source.result); delete old.heat.preliminaryRange;
+  old.heat.ruleVersion = 'provisional-five-dimensions-2';
+  old.heat.trend = { status: 'rising', comparableDimensions: ['activeInteraction', 'responseEngagement'], delta: 10 };
+  const db = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
+  try { db.prepare('UPDATE model_jobs SET result_json=? WHERE id=?').run(JSON.stringify(old), source.id); }
+  finally { db.close(); }
+  const detail = (await user.call('GET', `/api/counterparts/${id}`)).data;
+  assert.deepEqual(detail.heat.preliminaryRange, expected); assert.deepEqual(detail.heat.trend, old.heat.trend);
+  assert.equal(detail.heat.observedAt, old.heat.observedAt);
+  const list = (await user.call('GET', '/api/counterparts')).data;
+  assert.deepEqual(list.counterparts[0].heat.preliminaryRange, expected); assert.deepEqual(list.topThree, []);
+  const replay = await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'preliminary_replay' });
+  assert.equal(replay.data.cached, true); assert.deepEqual(replay.data.heat.preliminaryRange, expected);
+  assert.deepEqual(f.server.betaStore.listJobs(user.user.id, id).find(({ id: jobId }) => jobId === source.id).result, old, 'Readback decorates output without rewriting the original model observation');
+  const mcp = createAccountMcpServer({ accountId: user.user.id, invoke: f.server.invokeForAccount });
+  const client = new Client({ name: 'preliminary-range-test', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await mcp.connect(serverTransport); await client.connect(clientTransport);
+  t.after(async () => { await client.close(); await mcp.close(); });
+  const mcpResult = await client.callTool({ name: 'coach_classify', arguments: { counterpartId: id, requestId: 'preliminary_mcp' } });
+  assert.equal(mcpResult.isError, undefined);
+  assert.deepEqual(JSON.parse(mcpResult.content[0].text).heat.preliminaryRange, expected);
+  assert.equal(calls, 1); assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 2);
 });
 
 test('concurrent free classifications reserve only three trials and exhausted users can generate directly', async (t) => {
@@ -600,4 +646,98 @@ test('explicit topic-change identity is separate, readback uses durable request 
   detail = (await user.call('GET', `/api/counterparts/${id}`)).data;
   assert.ok(detail.currentSuggestionIds.includes(replyResult.data.suggestion.id));
   assert.equal(detail.directReply.id, replyResult.data.suggestion.id);
+});
+
+test('historical ranges retain appended context but reject corrected immutable evidence and legacy snapshots', async (t) => {
+  let sparse = false, calls = 0, received;
+  const f = await fixture(t, { paidProviderDailyLimit: 100, classifyFn: async (context) => {
+    received = context; calls++;
+    const value = classification(context);
+    if (sparse) {
+      value.confidence = 'limited';
+      value.heat = Object.fromEntries(Object.keys(value.heat).map((name) => [name, { level: 'unknown', evidenceIds: [] }]));
+      value.heat.responseEngagement = { level: 'passive', evidenceIds: [context.messages.at(-1).id] };
+    }
+    return value;
+  } });
+  const user = await f.register('immutableHeatUser', 'paid');
+  const changes = [
+    ['append', async () => {}],
+    ['speaker', async (path, message) => user.call('PUT', `${path}/messages/${message.id}`, { speaker: 'self', text: message.text })],
+    ['text', async (path, message) => user.call('PUT', `${path}/messages/${message.id}`, { speaker: 'other', text: '更正之前记录的原话。' })],
+    ['annotation', async (path, message) => user.call('PATCH', `${path}/messages/${message.id}/annotation`, { annotationText: '补充实际的线下背景。' })],
+    ['annotation_clear', async (path, message) => {
+      assert.equal((await user.call('PATCH', `${path}/messages/${message.id}/annotation`, { annotationText: '后来撤回的解释。' })).status, 200);
+      return user.call('PATCH', `${path}/messages/${message.id}/annotation`, { annotationText: '' });
+    }],
+    ['time', async (path, message) => user.call('PATCH', `${path}/messages/${message.id}/timing`, { actualWechatAt: '2026-01-01T10:00:00Z' })],
+    ['profile', async () => user.call('PUT', '/api/profile', { ...profile(), style: '本人更正后的表达方式。' })],
+    ['background', async (path) => user.call('PUT', path, { ...counterpart(), background: '更正：线下也见过一次。' })],
+    ['meeting', async (path) => user.call('PUT', `${path}/meeting`, { status: 'declined', time: '', place: '', note: '录入明确拒绝邀约的事实。' })],
+    ['knowledge', async () => { await writeFile(f.knowledgePath, `${await readFile(f.knowledgePath, 'utf8')}\nA new synthetic owner supplement.\n`); }],
+    ['legacy', async (_path, _message, previous, id) => {
+      const reserved = f.server.betaStore.reserveJob({ userId: user.user.id, counterpartId: id, operation: 'classify', requestId: 'legacy_heat_job', contextHash: 'legacy-context', knowledgeHash: previous.knowledgeHash, workerId: 'test-worker', providerModel: 'synthetic' });
+      f.server.betaStore.markJobRunning(reserved.job.id);
+      f.server.betaStore.completeJob(reserved.job.id, previous.result);
+      assert.equal(f.server.betaStore.previousClassification(user.user.id, id).contextSnapshot, null);
+    }],
+  ];
+  for (const [name, change] of changes) {
+    sparse = false;
+    const id = await f.addContext(user, `历史背景-${name}`), path = `/api/counterparts/${id}`;
+    const original = (await user.call('POST', `${path}/classify`, { requestId: `heat_original_${name}` })).data;
+    assert.equal(original.heat.score, 67);
+    const previous = f.server.betaStore.previousClassification(user.user.id, id);
+    const immutable = structuredClone(previous.contextSnapshot);
+    const firstMessage = f.server.betaStore.listMessages(user.user.id, id)[0];
+    const changed = await change(path, firstMessage, previous, id);
+    if (changed) assert.equal(changed.status, 200, name);
+    assert.equal((await user.call('POST', `${path}/messages`, { speaker: 'other', text: '嗯' })).status, 200);
+    sparse = true;
+    const result = await user.call('POST', `${path}/classify`, { requestId: `heat_sparse_${name}`, topicChangeRequested: true });
+    assert.equal(result.status, 200, name); assert.equal(result.data.cached, false);
+    assert.equal(result.data.heat.score, null);
+    const range = result.data.heat.preliminaryRange;
+    assert.equal(range.basis, name === 'append' ? 'historical_baseline' : 'observed_dimensions', name);
+    assert.deepEqual([range.lower, range.upper], name === 'append' ? [52, 82] : [10, 45], name);
+    assert.equal(received.messages.at(-1).text, '嗯');
+    const db = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
+    try { assert.deepEqual(JSON.parse(db.prepare('SELECT context_snapshot_json FROM model_jobs WHERE id=?').get(previous.id).context_snapshot_json), immutable, name); }
+    finally { db.close(); }
+    const detail = await user.call('GET', path);
+    assert.equal(detail.status, 200);
+    assert.ok(!JSON.stringify(detail.data.jobs).includes('contextSnapshot'), 'Private evidence is not projected into job history');
+  }
+  assert.equal(calls, changes.length * 2, 'No metadata read or compatibility check calls a provider');
+});
+
+test('a latest pause cannot resurrect an earlier high range with tied or regressed clocks', async (t) => {
+  let clock = Date.parse('2026-10-01T10:00:00Z'), mode = 'mature';
+  const f = await fixture(t, { now: () => clock, paidProviderDailyLimit: 100, classifyFn: async (context) => {
+    const value = classification(context);
+    if (mode === 'pause') value.obstacle = { type: 'negative', evidenceIds: [context.messages.at(-1).id], reason: '停止当前推进。' };
+    if (mode === 'sparse') {
+      value.confidence = 'limited';
+      value.heat = Object.fromEntries(Object.keys(value.heat).map((name) => [name, { level: 'unknown', evidenceIds: [] }]));
+      value.heat.responseEngagement = { level: 'passive', evidenceIds: [context.messages.at(-1).id] };
+    }
+    return value;
+  } });
+  const user = await f.register('orderedHeatUser', 'paid');
+  for (const delta of [0, -1_000]) {
+    mode = 'mature';
+    const id = await f.addContext(user, `顺序测试-${delta}`), path = `/api/counterparts/${id}`;
+    assert.equal((await user.call('POST', `${path}/classify`, { requestId: `ordered_original_${delta}` })).data.heat.score, 67);
+    clock += delta; mode = 'pause';
+    await user.call('POST', `${path}/messages`, { speaker: 'other', text: '先不要推进这个话题。' });
+    const paused = await user.call('POST', `${path}/classify`, { requestId: `ordered_pause_${delta}` });
+    assert.equal(paused.data.heat.status, 'pause'); assert.equal(paused.data.heat.preliminaryRange, null);
+    assert.equal(f.server.betaStore.previousClassification(user.user.id, id).result.heat.status, 'pause');
+    mode = 'sparse';
+    await user.call('POST', `${path}/messages`, { speaker: 'other', text: '嗯' });
+    const sparse = await user.call('POST', `${path}/classify`, { requestId: `ordered_sparse_${delta}` });
+    assert.equal(sparse.status, 200);
+    assert.deepEqual([sparse.data.heat.preliminaryRange.lower, sparse.data.heat.preliminaryRange.upper], [10, 45]);
+    assert.equal(sparse.data.heat.preliminaryRange.basis, 'observed_dimensions');
+  }
 });

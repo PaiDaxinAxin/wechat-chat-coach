@@ -8,7 +8,7 @@ const state = {
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
-  activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null,
+  activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null, coachUpdate: null,
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
@@ -563,7 +563,7 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  if (changed) { state.conversationVisit++; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
+  if (changed) { state.conversationVisit++; state.coachUpdate = null; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
   if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
@@ -626,7 +626,7 @@ async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze });
 }
 function renderHeat(heat) {
-  $('heat-status').textContent = heatNames[heat?.status] || '信息不足';
+  $('heat-status').textContent = heat?.status === 'insufficient_evidence' && heat.preliminaryRange ? heat.preliminaryRange.label : heatNames[heat?.status] || '信息不足';
   $('heat-explanation').textContent = heat?.explanation || '补充认识背景和真实对话后再判断。未观察到，不等于负向。';
   const dimensions = heat?.dimensions || state.detail?.classification?.heat || {};
   const known = Object.values(dimensions).filter((item) => item?.level && item.level !== 'unknown').length;
@@ -900,37 +900,70 @@ function currentSuggestion() {
   return isCurrentSuggestion(item) && (isNoReplySuggestion(item) || isPendingSuggestion(item)) ? item : null;
 }
 function workingFocus() { return currentSuggestion()?.workingFocus || state.detail?.classification?.workingFocus || null; }
+function renderCoachUpdate() {
+  const update = state.coachUpdate;
+  const current = update?.context === currentContextKey() && update.visit === state.conversationVisit;
+  if (update && !current) state.coachUpdate = null;
+  $('coach-update-note').hidden = !current;
+  const text = current ? update.phase === 'updating' ? '场外教练正在更新…' : '场外教练的指示已更新' : '';
+  if ($('coach-update-text').textContent !== text) $('coach-update-text').textContent = text;
+  $('view-coach-update').hidden = !current || update.phase !== 'updated';
+  $('field-coach-update-badge').hidden = !current;
+  $('field-coach-update-badge').textContent = current ? update.phase === 'updating' ? '更新中' : '已更新' : '';
+  $('field-coach').classList.toggle('coach-updated', Boolean(current && update.highlight));
+}
+function markCoachUpdated(call, context) {
+  const update = { call, context, visit: state.conversationVisit, phase: 'updated', highlight: true };
+  state.coachUpdate = update;
+  renderCoachUpdate();
+  setTimeout(() => {
+    update.highlight = false;
+    if (state.coachUpdate === update) renderCoachUpdate();
+  }, 1800);
+}
 function renderFieldCoach(classification) {
+  renderCoachUpdate();
   const coach = classification?.fieldCoach;
-  const heat = classification ? state.detail?.heat : null;
+  const heat = state.detail?.heat;
   const paused = heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
-  const insufficient = !classification || classification.status === 'needs_context' || !heat || heat.status === 'insufficient_evidence' || !Number.isFinite(heat.score);
-  // The server's existing five-dimension index stays authoritative. A rounded
-  // display does not create a new score, and uncertainty/refusal hides the number.
-  $('field-coach-temperature').textContent = paused ? '先停推进' : insufficient ? '待判断' : `约${Math.round(heat.score / 5) * 5}°`;
-  $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；未知维度不按零分计算。';
-  $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : insufficient ? '信息不足' : heatNames[heat.status] || '结合当前互动判断';
+  const range = heat?.preliminaryRange;
+  const scored = Number.isFinite(heat?.score);
+  const analyzing = state.modelCalls.has(currentContextKey());
+  const hasMessage = state.detail?.messages?.some(({ speaker }) => speaker === 'other');
+  // Only the server can derive a range from observed evidence. Loading is not a
+  // heat judgment; a single new message never erases a prior observed baseline.
+  $('field-coach-temperature').textContent = paused ? '先停推进' : scored ? `约${Math.round(heat.score / 5) * 5}°`
+    : range ? `${range.lower}–${range.upper}°` : analyzing ? '初步分析中' : classification ? '线索较少' : hasMessage ? '准备分析' : '先聊一句';
+  $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；首句范围会随背景与对话调整。';
+  $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : scored ? heatNames[heat.status] || '结合当前互动判断'
+    : range ? range.label : analyzing ? '正在结合背景和对话' : classification ? '先自然交流，随新回应调整' : hasMessage ? '点「给我建议」结合背景分析' : '从第一条消息开始';
   const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
-  $('field-coach-heat-basis').textContent = heat ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度` : '记录对方的新消息后再判断。';
+  $('field-coach-heat-basis').textContent = scored ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度`
+    : range ? '初步范围，会随完整背景与后续互动调整。' : '消息内容、认识背景和回应方式一起考量。';
   const focus = workingFocus();
-  $('field-coach-focus').textContent = `本轮重点：${focusNames[focus?.stage] || focusNames.unknown}`;
+  $('field-coach-focus').textContent = `本轮重点：${focus?.stage && focus.stage !== 'unknown' ? focusNames[focus.stage] : '先建立交流'}`;
   $('field-coach-focus').title = focus?.reason || '';
-
+  const low = heat?.status === 'too_low' || (scored ? heat.score < 40 : range?.upper <= 45);
+  const high = scored && heat.score >= 65;
+  const defaultDirection = high ? '接住她主动展开的内容，分享一点自己的经历。' : '从她的资料或刚提到的内容，开一个轻松话题。';
+  const defaultPitfall = low ? '通用提醒：别连环追问、催回复，也别急着自证或升级。'
+    : high ? '通用提醒：别连续加码、反复试探，也别忽略她的边界。'
+      : '通用提醒：别连续追问、堆叠升温；先接住这句话。';
   const obstacle = classification?.obstacle?.type;
   const guidance = currentSuggestion()?.guidance;
-  let action = guidance?.ownWordsGuide || coach?.initiative || '本轮主导建议待判断。';
-  let pitfall = coach?.pitfall || (coach ? '通用提醒：别连续追问，别同一话题反复升温。' : '本轮雷点待判断。');
+  let action = guidance?.ownWordsGuide || coach?.initiative || defaultDirection;
+  let pitfall = coach?.pitfall || defaultPitfall;
   if (paused) {
     action = '停止这类推进，尊重她的边界。';
     pitfall = '别继续这类升级，也别劝她接受。';
   } else if (heat?.status === 'too_low') {
     action = '先收住投入，等真实互动变化。';
-    pitfall = '别连发催促，别用更强暗示硬推进。';
+    pitfall = coach?.pitfall || '通用提醒：别连发催促，别用更强暗示硬推进。';
   } else if (obstacle === 'ambiguous') {
     action = '先弄清她的意思，轻松接住疑虑。';
     pitfall = '别把疑虑当调侃，也别继续加码。';
-  } else if (!classification && !guidance) {
-    action = classificationUnavailable() ? '可以直接生成一句回复。' : '先记录对方的新消息。';
+  } else if (!hasMessage) {
+    action = '先从认识时的场景，开一个轻松话题。';
   }
   // Keep historical advice intact, including later conditions and negations.
   // CSS bounds the preview; the full advice remains readable in the disclosure.
@@ -941,13 +974,13 @@ function renderFieldCoach(classification) {
   const recommended = options.filter(({ weight }) => weight === highest);
   $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
     : guidance?.reentryWhen ? guidance.reentryWhen
-      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '结合当前话题给建议。'
+      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '接住她提到的一点，简短回应，再留一个好接的话口。'
     : !recommended.length ? '可以主动选择一个换题方向。'
       : `${recommended.length > 1 ? '并列可选' : '推荐'}${recommended.map(({ topicMove }) => directionNames[topicMove]?.split(' · ')[0] || '待判断').join(' / ')} · ${obstacle === 'ambiguous' ? '先澄清她的意思，暂不升级。' : recommended[0].reason}`;
 
-  $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '待判断'}`;
+  $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '从最近一句开始'}`;
   $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}` : '记录对方的新话后，结合完整对话判断。';
-  $('field-coach-full-guidance').replaceChildren(...(coach ? [['主导建议', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
+  $('field-coach-full-guidance').replaceChildren(...(coach ? [['后续对话的方向', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
   for (const option of options) $('field-coach-full-guidance').append(el('p', {}, `${directionNames[option.topicMove]?.split(' · ')[0] || '方向'}：${option.reason}`));
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
   const evidence = (coach?.topicMessageIds || []).map((id) => messages.get(id)).filter(Boolean);
@@ -1021,7 +1054,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   if (state.modelCalls.has(inputContext)) return;
   if (topicChangeRequested) state.topicChangeContexts.add(inputContext);
   topicChangeRequested = topicChangeRequested || type === 'reply' && state.topicChangeContexts.has(inputContext);
-  const call = { type, id, direction, previousDirection: state.selectedDirection };
+  const call = { type, id, direction, previousDirection: state.selectedDirection, visit: state.conversationVisit };
   const focusReply = type === 'reply' && button && document.activeElement === button;
   const focusTopicChange = type === 'classify' && topicChangeRequested && button && document.activeElement === button;
   if (type === 'reply') {
@@ -1031,6 +1064,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   }
   state.autoAttempts.add(inputContext);
   state.modelCalls.set(inputContext, call);
+  state.coachUpdate = { call, context: inputContext, visit: call.visit, phase: 'updating' };
   closeInlineCards();
   const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
   const request = requestId(type, id, direction, intent, topicChangeRequested);
@@ -1045,11 +1079,12 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   }
   let replyAccepted = false, classificationAccepted = false;
   try {
-    const data = await modelPost(`${counterpartPath(id)}/${type}`, { ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext && state.modelCalls.get(inputContext) === call);
+    const data = await modelPost(`${counterpartPath(id)}/${type}`, { ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit && state.modelCalls.get(inputContext) === call);
     state.requestIds.delete(request.key);
     if (state.me?.user.id !== userId) return;
     updateQuota(data.quota);
-    if (state.selectedId === id && currentContextKey() === inputContext) {
+    if (state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit) {
+      const changedResult = type === 'classify' ? JSON.stringify(state.detail.classification) !== JSON.stringify(data.classification) : state.suggestion?.id !== data.suggestion.id;
       if (type === 'classify') {
         classificationAccepted = true;
         state.detail.classification = data.classification; state.detail.heat = data.heat;
@@ -1068,13 +1103,16 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
         if (!direction && !intent && !topicChangeRequested) state.detail.directReply = data.suggestion;
         renderSuggestion();
       }
+      // A recovered, previously unseen result is an update even if the server
+      // returns it from its cache after a lost response.
+      if (!data.cached || changedResult) markCoachUpdated(call, inputContext);
       announce('');
     }
     try { await loadCounterparts(); }
     catch { /* The requested advice is ready; an ancillary list read does not block it. */ }
   } catch (error) {
     if (error.code === 'RECOVERY_CANCELLED' || state.me?.user.id !== userId) return;
-    if (state.selectedId === id && currentContextKey() === inputContext) {
+    if (state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit) {
       if (type === 'reply' && !replyAccepted) {
         state.selectedDirection = call.previousDirection;
         state.replyFeedback = null;
@@ -1097,6 +1135,10 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
     if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
   } finally {
     if (state.modelCalls.get(inputContext) === call) state.modelCalls.delete(inputContext);
+    if (state.coachUpdate?.call === call && state.coachUpdate.phase === 'updating') state.coachUpdate = null;
+    renderCoachUpdate();
+    // Returning to this conversation must release its busy controls even when
+    // the old visit's result is intentionally ignored.
     if (state.selectedId === id && currentContextKey() === inputContext) {
       updateCoachBusy();
       // The complete editor/guidance appears only after the busy state clears.
@@ -1306,7 +1348,7 @@ $('auth-form').addEventListener('submit', (event) => {
   });
 });
 function clearSessionUI() {
-  state.conversationVisit++; state.coachErrorContext = null;
+  state.conversationVisit++; state.coachErrorContext = null; state.coachUpdate = null;
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.messageDrafts.clear(); state.messageCalls.clear(); state.timeCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
@@ -1355,15 +1397,18 @@ document.addEventListener('keydown', (event) => {
   if (menus.length) menus.forEach((menu) => closeMenu(menu, { restoreFocus: true }));
   else if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
 });
-$('toggle-field-coach').addEventListener('click', () => {
-  const open = $('field-coach').dataset.open !== 'true';
-  if (!open) { closeFieldCoach({ restoreFocus: true }); return; }
-  $('field-coach').dataset.open = String(open);
-  $('toggle-field-coach').setAttribute('aria-expanded', String(open));
-  setFieldCoachModal(open);
+function openFieldCoach() {
+  $('field-coach').dataset.open = 'true';
+  $('toggle-field-coach').setAttribute('aria-expanded', 'true');
+  setFieldCoachModal(true);
   $('field-coach').scrollTop = 0;
   $('field-coach-title').focus({ preventScroll: true });
+}
+$('toggle-field-coach').addEventListener('click', () => {
+  if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
+  else openFieldCoach();
 });
+$('view-coach-update').addEventListener('click', openFieldCoach);
 $('close-field-coach').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
 $('field-coach-backdrop').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
 $('coach-glossary-toggle').addEventListener('change', (event) => {

@@ -645,7 +645,11 @@ export function createBetaStore({
       return { plan: parse(row.context_snapshot_json).request.plan, planAssessment: parse(row.result_json).planAssessment };
     },
     listJobs(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? ORDER BY created_at DESC LIMIT 30', userId, counterpartId).map(jobValue); },
-    previousClassification(userId, counterpartId) { counterpartRow(userId, counterpartId); return jobValue(get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY updated_at DESC LIMIT 1", userId, counterpartId)); },
+    previousClassification(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY rowid DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
     reserveJob({ userId, counterpartId, operation, requestId, contextHash, knowledgeHash, workerId, providerModel, contextSnapshot }) {
       counterpartRow(userId, counterpartId);
       return transaction(() => {

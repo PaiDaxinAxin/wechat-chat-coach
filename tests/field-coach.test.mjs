@@ -39,6 +39,10 @@ test('plan uses the shared native provider path, exact full knowledge and comple
     assert.match(body.messages[2].content, /不是发给对方的微信回复/);
     assert.match(body.messages[2].content, /结论 reason、时机 guidance、修改 adjustedPlan（需要时）与下一步 nextAction 各用一句短句，建议各40字以内/);
     assert.match(body.messages[2].content, /只保留当前优先动作，不列多步计划，不堆叠原理或回复示例/);
+    assert.match(body.messages[0].content, /只有首句也可以记录有限的积极信号/);
+    for (const rule of ['热度初判和范围未经校准，允许未知并随新背景更新', '低热度避免连问催回、长篇证明、强行升温', '中热度先承接内容', '高热度不过度升温、不用试探拉扯破坏回应、不忽视边界', '未知先接住这一句', '用一句指出，并标明通用，不编造对方性格', 'nextAction 点明接下来聊什么、如何发展', '不泛写“继续聊”“提升热度”“输出价值”', '留白或停止时写清再接的真实条件']) {
+      assert.ok(body.messages[2].content.includes(rule), rule);
+    }
     assert.match(body.messages[2].content, /连续3次隔几小时只回哈哈\/emoji/);
     assert.match(body.messages[2].content, /此前热度>65.*她资料或原话提过的真实话题/);
     assert.match(body.messages[2].content, /原本投入低.*先留白.*用户提供具体朋友圈动态/);
