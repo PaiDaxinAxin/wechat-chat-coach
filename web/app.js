@@ -4,7 +4,7 @@ const state = {
   selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
-  messageDrafts: new Map(), messageCalls: new Set(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
+  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
@@ -616,7 +616,7 @@ function renderTranscript() {
     const controls = el('details', { class: 'message-menu chat-menu' });
     controls.append(el('summary', { 'aria-label': `${message.speaker === 'self' ? '我的' : '对方的'}消息操作` }, '⋯'), el('div', { class: 'chat-menu-items' },
       el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => { controls.open = false; editMessage(message); } }, '编辑'),
-      el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
+      el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', 'data-edit-time': '', disabled: state.timeCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])), onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
       el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => { closeMenu(controls, { restoreFocus: true }); void perform(event.currentTarget, '删除中…', () => deleteMessage(message)); } }, '删除')));
     const recordedAt = message.recordedAt || message.createdAt;
     const date = new Date(recordedAt);
@@ -624,7 +624,7 @@ function renderTranscript() {
     const reportedDate = new Date(message.wechatTime?.at);
     const reportedTime = message.wechatTime?.source === 'user_reported' && Number.isFinite(reportedDate.getTime()) ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(reportedDate) : '';
     const label = message.speaker === 'self' ? message.provenance === 'inferred_from_followup' ? '我 · 推定使用' : '我' : state.detail.counterpart.alias;
-    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `本人标注的微信时间 ${message.wechatTime.at}（未核验）；原软件录入时间 ${recordedAt}` : recordedAt ? `本软件录入时间 ${recordedAt}，不是微信实际收发时间` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls), messageAnnotation(message));
+    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `消息时间 ${message.wechatTime.at}；原录入时间 ${recordedAt}` : recordedAt ? `录入时间 ${recordedAt}` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls), messageAnnotation(message));
   }));
   if (!messages.length) $('transcript').append(el('p', { class: 'helper' }, '还没有对话。按说话人逐条加入原文，也可以先补充此前背景。'));
   if (focusedKey) {
@@ -677,29 +677,77 @@ function messageAnnotation(message) {
 }
 function editMessageTiming(message, menu) {
   const id = state.selectedId, userId = state.me?.user.id;
+  const key = JSON.stringify([userId, id]);
+  if (state.timeCalls.has(key)) return;
   document.querySelectorAll('.message-time-edit').forEach((form) => form.remove());
-  const input = el('input', { type: 'datetime-local', 'aria-label': '本人补充的微信消息时间', step: '60' });
-  const existing = new Date(message.wechatTime?.at || message.recordedAt || message.createdAt);
-  if (Number.isFinite(existing.getTime())) {
-    const local = new Date(existing.getTime() - existing.getTimezoneOffset() * 60000);
-    input.value = local.toISOString().slice(0, 16);
-  }
-  const form = el('form', { class: 'message-time-edit message-time-editor' }, el('label', {}, '本人补充的微信时间（未核验）', input), el('p', { class: 'small muted' }, '原录入时间保留；留空可清除标注。'));
-  const save = el('button', { type: 'submit', class: 'quiet-button' }, '保存时间');
+  const recorded = new Date(message.wechatTime?.at || message.recordedAt || message.createdAt);
+  const existing = Number.isFinite(recorded.getTime()) ? recorded : new Date();
+  const localDate = (value) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  const hour = el('input', { type: 'text', inputmode: 'numeric', maxlength: '2', pattern: '[0-9]{1,2}', 'aria-label': '小时', autocomplete: 'off' });
+  const minute = el('input', { type: 'text', inputmode: 'numeric', maxlength: '2', pattern: '[0-9]{1,2}', 'aria-label': '分钟', autocomplete: 'off' });
+  hour.value = String(existing.getHours()).padStart(2, '0');
+  minute.value = String(existing.getMinutes()).padStart(2, '0');
+  const date = el('input', { type: 'date', 'aria-label': '消息日期' });
+  date.value = localDate(existing);
+  const dateSummary = el('summary');
+  const showDate = () => {
+    const value = new Date(`${date.value}T12:00:00`);
+    dateSummary.textContent = Number.isFinite(value.getTime()) ? `日期 · ${new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', ...(value.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) }).format(value)} · 调整` : '选择日期';
+  };
+  date.addEventListener('input', showDate); showDate();
+  const pickDay = (offset) => { const value = new Date(); value.setDate(value.getDate() + offset); date.value = localDate(value); showDate(); };
+  const dateDetails = el('details', { class: 'message-time-date' }, dateSummary,
+    el('div', { class: 'button-row' }, el('button', { type: 'button', class: 'secondary', onclick: () => pickDay(0) }, '今天'), el('button', { type: 'button', class: 'secondary', onclick: () => pickDay(-1) }, '昨天')),
+    el('label', {}, '其他日期', date));
+  const form = el('form', { class: 'message-time-edit message-time-editor' },
+    el('fieldset', { class: 'message-time-fields' }, el('legend', {}, '消息时间'),
+      el('div', { class: 'message-time-clock' }, el('label', {}, '时', hour), el('span', { 'aria-hidden': 'true' }, ':'), el('label', {}, '分', minute))), dateDetails);
+  const save = el('button', { type: 'submit', class: 'primary' }, '保存时间');
   const cancel = el('button', { type: 'button', class: 'quiet-button', onclick: () => { form.remove(); menu.querySelector('summary').focus({ preventScroll: true }); } }, '收起');
-  form.append(el('div', { class: 'button-row' }, save, cancel));
+  let saving = false;
+  const persist = (button, clear = false) => {
+    if (saving || state.timeCalls.has(key)) return;
+    void perform(button, '保存时间…', async () => {
+      const hours = hour.value.trim(), minutes = minute.value.trim();
+      let actualWechatAt = null;
+      if (!clear && (hours || minutes)) {
+        if (!/^(?:[01]?[0-9]|2[0-3])$/.test(hours) || !/^[0-5]?[0-9]$/.test(minutes)) throw new Error('请填写 0–23 的小时和 0–59 的分钟。');
+        if (!date.value) throw new Error('请选择消息日期。');
+        const value = new Date(`${date.value}T${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}:00`);
+        if (!Number.isFinite(value.getTime()) || localDate(value) !== date.value || value.getHours() !== Number(hours) || value.getMinutes() !== Number(minutes)) throw new Error('这个日期或时间无效，请调整后再保存。');
+        actualWechatAt = value.toISOString();
+      }
+      saving = true;
+      const call = {};
+      state.timeCalls.set(key, call);
+      document.querySelectorAll('[data-edit-time]').forEach((button) => { button.disabled = true; });
+      const fields = [...form.querySelectorAll('input, button')];
+      fields.forEach((field) => { field.disabled = true; });
+      try {
+        await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
+        if (state.selectedId !== id || state.me?.user.id !== userId) return;
+        const restoreFocus = form.contains(document.activeElement) || document.activeElement === document.body;
+        await refreshCounterpart(id, { autoAnalyze: false });
+        if (state.selectedId === id && state.me?.user.id === userId) {
+          announce(actualWechatAt ? '消息时间已更新，后续建议会按新时间判断。' : '已恢复录入时间。');
+          if (restoreFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
+        }
+      } finally {
+        saving = false; fields.forEach((field) => { field.disabled = false; });
+        if (state.timeCalls.get(key) === call) state.timeCalls.delete(key);
+        document.querySelectorAll('[data-edit-time]').forEach((button) => { button.disabled = state.timeCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])); });
+      }
+    }, { userId, counterpartId: id });
+  };
+  const clear = el('button', { type: 'button', class: 'quiet-button', onclick: () => persist(clear, true) }, '清除修改');
+  clear.hidden = !message.wechatTime;
+  form.append(el('div', { class: 'button-row' }, save, cancel, clear));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    void perform(save, '保存时间…', async () => {
-      const actualWechatAt = input.value ? new Date(input.value).toISOString() : null;
-      await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
-      if (state.selectedId !== id || state.me?.user.id !== userId) return;
-      await refreshCounterpart(id);
-      if (state.selectedId === id) { announce('时间标注已保存，原录入时间保留。方向判断已失效，可重新分析。'); $('message-text').focus({ preventScroll: true }); }
-    }, { userId, counterpartId: id });
+    persist(save);
   });
   menu.closest('.message').append(form);
-  input.focus({ preventScroll: true });
+  minute.focus({ preventScroll: true }); minute.select();
   form.scrollIntoView({ block: 'nearest', behavior: 'auto' });
 }
 function renderTiming() {
@@ -708,8 +756,8 @@ function renderTiming() {
   if (!timing) { $('timing-note').textContent = ''; return; }
   const elapsed = timing.elapsedMs;
   const elapsedText = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed < 60000 ? '不足 1 分钟' : elapsed < 3600000 ? `约 ${Math.floor(elapsed / 60000)} 分钟` : `约 ${(elapsed / 3600000).toFixed(1)} 小时` : '未知';
-  const from = timing.fromSource === 'user_reported_wechat_sent' ? '本人标注的上一轮发送' : timing.fromSource === 'clipboard_copied' ? '上一轮复制' : timing.fromSource === 'suggestion_prepared' ? '上一轮建议生成' : '上一轮表达';
-  $('timing-note').textContent = `距${from}${elapsedText}（${timing.reliability === 'user_reported_interval' ? '本人补充的收发间隔，未核验' : timing.reliability === 'weak_preparation_estimate' ? '生成到录入的弱估计' : timing.reliability === 'unknown' ? '间隔未知' : '录入估计'}，非微信实际回复速度）。`;
+  const from = timing.fromSource === 'user_reported_wechat_sent' ? '上一条发送' : timing.fromSource === 'clipboard_copied' ? '上一轮复制' : timing.fromSource === 'suggestion_prepared' ? '上一轮建议生成' : '上一轮表达';
+  $('timing-note').textContent = timing.reliability === 'unknown' ? '当前回复间隔暂不明确。' : `距${from}${elapsedText}${timing.reliability === 'user_reported_interval' ? '' : timing.reliability === 'weak_preparation_estimate' ? ' · 生成到录入的估计' : ' · 录入估计'}。`;
 }
 function editMessage(message) {
   if (!state.editingMessageId) state.composerBeforeEdit = rememberComposer();
@@ -1225,7 +1273,7 @@ $('auth-form').addEventListener('submit', (event) => {
 function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
-  state.messageDrafts.clear(); state.messageCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
+  state.messageDrafts.clear(); state.messageCalls.clear(); state.timeCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
   state.composerImage = null; state.imageCalls.clear(); state.imageSelectionSerial++;
   state.intakeDrafts.clear();
   state.topicChangeContexts.clear(); state.annotationDrafts.clear(); state.annotationOpen.clear(); state.annotationCalls.clear(); state.annotationErrors.clear();

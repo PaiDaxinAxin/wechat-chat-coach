@@ -18,9 +18,10 @@ try {
   await writeFile(knowledgePath, knowledge);
   await mkdir(evidenceDir, { recursive: true });
   let classifications = 0, replies = 0, plans = 0, nextFailure = false, holdClassification = null;
+  let timingClockOffset = 0;
   let releaseClassification, releasePlan, holdPlan;
   // The expanded mock journey exceeds ten operations; production budget defaults stay unchanged.
-  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 20,
+  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 20, now: () => Date.now() + timingClockOffset,
     classifyFn: async (context, options) => {
       classifications++; assert.equal(options.knowledgeText, knowledge);
       if (nextFailure) { nextFailure = false; throw Object.assign(new Error('Synthetic classification timeout'), { code: 'PROVIDER_TIMEOUT' }); }
@@ -318,12 +319,96 @@ try {
   await page.locator('#message-text').fill('重要的未提交编辑草稿，修改时间不得擦掉。');
   await messageCard.locator('.message-menu > summary').click();
   await messageCard.getByRole('button', { name: '修改消息时间' }).click();
-  const reported = new Date(Date.now() - 3600000);
+  const timingEditor = messageCard.locator('.message-time-edit');
+  const hour = timingEditor.getByRole('textbox', { name: '小时', exact: true });
+  const minute = timingEditor.getByRole('textbox', { name: '分钟', exact: true });
+  const dateDisclosure = timingEditor.locator('details.message-time-date');
+  const date = dateDisclosure.locator('input[type=date]');
+  const recordedLocal = await page.evaluate((at) => {
+    const value = new Date(at);
+    return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  }, beforeTiming.recordedAt);
+  assert.equal(await minute.evaluate((input) => document.activeElement === input && input.selectionStart === 0 && input.selectionEnd === input.value.length), true, 'Time correction starts with the minute selected');
+  for (const input of [hour, minute]) {
+    assert.equal(await input.getAttribute('type'), 'text');
+    assert.equal(await input.getAttribute('inputmode'), 'numeric');
+    assert.equal(await input.getAttribute('maxlength'), '2');
+  }
+  assert.equal(await hour.inputValue(), recordedLocal.slice(11, 13));
+  assert.equal(await minute.inputValue(), recordedLocal.slice(14, 16));
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10));
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false, 'The date is secondary until explicitly expanded');
+  assert.equal(await date.isVisible(), false);
+  assert.equal(await timingEditor.getByRole('button', { name: '清除修改', exact: true }).isVisible(), false);
+  assert.equal((await timingEditor.textContent()).includes('未核验'), false);
+  const timeViewport = page.viewportSize(), timeTheme = await page.locator('html').getAttribute('data-theme');
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    for (const width of [1280, 320]) {
+      await page.setViewportSize({ width, height: 950 });
+      await timingEditor.scrollIntoViewIfNeeded();
+      await minute.focus(); await minute.evaluate((input) => input.select());
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${width}px time editor stays within the viewport`);
+      assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+      await page.screenshot({ path: join(evidenceDir, `time-edit-${width}-${theme}.png`), fullPage: true });
+    }
+  }
+  await page.setViewportSize(timeViewport);
+  if (await page.locator('html').getAttribute('data-theme') !== timeTheme) await page.locator('#theme-toggle').click();
+  const timingUrl = `${origin}/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`;
+  // At xx:00 the only different same-hour minute is in the future. Advance the
+  // isolated server clock two minutes only for that boundary, without sleeping.
+  const originalMinute = Number(recordedLocal.slice(14, 16));
+  if (originalMinute === 0) timingClockOffset = 120_000;
+  const correctedMinute = String(originalMinute > 0 ? originalMinute - 1 : 1).padStart(2, '0');
+  await minute.fill(correctedMinute);
+  const minuteOnly = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
+  assert.equal(minuteOnly.message.wechatTime.at, await page.evaluate((value) => new Date(value).toISOString(), `${recordedLocal.slice(0, 14)}${correctedMinute}`), 'Changing only minutes persists the original local year/month/day/hour');
+  assert.equal(minuteOnly.message.recordedAt, beforeTiming.recordedAt);
+  assert.equal(minuteOnly.message.wechatTime.source, 'user_reported');
+  await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await minute.inputValue(), correctedMinute);
+  assert.equal(await hour.inputValue(), recordedLocal.slice(11, 13));
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10));
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+  let invalidTimingRequests = 0;
+  const countInvalidTiming = (request) => { if (request.url() === timingUrl && request.method() === 'PATCH') invalidTimingRequests++; };
+  page.on('request', countInvalidTiming);
+  for (const [hours, minutes] of [['24', '03'], [recordedLocal.slice(11, 13), '60'], ['', '03'], [recordedLocal.slice(11, 13), '']]) {
+    await hour.fill(hours); await minute.fill(minutes);
+    await timingEditor.getByRole('button', { name: '保存时间', exact: true }).click();
+    await timingEditor.locator('.form-error').filter({ hasText: '0–23' }).waitFor({ state: 'visible' });
+    assert.equal(invalidTimingRequests, 0, 'An out-of-range or partially empty clock stays local');
+  }
+  page.off('request', countInvalidTiming);
+  const reported = new Date(Date.now() - 49 * 3600000);
   const reportedLocal = new Date(reported.getTime() - reported.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  await messageCard.locator('input[type=datetime-local]').fill(reportedLocal);
+  await hour.fill(reportedLocal.slice(11, 13)); await minute.fill(reportedLocal.slice(14, 16));
+  await dateDisclosure.locator('summary').click(); await date.fill(reportedLocal.slice(0, 10));
+  const timingFailure = deferred(), timingStarted = deferred();
+  await page.route(timingUrl, async (route) => { timingStarted.resolve(); await timingFailure.promise; await route.fulfill({ status: 503, contentType: 'application/json', json: { error: { code: 'SYNTHETIC_UNAVAILABLE', message: '合成时间保存失败，可稍后重试。' } } }); });
+  await timingEditor.getByRole('button', { name: '保存时间', exact: true }).click();
+  await timingStarted.promise;
+  try {
+    for (const input of [hour, minute, date]) assert.equal(await input.isDisabled(), true, 'Pending time save locks the submitted fields');
+    assert.equal(await timingEditor.locator('button[type=submit]').isDisabled(), true);
+    assert.equal(await page.locator('[data-edit-time]').evaluateAll((buttons) => buttons.length > 1 && buttons.every((button) => button.disabled)), true, 'Pending time save blocks another editor for this conversation');
+  } finally { timingFailure.resolve(); }
+  await timingEditor.locator('.form-error').waitFor({ state: 'visible' });
+  for (const input of [hour, minute, date]) assert.equal(await input.isDisabled(), false, 'Failed saves unlock the retained fields');
+  assert.equal(await timingEditor.getByRole('button', { name: '保存时间', exact: true }).isDisabled(), false);
+  assert.equal(await page.locator('[data-edit-time]').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
+  assert.equal(await hour.inputValue(), reportedLocal.slice(11, 13));
+  assert.equal(await minute.inputValue(), reportedLocal.slice(14, 16));
+  assert.equal(await date.inputValue(), reportedLocal.slice(0, 10));
+  assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。', 'Failed timing changes retain unrelated composer input');
+  await page.unroute(timingUrl);
   const timingChange = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => messageCard.getByRole('button', { name: '保存时间' }).click());
   assert.equal(timingChange.message.recordedAt, beforeTiming.recordedAt);
   assert.equal(timingChange.message.wechatTime.source, 'user_reported');
+  assert.equal(timingChange.message.wechatTime.at, await page.evaluate((value) => new Date(value).toISOString(), reportedLocal));
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。');
   assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
@@ -332,6 +417,23 @@ try {
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.ok(!(await messageCard.locator('.message-label').textContent()).includes('录入'), 'Primary time uses the explicit annotation');
   assert.ok((await messageCard.locator('.message-label').getAttribute('title')).includes(beforeTiming.recordedAt));
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await minute.inputValue(), reportedLocal.slice(14, 16), 'Reopening uses the saved correction');
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+  const clearedTiming = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '清除修改', exact: true }).click());
+  assert.equal(clearedTiming.message.wechatTime, null);
+  assert.equal(clearedTiming.message.recordedAt, beforeTiming.recordedAt);
+  await messageCard.locator('.message-label').filter({ hasText: '录入' }).waitFor();
+  assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。');
+  // Keep the original journey's corrected-time context for its followup checks.
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10), 'Clearing returns the editor default to the original recording date');
+  await hour.fill(reportedLocal.slice(11, 13)); await minute.fill(reportedLocal.slice(14, 16));
+  await dateDisclosure.locator('summary').click(); await date.fill(reportedLocal.slice(0, 10));
+  await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
+  await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
@@ -915,7 +1017,7 @@ try {
   const readA = (await (await context.request.get(`${origin}/api/counterparts/${savedA.id}`)).json()).data.counterpart;
   assert.equal(readA.alias, '异步保存对象 A');
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy and history', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'history and reload use static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy and history', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'history and reload use static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
   console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/history, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
 } finally {
   await browser?.close();
