@@ -8,7 +8,7 @@ const state = {
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
-  activeInlineCard: null, inlineTrigger: null, bootLoading: false,
+  activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null,
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
@@ -55,10 +55,10 @@ async function api(path, { method = 'GET', body } = {}) {
   if (method !== 'GET' && state.csrf && !['/api/login', '/api/register'].includes(path)) headers['x-csrf-token'] = state.csrf;
   let response;
   try { response = await fetch(path, { method, headers, credentials: 'same-origin', ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-  catch { throw new Error('连接中断，请检查网络后重试；未收到结果时不要假定操作已经失败。'); }
+  catch { const error = new Error('连接中断，请稍后重试。'); error.code = 'NETWORK_ERROR'; throw error; }
   let payload;
   try { payload = await response.json(); }
-  catch { throw new Error('服务暂时没有返回有效结果，请稍后重试。'); }
+  catch { const error = new Error('暂时没有取到结果，请重试。'); error.code = 'INVALID_RESPONSE'; error.status = response.status; throw error; }
   if (!response.ok || payload.error) {
     const error = new Error(payload.error?.message || '操作未完成，请稍后重试。');
     error.code = payload.error?.code;
@@ -102,6 +102,61 @@ async function perform(button, label, callback, scope) {
 function post(path, body) { return api(path, { method: 'POST', body }); }
 function put(path, body) { return api(path, { method: 'PUT', body }); }
 function counterpartPath(id = state.selectedId) { return `/api/counterparts/${encodeURIComponent(id)}`; }
+// Only model requests use automatic recovery. Ordinary writes keep their own
+// contracts; an uncertain model response always reuses the same request ID.
+function recoverableModelResponse(error) {
+  if (['NETWORK_ERROR', 'JOB_IN_PROGRESS'].includes(error.code)) return true;
+  if (error.code === 'MODEL_OPERATION_FAILED') return error.status !== 409;
+  return (!error.code || error.code === 'INVALID_RESPONSE') && (!error.status || [200, 408, 500, 502, 503, 504].includes(error.status));
+}
+function failedTransientModel(error) {
+  return ['PROVIDER_TIMEOUT', 'PROVIDER_UNREACHABLE', 'JOB_INTERRUPTED'].includes(error.code)
+    || /^PROVIDER_HTTP_(408|429|500|502|503|504)$/.test(error.code || '');
+}
+async function modelPost(path, body, request, isCurrent) {
+  const visit = state.conversationVisit;
+  const check = () => {
+    if (visit === state.conversationVisit && isCurrent()) return;
+    const error = new Error('操作已随对话更新。'); error.code = 'RECOVERY_CANCELLED'; error.displayed = true; throw error;
+  };
+  let restarted = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    check();
+    try { return await post(path, { ...body, requestId: request.id }); }
+    catch (error) {
+      check();
+      const uncertain = recoverableModelResponse(error);
+      const restart = failedTransientModel(error) && !restarted;
+      if (attempt === 2 || (!uncertain && !restart)) {
+        if (!uncertain && state.requestIds.get(request.key) === request.id) state.requestIds.delete(request.key);
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 600 : 1400));
+      check();
+      if (restart) {
+        restarted = true;
+        request.id = crypto.randomUUID();
+        state.requestIds.set(request.key, request.id);
+      }
+    }
+  }
+}
+function modelFailureMessage(error, fallback = '暂时没能给出建议，请重试。') {
+  const messages = {
+    DAILY_REPLY_QUOTA_EXHAUSTED: '今天的免费回复已用完，明天再来。',
+    CLASSIFICATION_QUOTA_EXHAUSTED: '深度分析体验已用完，仍可使用「给我建议」。',
+    PROVIDER_BUDGET_EXHAUSTED: '今天的使用额度已用完，明天再来。',
+    PROFILE_REQUIRED: '先补充自己的背景和聊天偏好。', FULL_PROFILE_REQUIRES_UPDATE: '先更新自己的聊天偏好，再继续。',
+    CONTEXT_REQUIRED: '先粘贴对方的一条消息。', CONTEXT_CHANGED: '对话已更新，请重新试一次。',
+    REQUEST_ID_CONTEXT_CONFLICT: '对话已更新，请重新试一次。',
+    UNAUTHORIZED: '请重新打开聊天。', CSRF_INVALID: '连接已失效，请刷新页面。', ORIGIN_FORBIDDEN: '当前无法连接，请刷新页面。',
+    RATE_LIMITED: '请稍等片刻再试。', JOB_IN_PROGRESS: '建议还在准备中，稍后重试即可。',
+  };
+  return messages[error.code] || fallback;
+}
+function canRetryModel(error) {
+  return ![401, 403].includes(error.status) && !['DAILY_REPLY_QUOTA_EXHAUSTED', 'CLASSIFICATION_QUOTA_EXHAUSTED', 'PROVIDER_BUDGET_EXHAUSTED', 'PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code);
+}
 const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'admin-view'];
 function closeInlineCards({ restoreFocus = false } = {}) {
   const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
@@ -215,9 +270,10 @@ async function readComposerImage(scope) {
   if (state.imageCalls.has(callKey)) return;
   const key = JSON.stringify(['image-read', scope.userId, id, image.id, submitted.meaning.trim()]);
   if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
-  const call = { imageId: image.id }; state.imageCalls.set(callKey, call); updateComposer();
+  const call = { imageId: image.id }, context = currentContextKey(); state.imageCalls.set(callKey, call); updateComposer();
+  const request = { key, id: state.requestIds.get(key) };
   try {
-    const data = await post(`${counterpartPath(id)}/image-read`, { requestId: state.requestIds.get(key), image: image.dataUrl, explanation: submitted.meaning.trim() });
+    const data = await modelPost(`${counterpartPath(id)}/image-read`, { image: image.dataUrl, explanation: submitted.meaning.trim() }, request, () => state.me?.user.id === scope.userId && state.selectedId === id && currentContextKey() === context && state.imageCalls.get(callKey) === call && state.composerImage === image && $('message-meaning').value.trim() === submitted.meaning.trim());
     state.requestIds.delete(key);
     if (state.me?.user.id !== scope.userId) return;
     updateQuota(data.quota);
@@ -226,7 +282,7 @@ async function readComposerImage(scope) {
     const text = current.text === submitted.text ? [current.text.trim(), data.imageInterpretation.description].filter(Boolean).join('\n') : current.text;
     state.messageDrafts.set(id, { ...current, text, image: { ...image, interpretation: data.imageInterpretation } });
     if (state.selectedId === id) { const focusDraft = document.activeElement === $('save-message') || document.activeElement === document.body; restoreComposer(id); updateComposer(); if (focusDraft) $('message-text').focus({ preventScroll: true }); }
-  } catch (error) { if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(key); throw error; }
+  } catch (error) { if (error.code !== 'RECOVERY_CANCELLED') error.message = modelFailureMessage(error, '图片暂时没能读清，请重试。'); throw error; }
   finally { if (state.imageCalls.get(callKey) === call) state.imageCalls.delete(callKey); if (state.me?.user.id === scope.userId) updateComposer(); }
 }
 function composerRecordText(draft) {
@@ -292,12 +348,12 @@ function updateQuota(quota = state.me?.quota) {
   if (!quota || !state.me) return;
   state.me.quota = quota;
   const remaining = quota.classificationRemaining;
-  $('quota-summary').textContent = `${remaining === null ? state.localDemo ? 'Demo 局面分析' : '付费内测局面分析' : `局面分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
+  $('quota-summary').hidden = !Number.isInteger(remaining);
+  $('quota-summary').textContent = Number.isInteger(remaining) ? `深度分析体验剩余 ${remaining} / 3 次` : '';
   const unavailable = state.me.user.plan !== 'paid' && remaining === 0;
   $('classify').hidden = unavailable;
-  $('classify-availability').textContent = unavailable
-    ? '局面分析试用已用完。仍可主动请求回复，或选择换题方向；不补造建议占比。'
-    : '结合已保存的背景与完整对话判断当前动作。只有需要换话题时才展示三个方向；占比不是成功率。';
+  $('classify-availability').hidden = !unavailable;
+  $('classify-availability').textContent = unavailable ? '深度分析试用已用完，仍可使用「给我建议」。' : '';
   const daily = quota.dailyReplyRemaining;
   $('daily-reply-quota').hidden = !Number.isInteger(daily);
   $('daily-reply-quota').textContent = Number.isInteger(daily) ? `今日免费 AI 回复剩余 ${daily} / 3 条 · 北京时间每日重置` : '';
@@ -507,7 +563,7 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  if (changed) { closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
+  if (changed) { state.conversationVisit++; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
   if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
@@ -545,7 +601,6 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   renderTranscript();
   renderTiming();
   renderClassification(detail.classification);
-  renderJobs(detail.jobs || []);
   const currentId = state.suggestion?.id;
   const suggestions = detail.suggestions || [];
   const currentNoReply = (item) => isNoReplySuggestion(item) && isCurrentSuggestion(item);
@@ -565,18 +620,6 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   updateCoachBusy();
   renderFieldCoachPlan();
   if (autoAnalyze) maybeAutoCoach();
-}
-function renderJobs(jobs) {
-  let history = $('job-history');
-  if (!history) {
-    history = el('details', { id: 'job-history' }, el('summary', {}, '最近操作状态'), el('div', { id: 'job-list' }));
-    $('coach-panel').append(history);
-  }
-  history.hidden = !jobs.length;
-  const states = { reserved: '等待处理', running: '正在处理', linked: '关联已有操作', succeeded: '已完成', failed: '已失败' };
-  const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '局面分析试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
-  const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
-  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '局面分析', reply: '回复生成', coach_plan: '场外教练评估', image_read: '图片识读' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
 async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
@@ -922,7 +965,11 @@ function renderFieldCoachPlan() {
   $('field-coach-plan-result').replaceChildren();
   if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; return; }
   if (!result) return;
-  if (result.error) { $('field-coach-plan-result').textContent = result.error; return; }
+  if (result.error) {
+    $('field-coach-plan-result').append(el('p', {}, result.error));
+    if (result.retryable) $('field-coach-plan-result').append(el('button', { type: 'button', class: 'secondary', onclick: () => $('field-coach-plan-form').requestSubmit() }, '重试'));
+    return;
+  }
   const assessment = result.planAssessment;
   const details = el('details', { class: 'coach-details' }, el('summary', {}, '查看评估依据'),
     el('p', {}, `判断：${assessment.reason}`),
@@ -940,7 +987,9 @@ function requestId(type, id, direction = '', intent = '', topicChangeRequested =
   return { id: state.requestIds.get(contextKey), key: contextKey };
 }
 function updateCoachBusy() {
-  const busy = state.modelCalls.get(currentContextKey());
+  const context = currentContextKey();
+  if (state.coachErrorContext !== context && $('coach-error')) $('coach-error').hidden = true;
+  const busy = state.modelCalls.get(context);
   $('coach-loading').hidden = busy?.type !== 'classify';
   if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整对话看当前局面…';
   $('coach-panel').setAttribute('aria-busy', String(Boolean(busy)));
@@ -986,8 +1035,9 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
   const request = requestId(type, id, direction, intent, topicChangeRequested);
   let localError = $('coach-error');
-  if (!localError) { localError = el('p', { id: 'coach-error', class: 'form-error', role: 'alert' }); $('coach-loading').after(localError); }
-  localError.hidden = true;
+  if (!localError) { localError = el('div', { id: 'coach-error', class: 'coach-failure', role: 'alert' }); $('coach-loading').after(localError); }
+  state.coachErrorContext = null;
+  localError.hidden = true; localError.replaceChildren();
   updateCoachBusy();
   if (type === 'reply' && !automatic) {
     $('suggestion-panel').scrollIntoView({ block: 'nearest' });
@@ -995,7 +1045,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   }
   let replyAccepted = false, classificationAccepted = false;
   try {
-    const data = await post(`${counterpartPath(id)}/${type}`, { requestId: request.id, ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) });
+    const data = await modelPost(`${counterpartPath(id)}/${type}`, { ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext && state.modelCalls.get(inputContext) === call);
     state.requestIds.delete(request.key);
     if (state.me?.user.id !== userId) return;
     updateQuota(data.quota);
@@ -1021,30 +1071,30 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
       announce('');
     }
     try { await loadCounterparts(); }
-    catch {
-      if (state.selectedId === id && currentContextKey() === inputContext) announce('结果已取回，但对象列表暂未刷新。可稍后刷新保存状态。', 'error');
-    }
+    catch { /* The requested advice is ready; an ancillary list read does not block it. */ }
   } catch (error) {
-    if (state.me?.user.id !== userId) return;
-    const recoverExisting = !error.status || error.code === 'JOB_IN_PROGRESS';
-    if (!recoverExisting) state.requestIds.delete(request.key);
-    const retryMessage = `${error.message} ${recoverExisting ? '可点击按钮取回结果。' : '可手动重新尝试。'}不会自动重试。`;
+    if (error.code === 'RECOVERY_CANCELLED' || state.me?.user.id !== userId) return;
     if (state.selectedId === id && currentContextKey() === inputContext) {
       if (type === 'reply' && !replyAccepted) {
         state.selectedDirection = call.previousDirection;
-        state.replyFeedback = { context: inputContext, suggestionId: state.suggestion?.id,
-          text: state.suggestion ? '未取回新回复，保留上一条；可手动重试。' : '未取回回复，可手动重试。', error: true };
+        state.replyFeedback = null;
       }
-      announce(''); localError.textContent = retryMessage; localError.hidden = false;
+      announce('');
+      state.coachErrorContext = inputContext;
+      localError.replaceChildren(el('p', {}, modelFailureMessage(error)));
+      if (canRetryModel(error)) {
+        const retry = el('button', { id: 'retry-coach', type: 'button', class: 'secondary', onclick: () => {
+          if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext) void coachCall(type, retry, { direction, topicChangeRequested });
+        } }, '重试');
+        localError.append(retry);
+      }
+      localError.hidden = false;
     }
     try { await reloadMe(); } catch { /* Preserve the original recovery state. */ }
     if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
       try { await loadCounterpart(id, { autoAnalyze: false }); } catch { /* No automatic retry. */ }
     }
     if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
-    if (state.selectedId === id) {
-      try { const detail = await api(counterpartPath(id)); if (state.selectedId === id) renderJobs(detail.jobs || []); } catch { /* Read only. */ }
-    }
   } finally {
     if (state.modelCalls.get(inputContext) === call) state.modelCalls.delete(inputContext);
     if (state.selectedId === id && currentContextKey() === inputContext) {
@@ -1122,7 +1172,7 @@ function updateSentState() {
     return;
   }
   $('suggestion-title').textContent = '我 · AI 建议';
-  $('sent-state').textContent = '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。';
+  $('sent-state').textContent = '可按你的习惯修改，再复制到微信。';
 }
 function fillMeeting(meeting) {
   $('meeting-kind').value = meeting?.status || 'none';
@@ -1256,6 +1306,7 @@ $('auth-form').addEventListener('submit', (event) => {
   });
 });
 function clearSessionUI() {
+  state.conversationVisit++; state.coachErrorContext = null;
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.messageDrafts.clear(); state.messageCalls.clear(); state.timeCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
@@ -1271,7 +1322,7 @@ function clearSessionUI() {
   for (const id of ['counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
   $('counterpart-title').textContent = '模拟微信';
   $('generated-invite').value = ''; $('invite-result').hidden = true;
-  $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('job-history')?.remove(); $('coach-error')?.remove();
+  $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('coach-error')?.remove();
   document.querySelectorAll('form .form-error').forEach((node) => node.remove());
   closeInlineCards(); closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
   showCounterpartLoading();
@@ -1326,19 +1377,18 @@ $('field-coach-plan-form').addEventListener('submit', (event) => {
   if (!plan) { $('field-coach-plan-result').textContent = '先写下你打算怎么主导这个话题。'; $('field-coach-plan').focus(); return; }
   const resultKey = JSON.stringify([context, plan]);
   const request = requestId('coach-plan', id, '', plan);
-  state.planCalls.set(context, true); renderFieldCoachPlan();
+  const call = {}; state.planCalls.set(context, call); renderFieldCoachPlan();
   void (async () => {
     try {
-      const data = await post(`${counterpartPath(id)}/coach-plan`, { requestId: request.id, plan });
+      const data = await modelPost(`${counterpartPath(id)}/coach-plan`, { plan }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === context && state.planCalls.get(context) === call && $('field-coach-plan').value.trim() === plan);
       state.requestIds.delete(request.key);
       if (state.me?.user.id !== userId) return;
       state.planResults.set(resultKey, data); updateQuota(data.quota);
     } catch (error) {
-      if (state.me?.user.id !== userId) return;
-      if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(request.key);
-      state.planResults.set(resultKey, { error: `${error.message} 可手动再问；不会自动重试。` });
+      if (error.code === 'RECOVERY_CANCELLED' || state.me?.user.id !== userId) return;
+      state.planResults.set(resultKey, { error: modelFailureMessage(error, '暂时没能看完这个计划，请重试。'), retryable: canRetryModel(error) });
     } finally {
-      state.planCalls.delete(context);
+      if (state.planCalls.get(context) === call) state.planCalls.delete(context);
       if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === context) renderFieldCoachPlan();
     }
   })();

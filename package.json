@@ -19,7 +19,8 @@
     "test:style": "node scripts/verify-style-learning.mjs",
     "test:a11y": "node scripts/verify-accessibility.mjs",
     "test:topics": "node scripts/verify-topic-workflow.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "test:recovery": "node scripts/verify-recovery.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",

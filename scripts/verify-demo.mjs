@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 import { createBetaServer } from '../src/beta-api.mjs';
+import { CoachError } from '../src/coach.mjs';
 import { DEFAULT_KNOWLEDGE_PATH } from '../src/knowledge.mjs';
 import { computeHeat } from '../src/domain.mjs';
 
@@ -18,14 +19,14 @@ try {
   const knowledgePath = join(directory, 'knowledge.md');
   await writeFile(knowledgePath, knowledge);
   await mkdir(evidenceDir, { recursive: true });
-  let classifications = 0, replies = 0, plans = 0, nextFailure = false, holdClassification = null;
+  let classifications = 0, replies = 0, plans = 0, classificationFailuresRemaining = 0, holdClassification = null;
   let timingClockOffset = 0;
   let releaseClassification, releasePlan, holdPlan;
   // The expanded mock journey exceeds ten operations; production budget defaults stay unchanged.
-  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 20, now: () => Date.now() + timingClockOffset,
+  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 30, now: () => Date.now() + timingClockOffset,
     classifyFn: async (context, options) => {
       classifications++; assert.equal(options.knowledgeText, knowledge);
-      if (nextFailure) { nextFailure = false; throw Object.assign(new Error('Synthetic classification timeout'), { code: 'PROVIDER_TIMEOUT' }); }
+      if (classificationFailuresRemaining > 0) { classificationFailuresRemaining--; throw new CoachError('provider_timeout'); }
       if (holdClassification) { const held = holdClassification; holdClassification = null; await held; }
       const id = context.messages.at(-1).id;
       const observed = { level: 'positive', evidenceIds: [...new Set([context.messages.find((message) => message.speaker === 'other')?.id || id, id])] };
@@ -61,6 +62,7 @@ try {
   }
   await page.goto(origin);
   await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#job-history,#job-list').count(), 0, 'Current operations have no diagnostic status archive in the UI');
   assert.equal(await page.locator('#auth').isVisible(), false);
   assert.equal(await page.locator('#demo-banner').isVisible(), true);
   assert.equal(await page.locator('.message-bubble').count(), 4);
@@ -260,17 +262,22 @@ try {
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 4);
-  nextFailure = true;
+  const beforeFailedClassification = classifications;
+  classificationFailuresRemaining = 2;
   await page.locator('#message-text').fill('这轮合成分析会失败。');
   await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
   await page.locator('#coach-error').waitFor({ state: 'visible' });
-  assert.equal(classifications, 5);
+  await page.locator('#retry-coach:not([disabled])').waitFor({ state: 'visible' });
+  assert.equal(classifications, beforeFailedClassification + 2, 'A transient provider failure has one bounded fresh attempt before showing retry');
+  assert.equal(classificationFailuresRemaining, 0);
+  assert.doesNotMatch(await page.locator('#coach-error').textContent(), /Synthetic|PROVIDER_TIMEOUT|不会自动重试/);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForTimeout(150);
-  assert.equal(classifications, 5, 'Failed current context does not auto-retry after reload');
+  assert.equal(classifications, beforeFailedClassification + 2, 'Exhausted recovery for the current context does not restart after reload');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
-  assert.equal(classifications, 6, 'Explicit reanalysis is allowed');
+  assert.equal(classifications, beforeFailedClassification + 3, 'Explicit reanalysis is allowed');
+  const recoveredClassificationCalls = classifications;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#toggle-field-coach').click();
   assert.equal(await page.locator('#field-coach').isVisible(), true);
@@ -435,10 +442,10 @@ try {
   await dateDisclosure.locator('summary').click(); await date.fill(reportedLocal.slice(0, 10));
   await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
-  assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
+  assert.equal(classifications, recoveredClassificationCalls, 'Changing metadata does not silently call the model');
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
-  assert.equal(classifications, 7);
+  assert.equal(classifications, recoveredClassificationCalls + 1);
   await page.locator('#cancel-message-edit').click();
   const suggestedA = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
   assert.equal(suggestedA.pendingEligible, true);
@@ -570,9 +577,12 @@ try {
     const arrived = deferred(), release = deferred();
     const suggestion = { ...newAfterB, id: `synthetic-direction-${directionRequests.length + 1}`, direction: resultDirection,
       reply, createdAt: new Date().toISOString(), pendingReplyText: null, pendingCopyReceiptId: null, pendingEligible: true };
-    const body = status === 200 ? { data: { suggestion, cached } } : { error: { code: 'SYNTHETIC_REPLY_FAILURE', message: '合成方向生成故障。' } };
+    const body = status === 200 ? { data: { suggestion, cached } } : { error: { message: '合成方向生成故障。' } };
     const queued = { arrived, release, status, body, suggestion, fromServer };
     replyQueue.push(queued);
+    // An unknown temporary HTTP failure may be the response to an accepted
+    // request, so recovery must replay the original receipt without a new model.
+    if (status === 503) replyQueue.push({ ...queued }, { ...queued });
     const received = page.waitForResponse((r) => r.url().endsWith(`/api/counterparts/${secondId}/reply`) && r.request().method() === 'POST');
     received.catch(() => {}); // Keep an earlier assertion failure visible if cleanup closes this held request.
     await page.locator(`[data-direction=${direction}]`).click();
@@ -618,6 +628,7 @@ try {
   directionFixtures.push(returnedDirection.suggestion);
   const retainedReplyDraft = '切换失败后必须保留的私有编辑草稿。';
   await page.locator('#suggestion-text').fill(retainedReplyDraft);
+  const beforeFailedDirection = directionRequests.length;
   const failedDirection = await beginDirection('up', { status: 503 });
   await failedDirection.complete();
   await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
@@ -625,9 +636,13 @@ try {
   assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft);
   assert.equal(await page.locator('#copy-reply').isDisabled(), false);
   await assertSelectedDirection('sideways');
-  const failedUpdate = await page.locator('#suggestion-update').textContent();
-  assert.ok(failedUpdate.includes('未取回') && failedUpdate.includes('新回复'), failedUpdate);
-  assert.equal(await page.locator('#suggestion-update').isVisible(), true);
+  assert.equal(directionRequests.length - beforeFailedDirection, 3, 'Unknown HTTP recovery stops after three requests');
+  const failedDirectionRequests = directionRequests.slice(beforeFailedDirection);
+  assert.ok(failedDirectionRequests.every(({ body }) => JSON.stringify(body) === JSON.stringify(failedDirectionRequests[0].body)), 'Unknown HTTP recovery reuses the same request receipt and body');
+  assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'The current operation has one error message instead of duplicate feedback');
+  assert.equal(await page.locator('#coach-error').isVisible(), true);
+  assert.equal(await page.locator('#retry-coach').isVisible(), true);
+  assert.doesNotMatch(await page.locator('#coach-error').textContent(), /合成方向生成故障|SYNTHETIC|不会自动重试/);
   assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
   assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0);
   assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'Failed replacement keeps the current edited draft');
@@ -854,9 +869,8 @@ try {
   await selectConversation(secondId);
   assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。');
   assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
-  if (!await page.locator('#job-history').getAttribute('open')) await page.locator('#job-history > summary').click();
-  await response(`/api/counterparts/${secondId}`, 'GET', () => page.getByRole('button', { name: '刷新保存状态', exact: true }).click());
-  assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。', 'Readback preserves the current draft');
+  await selectConversation(id); await selectConversation(secondId);
+  assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。', 'Returning to the conversation reads current data and preserves its draft');
   const editCard = page.locator('.message').filter({ has: page.locator('.message-menu') }).first();
   await editCard.locator('.message-menu > summary').click();
   await editCard.getByRole('button', { name: /^编辑/ }).click();
@@ -880,7 +894,7 @@ try {
   });
   await page.locator('#save-message').click(); await messageSavedPromise;
   await page.locator('#message-text').fill('保存期间接着写的下一句。');
-  await response(`/api/counterparts/${secondId}`, 'GET', () => page.getByRole('button', { name: '刷新保存状态', exact: true }).click());
+  await selectConversation(id); await selectConversation(secondId);
   assert.equal(await page.locator('#save-message').isDisabled(), true, 'Rendering a new detail keeps an in-flight submission locked');
   const savedMessageResponse = page.waitForResponse((r) => r.url().endsWith(`/api/counterparts/${secondId}/messages`) && r.request().method() === 'POST');
   releaseMessageSave(); await savedMessageResponse;
