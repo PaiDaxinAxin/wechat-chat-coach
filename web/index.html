@@ -145,22 +145,20 @@
         <li><span class="coach-action-label">接话方式</span><p id="field-coach-next">结合当前话题给建议。</p></li>
       </ol>
       <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
-      <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div></form>
+      <div id="coach-glossary-terms" class="coach-footnotes" role="note" aria-label="本段用语注释" hidden></div>
+      <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div><div id="field-coach-plan-notes" class="coach-footnotes" role="note" aria-label="计划建议用语注释" hidden></div></form>
       <details class="field-coach-section style-entry"><summary>我的表达偏好</summary><p class="helper">这句像不像你？可以保留改写，明确选择今后使用的规则。</p><button id="open-style-preferences" class="quiet-button" type="button">调整我的表达偏好</button></details>
-      <section class="field-coach-section coach-glossary" aria-labelledby="coach-glossary-title">
-        <div class="coach-glossary-heading"><h3 id="coach-glossary-title">术语说明</h3><label class="coach-glossary-toggle"><input id="coach-glossary-toggle" type="checkbox" checked aria-controls="coach-glossary-terms">显示</label></div>
-        <div id="coach-glossary-terms">
-          <details data-coach-term="up"><summary>上切</summary><p>从一个细节聊到更大的类别或方向。例如，从“最近忙工作”，聊到“你是做哪类工作的？”</p></details>
-          <details data-coach-term="down"><summary>下切</summary><p>沿着当前话题聊得更具体。例如，知道她在做一个项目后，了解项目具体在做什么。</p></details>
-          <details data-coach-term="sideways"><summary>平移</summary><p>迁移到另一个有关联的话题。例如，从“最近一直忙工作”，接到自己的感受“听起来你很有事业心”，把话题关联到她的工作投入。</p></details>
-          <details data-coach-term="relationship"><summary>男对女</summary><p>把互动放在男女之间的关系框架中，表达吸引、恋爱、约会或亲密意图；邀约是其中一种表达。</p></details>
-          <details data-coach-term="warming"><summary>升温 · A / B / C</summary><p>升温是主动靠近，之后观察和承接对方回应。话题方向与靠近强度分别判断。</p><p>A · 最浅：真诚地表达欣赏或自己的看法。</p><p>B · 身份：明确男女之间的恋爱或约会意味。</p><p>C · 明显暗示：带有私密或亲密意味；须已有相互舒适、愿意参与的依据，未知时不自动使用。</p></details>
-          <details data-coach-term="obstacle"><summary>阻力与边界</summary><p>明确拒绝时停止同类推进。回应模糊时先澄清真实意思；结合前后文判断调侃、顾虑与抗拒。</p></details>
-          <details data-coach-term="round"><summary>一轮 · 完整话题</summary><p>一轮指一个完整话题，可能包含多次来回。主动靠近后先承接回应，再依据投入和新意调整节奏。</p></details>
-        </div>
-      </section>
     </div>
     </div>
   </main>
+  <template id="coach-term-definitions">
+    <details data-coach-term="up"><summary>上切</summary><p>从一个细节聊到更大的类别或方向。例如，从“最近忙工作”，聊到“你是做哪类工作的？”</p></details>
+    <details data-coach-term="down"><summary>下切</summary><p>沿着当前话题聊得更具体。例如，知道她在做一个项目后，了解项目具体在做什么。</p></details>
+    <details data-coach-term="sideways"><summary>平移</summary><p>迁移到另一个有关联的话题。例如，从“最近一直忙工作”，接到自己的感受“听起来你很有事业心”，把话题关联到她的工作投入。</p></details>
+    <details data-coach-term="relationship"><summary>男对女</summary><p>把互动放在男女之间的关系框架中，表达吸引、恋爱、约会或亲密意图；邀约是其中一种表达。</p></details>
+    <details data-coach-term="warming"><summary>升温 · A / B / C</summary><p>升温是主动靠近，之后观察和承接对方回应。话题方向与靠近强度分别判断。</p><p>A · 最浅：真诚地表达欣赏或自己的看法。</p><p>B · 身份：明确男女之间的恋爱或约会意味。</p><p>C · 明显暗示：带有私密或亲密意味；须已有相互舒适、愿意参与的依据，未知时不自动使用。</p></details>
+    <details data-coach-term="obstacle"><summary>阻力与边界</summary><p>明确拒绝时停止同类推进。回应模糊时先澄清真实意思；结合前后文判断调侃、顾虑与抗拒。</p></details>
+    <details data-coach-term="round"><summary>一轮 · 完整话题</summary><p>一轮指一个完整话题，可能包含多次来回。主动靠近后先承接回应，再依据投入和新意调整节奏。</p></details>
+  </template>
 </body>
 </html>

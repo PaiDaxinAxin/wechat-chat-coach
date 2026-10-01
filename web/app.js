@@ -921,6 +921,58 @@ function markCoachUpdated(call, context) {
     if (state.coachUpdate === update) renderCoachUpdate();
   }, 1800);
 }
+const coachTermAliases = [
+  ['up', ['上切', '上堆']], ['down', ['下切']], ['sideways', ['平移']],
+  ['relationship', ['男对女']], ['warming', ['升温']],
+  ['obstacle', ['阻力', '边界']], ['round', ['一轮']],
+];
+const coachNoteScopes = new WeakMap();
+function renderTermNotes(container, text, scope) {
+  const focused = container.contains(document.activeElement) ? document.activeElement : null;
+  const mentions = coachTermAliases.flatMap(([id, aliases]) => {
+    const match = aliases.map((word) => ({ word, index: text.indexOf(word) })).filter(({ index }) => index >= 0).sort((a, b) => a.index - b.index)[0];
+    return match ? [{ id, ...match }] : [];
+  }).sort((a, b) => a.index - b.index);
+  const changed = coachNoteScopes.get(container) !== scope;
+  coachNoteScopes.set(container, scope);
+  for (const note of [...container.children]) {
+    if (!changed && mentions.some(({ id }) => id === note.dataset.coachTerm)) continue;
+    if (note.contains(document.activeElement)) $('field-coach-title').focus({ preventScroll: true });
+    note.remove();
+  }
+  mentions.forEach(({ id, word }, index) => {
+    let note = container.querySelector(`[data-coach-term="${id}"]`);
+    if (!note) {
+      note = $('coach-term-definitions').content.querySelector(`[data-coach-term="${id}"]`).cloneNode(true);
+      const body = el('div', { class: 'coach-footnote-body' });
+      body.append(...note.querySelectorAll('p'));
+      note.append(body);
+    }
+    const summary = note.querySelector('summary');
+    const label = `注 · ${word}`;
+    if (summary.textContent !== label) summary.textContent = label;
+    // Keep surviving nodes in place so a regular render does not close a note
+    // or steal focus while the reader is using its disclosure.
+    if (container.children[index] !== note) container.insertBefore(note, container.children[index] || null);
+  });
+  container.hidden = mentions.length === 0;
+  // Moving an existing details node can blur its summary in Chromium. Restore
+  // only a surviving focus that fell to body, never a deliberate new target.
+  if (focused?.isConnected && document.activeElement === document.body) focused.focus({ preventScroll: true });
+}
+function renderCoachNotes() {
+  const ids = ['field-coach-heat-status', 'field-coach-focus', 'field-coach-initiative', 'field-coach-pitfall', 'field-coach-next'];
+  if ($('field-coach-details').open) ids.push('field-coach-topic', 'field-coach-state', 'field-coach-full-guidance');
+  renderTermNotes($('coach-glossary-terms'), ids.map((id) => $(id).textContent).join('\n'), currentContextKey());
+}
+function renderPlanNotes() {
+  const plan = $('field-coach-plan').value.trim();
+  const key = JSON.stringify([currentContextKey(), plan]);
+  const assessment = state.planResults.get(key)?.planAssessment;
+  const text = assessment && !state.planCalls.has(currentContextKey())
+    ? [...$('field-coach-plan-result').querySelectorAll(':scope > p, :scope > details[open] > p')].map((node) => node.textContent).join('\n') : '';
+  renderTermNotes($('field-coach-plan-notes'), text, key);
+}
 function renderFieldCoach(classification) {
   renderCoachUpdate();
   const coach = classification?.fieldCoach;
@@ -985,6 +1037,7 @@ function renderFieldCoach(classification) {
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
   const evidence = (coach?.topicMessageIds || []).map((id) => messages.get(id)).filter(Boolean);
   $('field-coach-evidence').textContent = evidence.length ? `依据 ${evidence.length} 条话题记录：${evidence.slice(-3).map((message) => `${message.speaker === 'self' ? '我' : '对方'}：${message.text}`).join(' / ')}` : '';
+  renderCoachNotes();
 }
 function planDraftKey() { return JSON.stringify([state.me?.user.id, state.selectedId]); }
 function renderFieldCoachPlan() {
@@ -996,12 +1049,12 @@ function renderFieldCoachPlan() {
   $('field-coach-plan-submit').textContent = busy ? '教练正在看…' : '问场外教练';
   const result = state.planResults.get(JSON.stringify([currentContextKey(), $('field-coach-plan').value.trim()]));
   $('field-coach-plan-result').replaceChildren();
-  if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; return; }
-  if (!result) return;
+  if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; renderPlanNotes(); return; }
+  if (!result) { renderPlanNotes(); return; }
   if (result.error) {
     $('field-coach-plan-result').append(el('p', {}, result.error));
     if (result.retryable) $('field-coach-plan-result').append(el('button', { type: 'button', class: 'secondary', onclick: () => $('field-coach-plan-form').requestSubmit() }, '重试'));
-    return;
+    renderPlanNotes(); return;
   }
   const assessment = result.planAssessment;
   const details = el('details', { class: 'coach-details' }, el('summary', {}, '查看评估依据'),
@@ -1012,6 +1065,8 @@ function renderFieldCoachPlan() {
   $('field-coach-plan-result').append(el('p', { class: 'coach-plan-verdict' }, planVerdictNames[assessment.verdict] || '建议待判断'),
     el('p', { class: 'coach-plan-next' }, `下一步：${assessment.nextAction}`),
     el('p', { class: 'helper' }, `时机：${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}`), details);
+  details.addEventListener('toggle', renderPlanNotes);
+  renderPlanNotes();
 }
 function currentContextKey() { return JSON.stringify([state.me?.user.id, state.selectedId, state.detail?.counterpart, state.detail?.messages, state.detail?.meeting, state.me?.profile]); }
 function requestId(type, id, direction = '', intent = '', topicChangeRequested = false) {
@@ -1411,10 +1466,8 @@ $('toggle-field-coach').addEventListener('click', () => {
 $('view-coach-update').addEventListener('click', openFieldCoach);
 $('close-field-coach').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
 $('field-coach-backdrop').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
-$('coach-glossary-toggle').addEventListener('change', (event) => {
-  $('coach-glossary-terms').hidden = !event.currentTarget.checked;
-});
-$('field-coach-plan').addEventListener('input', () => { state.planDrafts.set(planDraftKey(), $('field-coach-plan').value); $('field-coach-plan-result').replaceChildren(); });
+$('field-coach-details').addEventListener('toggle', renderCoachNotes);
+$('field-coach-plan').addEventListener('input', () => { state.planDrafts.set(planDraftKey(), $('field-coach-plan').value); $('field-coach-plan-result').replaceChildren(); renderPlanNotes(); });
 $('field-coach-plan-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const id = state.selectedId, userId = state.me?.user.id, context = currentContextKey(), plan = $('field-coach-plan').value.trim();

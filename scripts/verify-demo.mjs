@@ -102,11 +102,12 @@ try {
   const originalDetail = (await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data;
   const fixtureOther = originalDetail.messages.find((message) => message.speaker === 'other').id;
   const fixtureLast = originalDetail.messages.at(-1).id;
-  let coachScenario = null;
+  let coachScenario = null, glossaryEvidence = null;
   await page.route(`**/api/counterparts/${id}`, async (route) => {
     if (route.request().method() !== 'GET' || !coachScenario) return route.continue();
     const received = await route.fetch(); const body = await received.json();
     body.data.classification = coachScenario;
+    if (glossaryEvidence) body.data.messages.at(-1).text = glossaryEvidence;
     body.data.heat = computeHeat(coachScenario);
     await route.fulfill({ response: received, json: body });
   });
@@ -142,6 +143,31 @@ try {
   coachScenario = scenario('unknown', []);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '线索较少');
+  // Footnotes read the displayed coach prose, never the transcript or plan draft.
+  coachScenario = { ...scenario('positive', [fixtureOther, fixtureLast]), options: [], topicDecision: { mode: 'stay', reason: '继续当前话题。' },
+    fieldCoach: { currentTopic: '上堆到工作类别', topicStatus: 'developing', topicMessageIds: [fixtureLast], warmingLayer: 'none',
+      initiative: '先接住她的经历。', pitfall: '不要连续追问。', nextAction: '聊她刚提到的项目。', reason: '把这段交流当作一轮完整话题。' } };
+  glossaryEvidence = '聊天引用中的下切、平移、男对女、升温和阻力，不是教练的指导。';
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0, 'The persistent dictionary and toggle are removed');
+  assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false, 'No visible coach term means no footnotes');
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0);
+  await page.locator('#field-coach-plan').fill('我想聊男对女、升温、平移和下切。');
+  assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false, 'An unsubmitted plan never creates explanatory notes');
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0, 'Plan wording does not become coach guidance');
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms [data-coach-term=up]').waitFor();
+  assert.deepEqual(await page.locator('#coach-glossary-terms > details').evaluateAll((nodes) => nodes.map((node) => node.dataset.coachTerm)), ['up', 'round']);
+  assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=up] > summary').textContent(), '注 · 上堆', 'The footnote names the actual alias used in the prose');
+  assert.ok((await page.locator('#field-coach-evidence').textContent()).includes(glossaryEvidence));
+  await page.locator('#coach-glossary-terms [data-coach-term=up] > summary').click();
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0, 'Hidden guidance and the definition text cannot sustain their own footnotes');
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms [data-coach-term=up]').waitFor();
+  assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=up]').getAttribute('open'), null, 'A newly relevant note starts collapsed');
+  glossaryEvidence = null;
   await page.unroute(`**/api/counterparts/${id}`);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '约65°');
@@ -763,8 +789,10 @@ try {
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Old prepared reply never returns as pending after the new message readback');
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
-  await page.locator('#message-text').fill('术语开关验证保留的未提交聊天草稿。');
+  await page.locator('#message-text').fill('脚注验证保留的未提交聊天草稿。');
   const finalDirectionReply = await beginDirection('down');
+  finalDirectionReply.suggestion.guidance = { topicMove: 'down', relationMove: 'receive',
+    ownWordsGuide: '男对女的表达可以轻一点；这次升温后先接住回应。', reentryWhen: '等她展开后，再接她提到的经历。' };
   await finalDirectionReply.complete(); await assertDirectionResult('down');
   await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
   async function assertReplyPaletteAndAlignment(theme) {
@@ -794,14 +822,16 @@ try {
     await assertReplyPaletteAndAlignment(theme);
     await page.screenshot({ path: join(evidenceDir, `direction-final-desktop-${theme}.png`), fullPage: true });
   }
-  // Coach terms explain only on demand. Toggling them preserves both local drafts.
-  const glossary = page.locator('#coach-glossary-toggle');
-  assert.equal(await glossary.isChecked(), true, 'Term explanations default to enabled');
-  assert.equal(await glossary.getAttribute('aria-controls'), 'coach-glossary-terms');
-  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 7);
-  for (const term of await page.locator('#coach-glossary-terms > details').all()) {
-    assert.equal(await term.getAttribute('open'), null, 'Terms default to collapsed explanations');
+  // Only the current coach's terms appear as collapsed, unobtrusive footnotes.
+  const glossary = page.locator('#coach-glossary-terms');
+  if (await page.locator('#field-coach-details').getAttribute('open') !== null) await page.locator('#field-coach-details > summary').click();
+  await page.waitForFunction(() => document.querySelectorAll('#coach-glossary-terms > details').length === 3);
+  assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0);
+  assert.deepEqual(await glossary.locator(':scope > details').evaluateAll((nodes) => nodes.map((node) => node.dataset.coachTerm)), ['relationship', 'warming', 'obstacle']);
+  for (const term of await glossary.locator(':scope > details').all()) {
+    assert.equal(await term.getAttribute('open'), null, 'Relevant terms default to collapsed explanations');
     assert.equal(await term.locator('p').first().isVisible(), false);
+    assert.ok((await term.locator('summary').textContent()).startsWith('注 · '));
   }
   const strongCoachText = await page.evaluate(() => {
     const selectors = ['.coach-temperature-top > span', '#field-coach-temperature', '.coach-action-label'];
@@ -809,8 +839,9 @@ try {
   });
   assert.ok(strongCoachText[0].size >= 16 && strongCoachText[1].size >= 28 && strongCoachText[2].size >= 16);
   assert.ok(strongCoachText.every(({ weight }) => weight >= 600), 'Heat and action headings have clear visual emphasis');
-  const glossaryPlan = '术语操作不得擦掉的场外计划。';
+  const glossaryPlan = '脚注操作不得擦掉的场外计划，草稿中的下切和平移不触发说明。';
   await page.locator('#field-coach-plan').fill(glossaryPlan);
+  assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false);
   const glossaryComposer = await page.locator('#message-text').inputValue();
   const beforeGlossary = { classifications, replies, plans, directionRequests: directionRequests.length };
   await page.setViewportSize({ width: 320, height: 844 });
@@ -818,32 +849,33 @@ try {
     if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
     await assertReplyPaletteAndAlignment(theme);
     if (!await page.locator('#field-coach').isVisible()) await page.locator('#toggle-field-coach').click();
-    await glossary.focus(); await page.keyboard.press('Space');
-    assert.equal(await glossary.isChecked(), false); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false);
-    await page.keyboard.press('Space');
-    assert.equal(await glossary.isChecked(), true); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), true);
-    const upSummary = page.locator('[data-coach-term=up] > summary');
-    await upSummary.focus(); await page.keyboard.press('Enter');
-    assert.equal(await page.locator('[data-coach-term=up] p').isVisible(), true, 'Keyboard Enter opens a term explanation');
-    await glossary.uncheck(); await glossary.check();
-    assert.equal(await page.locator('[data-coach-term=up]').getAttribute('open'), '', 'Disabling explanations preserves expanded terms');
-    await upSummary.click();
-    for (const name of ['up', 'down', 'sideways', 'relationship', 'warming']) {
-      const term = page.locator(`[data-coach-term=${name}]`);
+    const relationship = glossary.locator('[data-coach-term=relationship]');
+    await relationship.locator('summary').focus(); await page.keyboard.press('Enter');
+    assert.equal(await relationship.locator('p').isVisible(), true, 'Keyboard Enter opens the matching footnote');
+    assert.ok((await relationship.textContent()).includes('表达吸引、恋爱、约会或亲密意图'));
+    await page.locator('#field-coach-details > summary').click();
+    await glossary.locator('[data-coach-term=down]').waitFor();
+    assert.equal(await relationship.getAttribute('open'), '', 'Rendering expanded guidance preserves a still-relevant open note');
+    await page.locator('#field-coach-details > summary').click();
+    await glossary.locator('[data-coach-term=down]').waitFor({ state: 'detached' });
+    assert.equal(await relationship.getAttribute('open'), '', 'Collapsing guidance preserves relevant notes and removes hidden-only terms');
+    await relationship.locator('summary').click();
+    for (const name of ['relationship', 'warming', 'obstacle']) {
+      const term = glossary.locator(`[data-coach-term=${name}]`);
       const summary = term.locator(':scope > summary');
-      assert.ok((await summary.boundingBox()).height >= 44, 'Term summaries preserve touch targets');
+      assert.ok((await summary.boundingBox()).height >= 44, 'Small footnote labels preserve touch targets');
       await summary.click(); assert.equal(await term.locator('p').first().isVisible(), true);
       await summary.click(); assert.equal(await term.locator('p').first().isVisible(), false);
     }
-    assert.ok((await page.locator('.coach-glossary-toggle').boundingBox()).height >= 44);
     assert.equal(await page.locator('#message-text').inputValue(), glossaryComposer);
     assert.equal(await page.locator('#field-coach-plan').inputValue(), glossaryPlan);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Coach glossary fits 320px ${theme}`);
-    await page.locator('.coach-glossary').screenshot({ path: join(evidenceDir, `coach-glossary-320-${theme}.png`) });
-    await page.locator('[data-coach-term=warming] > summary').click();
-    assert.equal(await page.locator('.coach-glossary').evaluate((node) => node.scrollWidth > node.clientWidth + 1), false, `Expanded glossary wraps in ${theme}`);
-    await page.locator('[data-coach-term=warming]').screenshot({ path: join(evidenceDir, `coach-warming-320-${theme}.png`) });
-    await page.locator('[data-coach-term=warming] > summary').click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Coach footnotes fit 320px ${theme}`);
+    await glossary.screenshot({ path: join(evidenceDir, `coach-glossary-320-${theme}.png`) });
+    await glossary.locator('[data-coach-term=warming] > summary').click();
+    assert.equal(await glossary.evaluate((node) => node.scrollWidth > node.clientWidth + 1), false, `Expanded footnotes wrap in ${theme}`);
+    assert.equal(await glossary.locator('[data-coach-term=warming] p').count(), 4, 'The original A/B/C explanation is retained in full');
+    await glossary.locator('[data-coach-term=warming]').screenshot({ path: join(evidenceDir, `coach-warming-320-${theme}.png`) });
+    await glossary.locator('[data-coach-term=warming] > summary').click();
     await page.locator('#close-field-coach').click();
   }
   assert.deepEqual({ classifications, replies, plans, directionRequests: directionRequests.length }, beforeGlossary, 'Term explanations never call a model');
@@ -861,9 +893,13 @@ try {
     await response(`/api/counterparts/${targetId}`, 'GET', () => page.locator('#counterpart-select').selectOption(targetId));
     await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   }
+  await glossary.locator('[data-coach-term=obstacle] > summary').click();
+  assert.equal(await glossary.locator('[data-coach-term=obstacle]').getAttribute('open'), '');
   await page.locator('#message-speaker').selectOption('self');
   await page.locator('#message-text').fill('B 的草稿，切换后仍需保留。');
   await selectConversation(id);
+  assert.ok(await glossary.locator(':scope > details').count() > 0);
+  assert.equal(await glossary.locator(':scope > details[open]').count(), 0, 'Switching counterparts resets footnote expansion');
   await page.locator('#message-speaker').selectOption('other');
   await page.locator('#message-text').fill('A 的草稿，和 B 分开。');
   await selectConversation(secondId);
@@ -1032,8 +1068,8 @@ try {
   const readA = (await (await context.request.get(`${origin}/api/counterparts/${savedA.id}`)).json()).data.counterpart;
   assert.equal(readA.alias, '异步保存对象 A');
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'backend archive retention without stale-copy UI restoration', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'current advice reload uses static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
-  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/current reload, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'backend archive retention without stale-copy UI restoration', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'current advice reload uses static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'contextual collapsed coach footnotes without a permanent dictionary or toggle', 'visible guidance alone drives footnotes, preserving relevant expansion and excluding transcript or plan drafts without model calls', '320px day and night footnote touch targets and wrapping'], pageErrors }, null, 2) + '\n');
+  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/current reload, late-result/copy/readback and followup isolation, reduced motion, contextual footnotes and keyboard/drafts, 320px day/night. Zero paid calls.');
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }

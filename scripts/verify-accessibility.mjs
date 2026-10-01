@@ -57,7 +57,7 @@ try {
       report.mockCalls.plan++; assert.equal(options.knowledgeText, knowledge);
       return { verdict: 'suitable', reason: '先分享经历，再提问一处细节。',
         timingSuggestion: { status: 'after_response', guidance: '等对方展开当前话题后，再分享自己的经历。', evidenceIds: [context.messages.at(-1).id] },
-        nextAction: '先承接对方当前回应。' };
+        nextAction: '先承接对方当前回应，再考虑自然升温。' };
     },
   });
   await server.ensureDemoSeed();
@@ -187,11 +187,23 @@ try {
         report.keyboardChecks.push({ state: stateName('coach-dialog'), checks: ['initial title focus', 'Tab enters the close button', 'forward and reverse focus wrap', 'Escape restores trigger focus', 'breakpoint transition removes inert and dialog semantics'] });
       }
       await page.locator('#field-coach-details > summary').click();
-      await page.locator('[data-coach-term=warming] > summary').click();
+      assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0);
+      const coachNote = page.locator('#coach-glossary-terms [data-coach-term=up]');
+      await coachNote.locator('summary').focus(); await page.keyboard.press('Enter');
+      assert.equal(await coachNote.locator('summary').textContent(), '注 · 上切');
+      assert.equal(await coachNote.locator('p').first().isVisible(), true, 'A currently mentioned term opens from the keyboard');
       await page.locator('#field-coach-plan').fill('先分享自己的项目，再了解对方的经历。');
       await response(`/api/counterparts/${id}/coach-plan`, () => page.locator('#field-coach-plan-submit').click());
       await page.locator('#field-coach-plan-result').filter({ hasText: '先分享经历' }).waitFor();
-      await scan('coach-glossary-and-plan');
+      const planNote = page.locator('#field-coach-plan-notes [data-coach-term=warming]');
+      await planNote.waitFor();
+      assert.equal(await planNote.getAttribute('open'), null, 'Generated plan footnotes start collapsed');
+      assert.equal(await planNote.locator('summary').textContent(), '注 · 升温');
+      await planNote.locator('summary').click();
+      assert.equal(await planNote.locator('p').count(), 4, 'The full A/B/C explanation remains reachable');
+      assert.equal(await planNote.locator('p').first().isVisible(), true);
+      assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=warming]').count(), 0, 'Plan advice has its own footnotes');
+      await scan('coach-footnotes-and-plan');
       await page.locator('.style-entry > summary').click();
       await page.locator('#open-style-preferences').click();
       await page.locator('#style-rule-text').waitFor({ state: 'visible' });
