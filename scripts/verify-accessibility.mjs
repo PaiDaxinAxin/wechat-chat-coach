@@ -40,6 +40,7 @@ try {
         obstacle: { type: 'none', evidenceIds: [], reason: '虚构对方主动延续项目话题。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed,
           reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+        topicDecision: { mode: 'change', reason: '合成换题局面，用于三方向与并发回归。' },
         options: [['up', .6], ['down', .1], ['sideways', .3]].map(([topicMove, weight]) => ({ topicMove, weight,
           relationAction: 'continue', reason: '顺着虚构项目了解一处细节。', evidenceIds: [id] })),
         uncertainties: ['对方是否愿意见面未知。'], recommendationKind: 'uncalibrated',
@@ -107,9 +108,16 @@ try {
     }
     try {
       await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-      await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+      await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
       assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
       await scan('conversation');
+      const note = page.locator('.message-annotation').first();
+      const beforeNoteRequests = modelRequests;
+      await note.locator('summary').click();
+      await note.locator('textarea').fill('合成线下背景，属于本人补充，不是原话。');
+      await scan('message-annotation');
+      await note.getByRole('button', { name: '收起', exact: true }).click();
+      assert.equal(modelRequests, beforeNoteRequests, 'Reading and editing a note never invokes a model');
       const icons = await page.locator('.message-menu > summary').evaluateAll((nodes) => nodes.map((node) => {
         const rgb = (color) => color.match(/[\d.]+/g).map(Number);
         const luminance = (channels) => channels.slice(0, 3).map((value) => value / 255)

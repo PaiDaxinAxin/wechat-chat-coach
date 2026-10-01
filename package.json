@@ -18,6 +18,7 @@
     "test:demo": "node scripts/verify-demo.mjs",
     "test:style": "node scripts/verify-style-learning.mjs",
     "test:a11y": "node scripts/verify-accessibility.mjs",
+    "test:topics": "node scripts/verify-topic-workflow.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {

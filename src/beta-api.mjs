@@ -27,9 +27,9 @@ const JsonObject = z.record(z.string(), z.unknown());
 const RegisterSchema = z.strictObject({ invite: z.string().min(1).max(200), username: z.string(), password: z.string() });
 const LoginSchema = z.strictObject({ username: z.string(), password: z.string() });
 const RequestId = z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/);
-const ClassifySchema = z.strictObject({ requestId: RequestId });
+const ClassifySchema = z.strictObject({ requestId: RequestId, topicChangeRequested: z.boolean().optional() });
 const ImageReadSchema = z.strictObject({ requestId: RequestId, image: z.string(), explanation: z.string().trim().max(2_000).default('') });
-const ReplySchema = z.strictObject({ requestId: RequestId, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().max(2_000).optional() });
+const ReplySchema = z.strictObject({ requestId: RequestId, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().max(2_000).optional(), topicChangeRequested: z.boolean().optional() });
 const PlanInputSchema = z.strictObject({ requestId: RequestId, plan: z.string().trim().min(1).max(2_000) });
 const MessageSchema = z.strictObject({ speaker: z.enum(['self', 'other']), text: z.string().trim().min(1).max(20_000) });
 const SentSchema = z.strictObject({ suggestionId: z.string().min(1).max(128), actualSentText: z.string().trim().min(1).max(20_000) });
@@ -37,6 +37,7 @@ const FollowupSchema = z.strictObject({ text: z.string().trim().min(1).max(20_00
   .refine((input) => (!input.previousSuggestionId || input.previousReplyText) && (!input.previousCopyReceiptId || input.previousSuggestionId), { message: 'Previous source requires a draft.' });
 const CopySchema = z.strictObject({ copiedText: z.string().trim().min(1).max(20_000).optional(), requestId: RequestId });
 const MessageTimeSchema = z.strictObject({ actualWechatAt: z.iso.datetime({ offset: true }).nullable() });
+const MessageAnnotationSchema = z.strictObject({ annotationText: z.string().trim().max(5_000) });
 const PlanSchema = z.strictObject({ plan: z.enum(['free', 'paid']) });
 const ProfileSaveSchema = ProfileInputSchema.extend({ styleLearning: StyleLearningInputSchema.optional() });
 
@@ -44,6 +45,8 @@ const MESSAGES = {
   UNAUTHORIZED: '请先登录。', CSRF_INVALID: '会话校验未通过，请刷新页面。', ORIGIN_FORBIDDEN: '请求来源不匹配。',
   OWNER_REQUIRED: '此操作仅限项目 owner。', CLASSIFICATION_QUOTA_EXHAUSTED: '三次分类试用已用完，可以继续直接生成回复。',
   PROVIDER_BUDGET_EXHAUSTED: '今日模型调用预算已用完。', PROFILE_REQUIRED: '请先完成个人背景和问卷。',
+  DAILY_REPLY_QUOTA_EXHAUSTED: '今日三条免费AI回复已用完，明天再来。',
+  MESSAGE_ANNOTATION_INVALID: '批注请控制在5000字以内；留空可清除。',
   FULL_QUESTIONNAIRE_PAID_ONLY: '完整版问卷仅向付费测试账户开放。', FULL_PROFILE_REQUIRES_UPDATE: '请保存短版问卷后继续。',
   REQUEST_ID_CONTEXT_CONFLICT: '请求编号已用于其他上下文，请创建新请求。', CONTEXT_CHANGED: '聊天背景已更新，请使用新请求重新生成。',
   JOB_IN_PROGRESS: '这次请求仍在处理中。', JOB_INTERRUPTED: '上次请求被中断，请使用新请求重试。',
@@ -79,7 +82,7 @@ function normalizedError(error) {
   if (error instanceof BetaError) return error;
   const known = new Set([
     'FULL_QUESTIONNAIRE_PAID_ONLY', 'INVALID_PROFILE', 'INVALID_COUNTERPART', 'INVALID_MEETING', 'INVALID_MESSAGES',
-    'PROFILE_REQUIRED', 'INVALID_INTENT', 'INVALID_FEEDBACK', 'INVALID_FEEDBACK_REVIEW', 'FEEDBACK_NOT_CLEANED',
+    'PROFILE_REQUIRED', 'INVALID_INTENT', 'INVALID_TOPIC_REQUEST', 'INVALID_FEEDBACK', 'INVALID_FEEDBACK_REVIEW', 'FEEDBACK_NOT_CLEANED',
     'FEEDBACK_QUARANTINED', 'FEEDBACK_CONSENT_REQUIRED', 'FEEDBACK_REVIEW_UNSAFE', 'INVALID_APPROVED_FEEDBACK',
     'KNOWLEDGE_WRITE_BUSY', 'KNOWLEDGE_VERSION_CONFLICT', 'KNOWLEDGE_READ_FAILED', 'KNOWLEDGE_APPEND_FAILED',
     'OUTPUT_KNOWLEDGE_EXCERPT_BLOCKED', 'OUTPUT_LIMIT_EXCEEDED',
@@ -96,11 +99,13 @@ const DIAGNOSTIC_CODES = new Set([
   'invalid_direction_set', 'invalid_weight_sum', 'duplicate_evidence', 'invalid_evidence_reference', 'unknown_heat_with_evidence', 'observed_heat_without_evidence',
   'private_knowledge_excerpt', 'unknown_topic_with_evidence', 'unknown_topic_with_asserted_label', 'observed_topic_without_evidence', 'refusal_with_warming', 'unsupported_private_warming',
   'unknown_timing_with_evidence', 'unknown_timing_with_precision', 'missing_context_with_asserted_timing', 'adjusted_plan_required', 'unexpected_adjusted_plan',
+  'stay_with_topic_options', 'unknown_focus_with_evidence', 'observed_focus_without_evidence',
 ]);
 const DIAGNOSTIC_FIELDS = new Set([
   'status', 'confidence', 'phase', 'obstacle', 'type', 'evidenceIds', 'reason', 'heat', 'activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough', 'level',
   'options', 'topicMove', 'relationAction', 'weight', 'uncertainties', 'recommendationKind', 'fieldCoach', 'currentTopic', 'topicStatus', 'topicMessageIds', 'initiative', 'nextAction', 'pitfall', 'warmingLayer',
   'reply', 'action', 'styleNote', 'verdict', 'timingSuggestion', 'guidance', 'adjustedPlan', 'relationMove', 'ownWordsGuide', 'reentryWhen', 'description', 'kind', 'uncertainty',
+  'workingFocus', 'stage', 'topicDecision', 'mode', 'annotation', 'annotationRevision', 'annotationUpdatedAt', 'text', 'source', 'updatedAt', 'topicChangeRequested',
 ]);
 function safeModelDiagnostics(error) {
   if (error?.code !== 'invalid_model_output' || !Array.isArray(error.diagnostics)) return [];
@@ -245,7 +250,7 @@ export async function createBetaServer({
     }
     return profile;
   }
-  async function capturedChatSnapshot(userId, counterpartId, { intent, allowEmpty = false } = {}) {
+  async function capturedChatSnapshot(userId, counterpartId, { intent, topicChangeRequested, allowEmpty = false } = {}) {
     return await withSnapshot(async () => {
       const account = await store.getUser(userId), profile = await store.getProfile(userId), counterpart = await store.getCounterpart(userId, counterpartId);
       if (!profile) throw new BetaError('PROFILE_REQUIRED');
@@ -254,7 +259,7 @@ export async function createBetaServer({
       const { revision: counterpartRevision, ...businessCounterpart } = counterpart;
       const messages = await store.listMessages(userId, counterpartId);
       if (!allowEmpty && !messages.some((message) => message.speaker === 'other')) throw new BetaError('CONTEXT_REQUIRED');
-      const context = buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: await store.getMeeting(userId, counterpartId), personalStyle: await store.getAppliedPersonalStyle(userId) });
+      const context = buildChatContext(businessProfile, businessCounterpart, messages, { intent, topicChangeRequested, meeting: await store.getMeeting(userId, counterpartId), personalStyle: await store.getAppliedPersonalStyle(userId) });
       return { context, profileUpdatedAt, counterpartRevision };
     });
   }
@@ -265,11 +270,21 @@ export async function createBetaServer({
     const providerModel = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
     return digest(JSON.stringify({ context, knowledgeHash, operation, direction: options.direction ?? null, ...(options.plan === undefined ? {} : { plan: options.plan }), ...(options.image ? { image: { hash: options.image.hash, mime: options.image.mime, bytes: options.image.bytes, explanation: options.explanation, version: IMAGE_INPUT_VERSION } } : {}), contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION, providerModel }));
   }
+  const ordinaryContext = (context) => { const ordinary = { ...context }; delete ordinary.topicChangeRequested; delete ordinary.intent; return ordinary; };
+  const topicContexts = (context) => { const ordinary = { ...context }; delete ordinary.topicChangeRequested; return [{ ...ordinary, topicChangeRequested: true }, ordinary]; };
+  async function latestContextJob(userId, counterpartId, operation, context, knowledgeHash) {
+    // Durable insertion order also resolves same-millisecond/clock-regression
+    // ties between an ordinary decision and an explicit topic-change request.
+    return await store.latestSuccessfulForContexts(userId, counterpartId, operation, topicContexts(context).map((candidate) => contextHash(candidate, knowledgeHash, operation)));
+  }
+  async function contextAttempted(userId, counterpartId, operation, context, knowledgeHash) {
+    for (const candidate of topicContexts(context)) if (await store.hasModelAttempt(userId, counterpartId, operation, contextHash(candidate, knowledgeHash, operation))) return true;
+    return false;
+  }
   async function currentClassification(userId, counterpartId, knowledgeSnapshot) {
     try {
       const context = await chatSnapshot(userId, counterpartId);
-      const hash = contextHash(context, knowledgeSnapshot.hash, 'classify');
-      const job = await store.latestSuccessful(userId, counterpartId, 'classify', hash);
+      const job = await latestContextJob(userId, counterpartId, 'classify', context, knowledgeSnapshot.hash);
       return job?.result ?? { classification: null, heat: computeHeat(null) };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { classification: null, heat: computeHeat(null) };
@@ -279,14 +294,12 @@ export async function createBetaServer({
   async function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
     try {
       const context = await chatSnapshot(userId, counterpartId);
-      const classificationHash = contextHash(context, knowledgeSnapshot.hash, 'classify');
-      const directHash = contextHash(context, knowledgeSnapshot.hash, 'reply');
-      const directJob = await store.latestSuccessful(userId, counterpartId, 'reply', directHash);
+      const directJob = await latestContextJob(userId, counterpartId, 'reply', context, knowledgeSnapshot.hash);
       const conversationHash = contextHash(context, knowledgeSnapshot.hash, 'conversation');
       // Return IDs only: full immutable inputs and knowledge stay server-side.
       const cases = await Promise.all(suggestions.map(async (suggestion) => await store.getSuggestionCase(userId, counterpartId, suggestion.id)));
       const currentSuggestionIds = suggestions.filter((_, index) => cases[index].snapshot?.baseContextHash === conversationHash).map(({ id }) => id);
-      return { currentSuggestionIds, directReply: directJob?.result?.suggestion ? await store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: await store.latestCoachPlan(userId, counterpartId, conversationHash), modelContext: { classificationAttempted: await store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: await store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
+      return { currentSuggestionIds, directReply: directJob?.result?.suggestion ? await store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: await store.latestCoachPlan(userId, counterpartId, conversationHash), modelContext: { classificationAttempted: await contextAttempted(userId, counterpartId, 'classify', context, knowledgeSnapshot.hash), directReplyAttempted: await contextAttempted(userId, counterpartId, 'reply', context, knowledgeSnapshot.hash) } };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { currentSuggestionIds: [], directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
       throw error;
@@ -299,12 +312,12 @@ export async function createBetaServer({
       return result.suggestion ? { ...result, suggestion: await store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
     };
     const knowledgeSnapshot = await knowledge.read();
-    const snapshotOptions = { intent: operation === 'reply' ? input.intent : undefined, allowEmpty: operation === 'image_read' };
+    const snapshotOptions = { intent: operation === 'reply' ? input.intent : undefined, topicChangeRequested: ['classify', 'reply'].includes(operation) ? input.topicChangeRequested : undefined, allowEmpty: operation === 'image_read' };
     const { context, profileUpdatedAt, counterpartRevision } = await capturedChatSnapshot(userId, counterpartId, snapshotOptions);
     const hash = contextHash(context, knowledgeSnapshot.hash, operation, input);
     const model = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
-    const classificationContext = { ...context }; delete classificationContext.intent;
-    const classified = operation === 'reply' ? await store.latestSuccessful(userId, counterpartId, 'classify', contextHash(classificationContext, knowledgeSnapshot.hash, 'classify')) : null;
+    const classificationContext = ordinaryContext(context);
+    const classified = operation === 'reply' ? await latestContextJob(userId, counterpartId, 'classify', classificationContext, knowledgeSnapshot.hash) : null;
     const capturedAt = new Date(now()).toISOString();
     const archived = await archive(knowledgeSnapshot);
     const contextSnapshot = { schemaVersion: 'coach-case-1', capturedAt, modelInput: context, profileUpdatedAt, counterpartRevision, baseContextHash: contextHash(classificationContext, knowledgeSnapshot.hash, 'conversation'), ...(input.plan === undefined ? {} : { request: { plan: input.plan } }),
@@ -431,6 +444,8 @@ export async function createBetaServer({
       if (copied && method === 'POST') return await store.recordReplyCopy(userId, id, copied[1], parse(CopySchema, input));
       const messageTime = /^messages\/([^/]+)\/timing$/.exec(action ?? '');
       if (messageTime && method === 'PATCH') return { message: await store.putMessageTime(userId, id, messageTime[1], parse(MessageTimeSchema, input).actualWechatAt) };
+      const annotation = /^messages\/([^/]+)\/annotation$/.exec(action ?? '');
+      if (annotation && method === 'PATCH') return { message: await store.putMessageAnnotation(userId, id, annotation[1], parse(MessageAnnotationSchema, input, 'MESSAGE_ANNOTATION_INVALID').annotationText) };
       const message = /^messages\/([^/]+)$/.exec(action ?? '');
       if (message && method === 'PUT') return { message: await store.putMessage(userId, id, parse(MessageSchema, input), message[1]) };
       if (message && method === 'DELETE') { await store.deleteMessage(userId, id, message[1]); return { deleted: true }; }

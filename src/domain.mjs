@@ -156,11 +156,12 @@ const StoredProfileSchema = ProfileInputSchema.extend({ questionnaireVersion: z.
 const StoredCounterpartSchema = CounterpartInputSchema.extend({ id: z.string().optional(), updatedAt: z.string().optional(), createdAt: z.string().optional() });
 const MessageSchema = ChatMessageSchema.strip().extend({ id: requiredText(128), text: requiredText(20_000) });
 
-export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting, personalStyle } = {}) {
+export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting, personalStyle, topicChangeRequested } = {}) {
   const profile = parse(StoredProfileSchema, profileInput, 'PROFILE_REQUIRED');
   const counterpart = parse(StoredCounterpartSchema, counterpartInput, 'INVALID_COUNTERPART');
   const messages = parse(z.array(MessageSchema), messageInput, 'INVALID_MESSAGES');
   if (new Set(messages.map(({ id }) => id)).size !== messages.length) throw new DomainError('INVALID_MESSAGES');
+  if (topicChangeRequested !== undefined && typeof topicChangeRequested !== 'boolean') throw new DomainError('INVALID_TOPIC_REQUEST');
   const personalContext = {
     background: profile.background,
     currentStyle: profile.style,
@@ -189,6 +190,7 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
       unknownsRule: 'Absent information is unknown, not zero interest or refusal. A recorded meeting is user reported; respect its current state and do not repeat a confirmed invitation.',
     }),
     messages,
+    ...(topicChangeRequested === true ? { topicChangeRequested: true } : {}),
     ...(intent === undefined || intent === '' ? {} : { intent: parse(requiredText(2_000), intent, 'INVALID_INTENT') }),
   };
 }

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ChatInputSchema, ReplyInputSchema, classifyChat, generateReply, CoachError } from '../src/coach.mjs';
 
 const env = { AGNES_API_KEY: 'mock-key' };
+const workingFocus = { stage: 'unknown', reason: '背景有限，主要着力点仍需观察。', evidenceIds: [] };
 const knowledgeText = '原始知识第一行。\n第二行完整保留。\n'.repeat(1000);
 const input = {
   userProfile: '虚构用户，喜欢简洁直接。',
@@ -14,6 +15,7 @@ function validClassification() {
   const unknown = () => ({ level: 'unknown', evidenceIds: [] });
   return {
     status: 'ready', confidence: 'limited', phase: 'ordinary',
+    workingFocus: structuredClone(workingFocus), topicDecision: { mode: 'change', reason: '当前适合调整话题方向。' },
     obstacle: { type: 'none', evidenceIds: [], reason: '当前没有观察到阻力。' },
     heat: {
       activeInteraction: unknown(),
@@ -67,7 +69,9 @@ test('classification sends the complete knowledge and known Agnes request shape'
     assert.equal(parameters.additionalProperties, false);
     assert.deepEqual(parameters.properties.status.enum, ['ready', 'needs_context']);
     assert.equal(Object.hasOwn(parameters.properties, 'reply'), false);
-    assert.equal(parameters.properties.options.minItems, 3);
+    assert.equal(parameters.properties.options.minItems, undefined);
+    assert.ok(parameters.required.includes('topicDecision'));
+    assert.ok(parameters.required.includes('workingFocus'));
     assert.equal(parameters.properties.options.maxItems, 3);
     return mockResponse(validClassification())();
   };
@@ -82,6 +86,63 @@ test('input schemas reject duplicate message IDs before an API call', async () =
   assert.equal(ChatInputSchema.safeParse(duplicate).success, false);
   assert.equal(ReplyInputSchema.safeParse({ context: input, direction: 'invented' }).success, false);
   await assert.rejects(classifyChat(duplicate, { knowledgeText, env, fetchImpl: () => { throw new Error('must not call'); } }), { code: 'invalid_input' });
+});
+
+test('a developing conversation can keep its topic without invented direction choices or weights', async () => {
+  const value = validClassification();
+  value.topicDecision = { mode: 'stay', reason: '对方正在展开经历，先接住内容。' };
+  value.options = [];
+  value.workingFocus = { stage: 'emotion', reason: '她正在分享有意思的经历。', evidenceIds: ['m1'] };
+  const result = await classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(value) });
+  assert.deepEqual(result.options, []);
+  assert.equal(result.workingFocus.stage, 'emotion');
+  const withOptions = { ...value, options: validClassification().options };
+  await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(withOptions) }),
+    (error) => error.code === 'invalid_model_output' && error.diagnostics[0].code === 'stay_with_topic_options');
+  await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse({ ...value, topicDecision: { ...value.topicDecision, mode: 'change' } }) }),
+    (error) => error.code === 'invalid_model_output' && error.diagnostics[0].code === 'invalid_direction_set');
+});
+
+test('explicit topic request reaches the classifier while the action remains independently assessed', async () => {
+  const requested = { ...input, topicChangeRequested: true };
+  let calls = 0;
+  const result = await classifyChat(requested, { knowledgeText, env, fetchImpl: async (_url, request) => {
+    calls++;
+    const body = JSON.parse(request.body);
+    const sent = JSON.parse(body.messages[2].content.split('本轮输入数据：\n')[1]);
+    assert.equal(sent.topicChangeRequested, true);
+    assert.match(body.messages[0].content, /正常深入当前话题不必贴“下切”标签/);
+    assert.match(body.messages[2].content, /用户请求换题但当前应停止推进或先处理顾虑/);
+    return mockResponse(validClassification())();
+  } });
+  assert.equal(result.topicDecision.mode, 'change');
+  assert.equal(result.options.length, 3);
+  assert.equal(calls, 1);
+});
+
+test('working focus needs actual evidence and missing new policy fields are not accepted as fresh output', async () => {
+  const mutations = [
+    (value) => { delete value.workingFocus; },
+    (value) => { delete value.topicDecision; },
+    (value) => { value.workingFocus.evidenceIds = ['m1']; },
+    (value) => { value.workingFocus.stage = 'security'; },
+    (value) => { value.workingFocus = { stage: 'value_display', reason: '了解真实特点。', evidenceIds: ['invented-offline-event'] }; },
+  ];
+  for (const mutate of mutations) {
+    const value = validClassification(); mutate(value);
+    await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(value) }), { code: 'invalid_model_output' });
+  }
+});
+
+test('deepening or playful exchange does not require a topic direction; a selected direction must be honored', async () => {
+  for (const relationMove of ['deepen', 'push_pull']) {
+    const value = { workingFocus: { stage: 'emotion', reason: '顺着实际表达继续交流。', evidenceIds: ['m1'] }, reply: '这个项目哪里最有意思？', reason: '继续聊她正在分享的内容。', action: 'reply', styleNote: '简短自然。',
+      guidance: { topicMove: null, relationMove, ownWordsGuide: '接住她正在分享的一点。', reentryWhen: '她继续展开时自然接话。' } };
+    assert.deepEqual(await generateReply({ context: input }, { knowledgeText, env, fetchImpl: mockResponse(value) }), value);
+    await assert.rejects(generateReply({ context: input, direction: 'down' }, { knowledgeText, env, fetchImpl: mockResponse(value) }), { code: 'invalid_model_output' });
+    const noEvidence = { ...value, workingFocus: { ...value.workingFocus, evidenceIds: [] } };
+    await assert.rejects(generateReply({ context: input }, { knowledgeText, env, fetchImpl: mockResponse(noEvidence) }), { code: 'invalid_model_output' });
+  }
 });
 
 test('missing knowledge or credentials fail locally without a call', async () => {
@@ -137,7 +198,7 @@ test('weights, direction uniqueness, evidence IDs and observed heat are strictly
 });
 
 test('reply respects requested direction and allows an empty pause', async () => {
-  const value = { reply: '', reason: '对方已经明确表示不想继续。', action: 'pause', styleNote: '暂时停止追问。', guidance: { topicMove: null, relationMove: 'pause', ownWordsGuide: '本轮先停止推进。', reentryWhen: '对方明确愿意恢复交流时再判断。' } };
+  const value = { workingFocus, reply: '', reason: '对方已经明确表示不想继续。', action: 'pause', styleNote: '暂时停止追问。', guidance: { topicMove: null, relationMove: 'pause', ownWordsGuide: '本轮先停止推进。', reentryWhen: '对方明确愿意恢复交流时再判断。' } };
   const fetchImpl = async (_url, request) => {
     const body = JSON.parse(request.body);
     assert.equal(body.messages[1].content, knowledgeText);
@@ -146,7 +207,7 @@ test('reply respects requested direction and allows an empty pause', async () =>
     assert.equal(body.tools.length, 1);
     assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
     assert.equal(parameters.additionalProperties, false);
-    assert.deepEqual(Object.keys(parameters.properties).sort(), ['action', 'guidance', 'reason', 'reply', 'styleNote']);
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ['action', 'guidance', 'reason', 'reply', 'styleNote', 'workingFocus']);
     assert.equal(parameters.required.includes('guidance'), true, 'Every fresh native reply must include direction guidance');
     assert.equal(parameters.properties.reply.maxLength, 350);
     assert.deepEqual(parameters.properties.action.enum, ['reply', 'wait', 'clarify', 'invite', 'pause']);
@@ -156,7 +217,7 @@ test('reply respects requested direction and allows an empty pause', async () =>
 });
 
 test('reply length limits and required reply text are validated', async () => {
-  const base = { reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。', guidance: { topicMove: 'up', relationMove: 'continue', ownWordsGuide: '先了解她的大致工作方向。', reentryWhen: '她继续展开时接话。' } };
+  const base = { workingFocus, reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。', guidance: { topicMove: 'up', relationMove: 'continue', ownWordsGuide: '先了解她的大致工作方向。', reentryWhen: '她继续展开时接话。' } };
   const cases = [{ ...base, reply: '长'.repeat(351) }, { ...base, reason: '长'.repeat(201) }, { ...base, styleNote: '长'.repeat(201) }, { ...base, reply: '' }, { ...base, raw: knowledgeText }];
   for (const value of cases) {
     await assert.rejects(generateReply({ context: input }, { knowledgeText, env, fetchImpl: mockResponse(value) }), { code: 'invalid_model_output' });
@@ -165,7 +226,7 @@ test('reply length limits and required reply text are validated', async () => {
 });
 
 test('fresh native replies without guidance fail closed instead of being labeled as legacy records', async () => {
-  const legacy = { reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。' };
+  const legacy = { workingFocus, reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。' };
   let calls = 0;
   await assert.rejects(generateReply({ context: input }, { knowledgeText, env, fetchImpl: async () => { calls++; return mockResponse(legacy)(); } }),
     (error) => error.code === 'invalid_model_output' && JSON.stringify(error.diagnostics) === JSON.stringify([{ code: 'invalid_type', path: ['guidance'] }]));
@@ -173,7 +234,7 @@ test('fresh native replies without guidance fail closed instead of being labeled
 });
 
 test('a single native reply call provides independent topic and relationship guidance for users to use their own words', async () => {
-  const value = { reply: '感觉你挺认真。最近哪个部分最有意思？', reason: '承接她的投入，再轻度表达欣赏。', action: 'reply', styleNote: '用自己的说法表达真实感受。',
+  const value = { workingFocus, reply: '感觉你挺认真。最近哪个部分最有意思？', reason: '承接她的投入，再轻度表达欣赏。', action: 'reply', styleNote: '用自己的说法表达真实感受。',
     guidance: { topicMove: 'down', relationMove: 'light_approach', ownWordsGuide: '先说出你真实欣赏的一点，再问一个细节。', reentryWhen: '她继续展开时顺着新内容接话。' } };
   let calls = 0;
   const fetchImpl = async (_url, request) => {
@@ -203,7 +264,7 @@ test('a single native reply call provides independent topic and relationship gui
 test('waiting guidance can be visible without a sendable reply and names conditions rather than a fixed delay', async () => {
   const context = { ...input, messages: [{ id: 'm1', speaker: 'other', text: '哈哈🙂' }] };
   for (const action of ['wait', 'pause']) {
-    const value = { reply: '', reason: action === 'wait' ? '本话题已自然收住；单句表情不足以判低兴趣。' : '对方明确不愿继续这类推进，应尊重边界。', action, styleNote: '不需要为了保持聊天而硬续一句。',
+    const value = { workingFocus, reply: '', reason: action === 'wait' ? '本话题已自然收住；单句表情不足以判低兴趣。' : '对方明确不愿继续这类推进，应尊重边界。', action, styleNote: '不需要为了保持聊天而硬续一句。',
       guidance: { topicMove: null, relationMove: action, ownWordsGuide: '本轮先不发送，保留自然留白。', reentryWhen: action === 'wait' ? '她有新的内容，或你有真实新话题时再判断。' : '对方明确愿意恢复这类交流时再判断。' } };
     const fetchImpl = async (_url, request) => {
       const body = JSON.parse(request.body);
@@ -223,7 +284,7 @@ test('delayed laughter case keeps three conditional branches, alternative explan
     { id: 'm3', speaker: 'other', text: '🙂', recordedAt: '2026-10-01T07:00:00.000Z' },
     { id: 'm4', speaker: 'other', text: '哈哈', recordedAt: '2026-10-01T10:00:00.000Z' },
   ] };
-  const waiting = { reply: '', reason: '当前原因仍不确定，可先自然收尾。', action: 'wait', styleNote: '保持轻松，不逐字纠结。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先留一点空间。', reentryWhen: '有真实新话题或对方主动展开时再判断。' } };
+  const waiting = { workingFocus, reply: '', reason: '当前原因仍不确定，可先自然收尾。', action: 'wait', styleNote: '保持轻松，不逐字纠结。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先留一点空间。', reentryWhen: '有真实新话题或对方主动展开时再判断。' } };
   let calls = 0;
   const fetchImpl = async (_url, request) => {
     const body = JSON.parse(request.body), system = body.messages[0].content, task = body.messages[2].content;
@@ -248,7 +309,7 @@ test('delayed laughter case keeps three conditional branches, alternative explan
 });
 
 test('guidance bounds, closed fields and selected direction are validated without raw output diagnostics', async () => {
-  const base = { reply: '再了解一个细节。', reason: '依据当前话题。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: 'down', relationMove: 'receive', ownWordsGuide: '先回应，再问一个细节。', reentryWhen: '有新的内容时继续。' } };
+  const base = { workingFocus, reply: '再了解一个细节。', reason: '依据当前话题。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: 'down', relationMove: 'receive', ownWordsGuide: '先回应，再问一个细节。', reentryWhen: '有新的内容时继续。' } };
   for (const value of [
     { ...base, guidance: { ...base.guidance, ownWordsGuide: '长'.repeat(201) } },
     { ...base, guidance: { ...base.guidance, reentryWhen: '' } },

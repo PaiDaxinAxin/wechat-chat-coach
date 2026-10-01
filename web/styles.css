@@ -130,3 +130,9 @@ dialog{color:inherit;background:var(--color-surface);border:1px solid var(--colo
 /* Feedback stays visible without moving the conversation away from the reply. */
 .chat-shell>.notice{flex:0 0 auto;width:100%;max-width:none;margin:0;border-radius:0;border-bottom:1px solid var(--color-line);padding:var(--space-2) var(--space-6)}
 .conversation-status{padding:var(--space-8) 0;color:var(--color-muted);font-size:13px}.conversation-status button{margin-top:var(--space-3)}
+.coach-focus{margin-top:var(--space-4);font-size:14px;font-weight:600;color:var(--color-text)}
+.message-annotation{width:min(82%,580px);max-width:100%;font-size:12px;color:var(--color-muted)}
+.message-annotation>summary{display:list-item;list-style-position:inside;min-height:var(--touch-target);padding:var(--space-2) 0;line-height:28px;cursor:pointer}
+.message-annotation-form{padding:var(--space-3);border:1px solid var(--color-line);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text)}
+.message-annotation-form label{font-size:12px}.message-annotation-form textarea{max-width:100%;min-width:0;font-size:13px}.message-annotation-form .button-row{margin:var(--space-2) 0}
+@media(max-width:760px){.message-annotation{width:88%}.direction-option .weight{font-size:12px;overflow-wrap:anywhere}}

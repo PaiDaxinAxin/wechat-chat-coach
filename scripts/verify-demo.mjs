@@ -30,6 +30,7 @@ try {
       return { status: 'ready', confidence: 'moderate', phase: 'ordinary',
         obstacle: { type: 'none', evidenceIds: [], reason: '她主动延续工作话题。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+        topicDecision: { mode: 'change', reason: '合成换题局面，用于三方向与并发回归。' },
         options: [['up', .6], ['down', .1], ['sideways', .3]].map(([topicMove, weight]) => ({ topicMove, weight, relationAction: 'continue', reason: '依据当前的工作话题继续了解。', evidenceIds: [id] })),
         uncertainties: ['对方是否愿意见面尚不清楚。'], recommendationKind: 'uncalibrated',
         fieldCoach: { currentTopic: '工作与新项目', topicStatus: 'developing', topicMessageIds: [id], initiative: '先接住她的新项目，再带入自己的具体经历。', nextAction: '顺着当前话题了解一处细节。', warmingLayer: 'none', reason: '她还在自然展开话题。' } };
@@ -61,7 +62,7 @@ try {
   assert.equal(await page.locator('#auth').isVisible(), false);
   assert.equal(await page.locator('#demo-banner').isVisible(), true);
   assert.equal(await page.locator('.message-bubble').count(), 4);
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 1, 'First complete context analyzes once');
   assert.equal(replies, 0, 'Opening does not generate a reply');
   assert.equal(await page.locator('#direction-options button').count(), 3);
@@ -159,7 +160,7 @@ try {
   assert.equal((await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data.messages.filter((message) => message.text === originalText).length, 1);
   await page.locator('.message-bubble').filter({ hasText: originalText }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '', 'Successful message recording clears the composer');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 2, 'New other message analyzes once');
   await response(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
@@ -184,7 +185,7 @@ try {
   assert.equal(followup.feedback.stage, 'raw_untrusted');
   assert.equal(followup.timing.fromSource, 'clipboard_copied');
   await page.locator('.message-bubble').filter({ hasText: followupText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.locator('#timing-note').filter({ hasText: '录入估计' }).waitFor();
   assert.equal(classifications, 3); assert.equal(replies, 1);
   const me = (await (await context.request.get(`${origin}/api/me`)).json()).data;
@@ -225,6 +226,7 @@ try {
   await failPage.locator('#message-form .form-error').waitFor({ state: 'visible' });
   await failPage.unroute('**/followup');
   await failPage.route('**/classify', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SESSION_EXPIRED', message: '合成会话结束。' } }) }));
+  await failPage.locator('#coach-panel > .coach-details > summary').click();
   await failPage.locator('#classify').click();
   await failPage.locator('#startup-retry').waitFor({ state: 'visible' });
   assert.equal(await failPage.locator('#auth').isVisible(), false);
@@ -254,7 +256,7 @@ try {
   assert.equal(await page.locator('#message-text').inputValue(), 'A 的未提交草稿');
   assert.equal(await page.locator('#coach-loading').isVisible(), false);
   await page.locator('#counterpart-select').selectOption(secondId);
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 4);
   nextFailure = true;
   await page.locator('#message-text').fill('这轮合成分析会失败。');
@@ -265,7 +267,7 @@ try {
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForTimeout(150);
   assert.equal(classifications, 5, 'Failed current context does not auto-retry after reload');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, 6, 'Explicit reanalysis is allowed');
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#toggle-field-coach').click();
@@ -332,7 +334,7 @@ try {
   assert.ok((await messageCard.locator('.message-label').getAttribute('title')).includes(beforeTiming.recordedAt));
   assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, 7);
   await page.locator('#cancel-message-edit').click();
   const suggestedA = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
@@ -360,7 +362,7 @@ try {
   assert.equal(cResult.previousMessage, null); assert.equal(cResult.feedback, null);
   assert.equal(cResult.timing.fromSource, 'unknown');
   await page.locator('.message-bubble').filter({ hasText: counterpartC }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   const afterC = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
   assert.deepEqual(afterC.messages.slice(-2).map((message) => message.text), [manualB, counterpartC]);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeManual, 'No stale A feedback anchor is created');
@@ -392,7 +394,7 @@ try {
   assert.equal(recopyFollowup.previousMessage.text, copiedHistoricalText);
   assert.equal(recopyFollowup.timing.fromSource, 'clipboard_copied');
   await page.locator('.message-bubble').filter({ hasText: '历史建议新复制后的回应一。' }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await viewHistoricalA();
   const secondRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
   assert.notEqual(secondRecopy.copyReceipt.id, firstRecopy.copyReceipt.id);
@@ -402,7 +404,7 @@ try {
   assert.equal(secondRecopyFollowup.previousMessage.suggestionId, suggestedA.id);
   assert.notEqual(secondRecopyFollowup.feedback.id, recopyFollowup.feedback.id, 'A different fresh copy can support another unverified followup');
   await page.locator('.message-bubble').filter({ hasText: '同一历史建议另一次新复制后的回应二。' }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // Direction feedback uses held HTTP fixtures after the existing durable journey.
   // These extra reply requests never reach even the synthetic provider or a real account.
   const beforeDirectionChecks = { classifications, replies, plans };
@@ -496,7 +498,7 @@ try {
     if (cached) assert.ok(update.includes('已保存结果'), update);
     assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), true);
     await assertSelectedDirection(direction);
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+    await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   }
   async function assertStaticDirection(direction) {
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
@@ -540,7 +542,7 @@ try {
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await assertStaticDirection('sideways');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A previous copy refresh cannot replace a newly accepted reply with its stale GET.
   const copyRefresh = { arrived: deferred(), release: deferred() };
   heldDirectionDetail = copyRefresh;
@@ -599,7 +601,7 @@ try {
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);
   await page.locator('#counterpart-select').selectOption(secondId);
   await assertStaticDirection('down');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A hidden draft is not evidence of having used a reply when a new other message arrives.
   const hiddenDraft = '尚未发送的隐藏旧草稿，不能被推定使用。';
   await page.locator('#suggestion-text').fill(hiddenDraft);
@@ -616,7 +618,7 @@ try {
   assert.equal(busyFollowup.previousMessage, null); assert.equal(busyFollowup.feedback, null);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
   await page.locator('.message-bubble').filter({ hasText: busyFollowupText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.locator('#message-text').fill('新上下文中的未提交草稿。');
   const sameObjectDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
   await staleContextReply.complete(); await sameObjectDirectoryRefresh;
@@ -648,7 +650,7 @@ try {
   await delayedStoredReply.complete(); await delayedDirectoryRefresh;
   delayedReadback.release.resolve();
   await page.locator('.message-bubble').filter({ hasText: delayedMessageText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.screenshot({ path: join(evidenceDir, 'direction-held-readback-result.png'), fullPage: true });
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Old prepared reply never returns as pending after the new message readback');
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);

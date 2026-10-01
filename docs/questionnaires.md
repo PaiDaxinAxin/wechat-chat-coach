@@ -8,6 +8,8 @@ These are original Chinese questions for this product. They describe self-report
 
 The profile contains real background, current style, growth goals, relationship goal and a complete selected questionnaire. The short form has 10 items; the full form has 30 and is accepted only for a server-authorized `paid` account. An owner may grant a paid-beta plan; the questionnaire is not a payment system. Client-supplied roles or plans cannot authorize full answers.
 
+The official free allowance of three successful sendable AI replies per Asia/Shanghai day does not unlock full questionnaire answers. It is also independent of the three lifetime successful classification trials and provider-attempt budgets. Free users keep the complete permitted profile and knowledge in each allowed reply; the daily cap is not a reduced-context mode or hosted BYOK.
+
 Answers use the same five choices for every item: 1 strongly disagree, 2 disagree, 3 neutral/unsure, 4 agree, 5 strongly agree. Every item of the selected form is required, with no additional IDs and no fractional/out-of-range values. `validateProfile(input, serverPlan)` performs the domain permission check; the authenticated API owns the account plan and calls it before persistence.
 
 `QUESTIONNAIRES` in `src/domain.mjs` is the one authoritative item inventory. The short form uses the first two items from each dimension; the full form uses all six. IDs are stable within this version. Questions may be shown in metadata; access control concerns submitting and using the full answers.
@@ -25,6 +27,8 @@ Reverse items are marked explicitly in metadata and scored as `6 − answer`. Th
 ## Complete context
 
 `buildChatContext` includes all four background/style/goal fields, every selected question's original text and answer, and the provisional custom dimension summaries in the model's `userProfile`. It does not substitute summaries for answers. Counterpart context includes meeting channel, app profile or offline scene, described background, previous rounds and the persisted meeting state when supplied. All supplied conversation messages remain in the chat context. The provider separately receives the complete knowledge text through `coach.mjs`.
+
+Account-owned message annotations enter with their `user_annotation` source alongside the original messages; they do not replace source text, speaker or timing. They represent the user's interpretation, not verified counterpart intent or an extra personality-test answer. Editing them changes future context identity while historical model snapshots retain the input originally used.
 
 The authenticated server must supply the persisted profile, counterpart, conversation and meeting belonging to the account. Domain functions do not authorize a caller. A confirmed meeting remains visible to the model, so the next suggestion can account for arrangements already agreed.
 

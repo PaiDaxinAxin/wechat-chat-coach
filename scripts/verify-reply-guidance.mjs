@@ -30,7 +30,7 @@ try {
       classifications++; assert.equal(options.knowledgeText, knowledgeText);
       const id = context.messages.findLast(({ speaker }) => speaker === 'other').id;
       const unknown = { level: 'unknown', evidenceIds: [] };
-      return { status: 'ready', confidence: 'limited', phase: 'ordinary', obstacle: { type: 'none', evidenceIds: [], reason: '当前没有明确阻力。' }, heat: Object.fromEntries(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough'].map((name) => [name, unknown])), options: ['up', 'down', 'sideways'].map((topicMove, index) => ({ topicMove, weight: index === 0 ? .6 : .2, relationAction: 'continue', reason: '自然了解当前话题。', evidenceIds: [id] })), uncertainties: ['仅作合成测试。'], recommendationKind: 'uncalibrated' };
+      return { status: 'ready', confidence: 'limited', phase: 'ordinary', obstacle: { type: 'none', evidenceIds: [], reason: '当前没有明确阻力。' }, topicDecision: { mode: 'change', reason: '合成换题局面。' }, heat: Object.fromEntries(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough'].map((name) => [name, unknown])), options: ['up', 'down', 'sideways'].map((topicMove, index) => ({ topicMove, weight: index === 0 ? .6 : .2, relationAction: 'continue', reason: '自然了解当前话题。', evidenceIds: [id] })), uncertainties: ['仅作合成测试。'], recommendationKind: 'uncalibrated' };
     },
     replyFn: async (_input, options) => { assert.equal(options.knowledgeText, knowledgeText); return responses[replies++]; },
   });
@@ -87,7 +87,7 @@ try {
   const firstReply = await perform('/reply', () => page.locator('[data-direction=down]').click());
   assert.equal(await page.locator('#reply-guidance').isVisible(), true);
   assert.equal(await page.locator('#suggestion-direction').textContent(), '下切');
-  assert.equal(await page.locator('#reply-relation').textContent(), '轻度靠近');
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 轻度靠近');
   assert.equal(await page.locator('#reply-own-words').textContent(), responses[0].guidance.ownWordsGuide);
   assert.equal(await page.locator('#reply-reentry').textContent(), responses[0].guidance.reentryWhen);
   await page.locator('#suggestion-text').fill(' '); assert.equal(await page.locator('#copy-reply').isDisabled(), true);
@@ -115,7 +115,7 @@ try {
   const after = await detail();
   assert.equal(after.messages.length, before.messages.length + 1);
   const legacyReply = await perform('/reply', () => page.locator('[data-direction=sideways]').click());
-  assert.equal(await page.locator('#reply-relation').textContent(), '这条旧建议未保存关系动作');
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 这条旧建议未保存关系动作');
   assert.ok((await page.locator('#reply-own-words').textContent()).includes('旧建议未保存'));
   assert.equal(await page.locator('#suggestion-text').isVisible(), true); assert.equal(await page.locator('#copy-reply').isDisabled(), false);
   // Hold an already-recorded copy response until a newer pause has completed.
@@ -142,7 +142,7 @@ try {
     releaseCopy(); await response;
     await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制');
   } finally { releaseCopy(); await page.unroute(copyUrl, copyHandler); }
-  assert.equal(await page.locator('#reply-relation').textContent(), '停止当前推进');
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 停止当前推进');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
   assert.equal(await page.locator('#reply-reentry').textContent(), responses[3].guidance.reentryWhen);

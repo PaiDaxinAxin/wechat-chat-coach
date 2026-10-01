@@ -78,6 +78,20 @@ test('all background, actual style, goals and original full answers reach model 
   assert.throws(() => buildChatContext(value, counterpart(), [messages[0], messages[0]]), { code: 'INVALID_MESSAGES' });
 });
 
+test('message annotations remain user-sourced complete context and cleared receipts preserve cache identity', () => {
+  const receipt = { annotationRevision: 2, annotationUpdatedAt: '2026-10-01T10:00:00.000Z' };
+  const annotated = { ...messages[0], ...receipt, annotation: { text: '本人补充的线下背景，不是对方原话。', source: 'user_annotation', updatedAt: receipt.annotationUpdatedAt } };
+  const context = buildChatContext(profile(), counterpart(), [annotated]);
+  assert.deepEqual(context.messages, [annotated]);
+  const cleared = buildChatContext(profile(), counterpart(), [{ ...messages[0], ...receipt }]);
+  assert.deepEqual(cleared.messages[0], { ...messages[0], ...receipt });
+  assert.notDeepEqual(cleared.messages, buildChatContext(profile(), counterpart(), [messages[0]]).messages);
+  assert.throws(() => buildChatContext(profile(), counterpart(), [{ ...annotated, annotation: { ...annotated.annotation, source: 'other_said' } }]), { code: 'INVALID_MESSAGES' });
+  assert.equal(buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: true }).topicChangeRequested, true);
+  assert.deepEqual(buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: false }), buildChatContext(profile(), counterpart(), messages));
+  assert.throws(() => buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: 'yes' }), { code: 'INVALID_TOPIC_REQUEST' });
+});
+
 test('channel background and confirmed meeting require the applicable details', () => {
   assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), appProfile: '' }).success, false);
   assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), channel: 'offline', offlineScene: '' }).success, false);

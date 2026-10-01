@@ -53,13 +53,14 @@
           <div id="transcript" class="transcript" role="group" aria-label="双方真实对话"></div>
           <section id="coach-panel" class="coach-card" aria-labelledby="coach-title">
             <div class="coach-heading"><span class="coach-mark">AI 辅助</span><span id="heat-status" class="small muted">信息不足</span><span id="message-count" class="small muted"></span></div>
-            <h2 id="coach-title">三个回复方向</h2>
-            <div id="classification-summary" class="helper"></div>
+            <h2 id="coach-title">本轮建议</h2>
+            <div id="classification-summary" class="helper" role="status"></div>
             <p id="timing-note" class="helper" hidden></p>
-            <div id="direction-options" class="direction-options" role="group" aria-label="选择回复方向"></div>
-            <div class="button-row coach-actions"><button id="classify" class="quiet-button" type="button">重新分析</button><button id="direct-reply" class="quiet-button" type="button">直接给一句</button></div>
+            <div id="direction-options" class="direction-options" role="group" aria-label="选择换话题的方向" hidden></div>
+            <div class="button-row coach-actions"><button id="direct-reply" class="primary" type="button">给我建议</button><button id="change-topic" class="quiet-button" type="button" aria-controls="direction-options" aria-expanded="false">换个话题</button></div>
+            <p id="daily-reply-quota" class="small muted" hidden></p>
             <p id="coach-loading" class="loading-message" role="status" hidden></p>
-            <details class="coach-details"><summary>这次想表达什么 / 使用情况</summary><label>本轮意图<textarea id="intent" rows="2" maxlength="2000" placeholder="可选：继续了解、承接玩笑，或协商见面"></textarea></label><p id="classify-availability" class="helper"></p><p id="quota-summary" class="small muted"></p></details>
+            <details class="coach-details"><summary>这次想表达什么 / 使用情况</summary><label>本轮意图<textarea id="intent" rows="2" maxlength="2000" placeholder="可选：继续了解、承接玩笑，或协商见面"></textarea></label><button id="classify" class="quiet-button" type="button">重新看局面</button><p id="classify-availability" class="helper"></p><p id="quota-summary" class="small muted"></p></details>
             <details id="suggestion-history" hidden><summary>历史建议</summary><div id="suggestion-list"></div></details>
           </section>
           <section id="suggestion-panel" class="message self pending-suggestion" tabindex="-1" hidden aria-labelledby="suggestion-title">
@@ -137,10 +138,11 @@
     <div id="field-coach" class="field-coach" role="complementary" aria-labelledby="field-coach-title">
       <div class="section-heading"><h2 id="field-coach-title" tabindex="-1">场外教练</h2><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
       <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">待判断</strong></div><p id="field-coach-heat-status" role="status">信息不足</p><p id="field-coach-heat-basis" class="helper">记录对方的新消息后再判断。</p></section>
+      <p id="field-coach-focus" class="coach-focus">本轮重点：待判断</p>
       <ol class="coach-actions" aria-label="本轮行动指引">
         <li><span class="coach-action-label">现在做</span><p id="field-coach-initiative">先记录对方的新消息。</p></li>
         <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">本轮雷点待判断。</p></li>
-        <li><span class="coach-action-label">往哪聊</span><p id="field-coach-next">分析后给出推荐方向。</p></li>
+        <li><span class="coach-action-label">下一步</span><p id="field-coach-next">结合当前话题给建议。</p></li>
       </ol>
       <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
       <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div></form>

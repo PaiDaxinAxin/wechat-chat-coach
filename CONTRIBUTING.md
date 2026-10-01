@@ -2,7 +2,7 @@
 
 Code and the complete knowledge are open for community collaboration. Code contributions use MIT; knowledge and framework contributions use CC BY 4.0 as specified in [LICENSING.md](LICENSING.md). Submit only material you have authority to contribute under the applicable license. External dependencies retain their own notices.
 
-Useful contributions include small reproducible bug fixes, provider compatibility, accessibility, clearer terminology, counterexamples, and evidence-backed improvements to the knowledge or evaluations. No payment, donation or private-data contribution is required to use or contribute to this project.
+Useful contributions include small reproducible bug fixes, provider compatibility, accessibility, clearer terminology, counterexamples, and evidence-backed improvements to the knowledge or evaluations. No payment, donation or private-data contribution to this project is required to use its source, self-host it, or contribute. The official hosted service is planned as a separate paid offering using our AI provider; self-hosters manage their own models, infrastructure and data.
 
 ## Propose a change
 

@@ -6,13 +6,15 @@ const state = {
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
   messageDrafts: new Map(), messageCalls: new Set(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
+  topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false,
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
-const relationMoveNames = { continue: '普通交流', male_to_female: '男对女', light_approach: '轻度靠近', give_space: '拉开一点', receive: '承接', close_topic: '结束话题', clarify: '澄清', invite: '协商邀约', wait: '暂时不回', pause: '停止当前推进' };
+const relationMoveNames = { continue: '普通交流', deepen: '深入聊', push_pull: '轻松推拉', male_to_female: '男对女', light_approach: '轻度靠近', give_space: '拉开一点', receive: '承接', close_topic: '结束话题', clarify: '澄清', invite: '协商邀约', wait: '暂时不回', pause: '停止当前推进' };
+const focusNames = { value_display: '价值展示', emotion: '情绪拉升', security: '安全需求', unknown: '待判断' };
 const dimensionNames = { activeInteraction: '主动互动', responseEngagement: '回复参与', personalInterest: '对我的兴趣', reciprocalFlirting: '双向暧昧', actionFollowThrough: '行动兑现' };
 const levelNames = { unknown: '未知', negative: '有负向信号', passive: '被动回应', positive: '积极参与', repeated_positive: '持续积极' };
 const heatNames = { pause: '建议暂停', insufficient_evidence: '信息不足', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
@@ -290,13 +292,17 @@ function updateQuota(quota = state.me?.quota) {
   if (!quota || !state.me) return;
   state.me.quota = quota;
   const remaining = quota.classificationRemaining;
-  $('quota-summary').textContent = `${remaining === null ? state.localDemo ? 'Demo 方向分析' : '付费内测方向分析' : `方向分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
+  $('quota-summary').textContent = `${remaining === null ? state.localDemo ? 'Demo 局面分析' : '付费内测局面分析' : `局面分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
   const unavailable = state.me.user.plan !== 'paid' && remaining === 0;
   $('classify').hidden = unavailable;
   $('classify-availability').textContent = unavailable
-    ? '三次方向分析试用已用完。你仍可直接生成回复；本轮不调用分类器，也不展示虚构权重。'
-    : '方向分析依据已保存的双方背景与当前对话；一次完整分析计一次，同一上下文或切换方向不重复计次。权重不是成功率。';
+    ? '局面分析试用已用完。仍可主动请求回复，或选择换题方向；不补造建议占比。'
+    : '结合已保存的背景与完整对话判断当前动作。只有需要换话题时才展示三个方向；占比不是成功率。';
+  const daily = quota.dailyReplyRemaining;
+  $('daily-reply-quota').hidden = !Number.isInteger(daily);
+  $('daily-reply-quota').textContent = Number.isInteger(daily) ? `今日免费 AI 回复剩余 ${daily} / 3 条 · 北京时间每日重置` : '';
   updateComposer();
+  if (state.detail) updateCoachBusy();
 }
 async function reloadMe({ expectedUserId } = {}) {
   const me = await api('/api/me');
@@ -570,9 +576,9 @@ function renderJobs(jobs) {
   }
   history.hidden = !jobs.length;
   const states = { reserved: '等待处理', running: '正在处理', linked: '关联已有操作', succeeded: '已完成', failed: '已失败' };
-  const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '方向试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
+  const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '局面分析试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
   const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
-  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估', image_read: '图片识读' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
+  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '局面分析', reply: '回复生成', coach_plan: '场外教练评估', image_read: '图片识读' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
 async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
@@ -602,6 +608,9 @@ function renderHeat(heat) {
 }
 function renderTranscript() {
   const messages = state.detail?.messages || [];
+  const focusedNote = document.activeElement.closest?.('.message-annotation');
+  const focusedKey = focusedNote?.dataset.annotationKey;
+  const selection = focusedNote && document.activeElement.tagName === 'TEXTAREA' ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   $('message-count').textContent = `${messages.length} 条记录`;
   $('transcript').replaceChildren(...messages.map((message) => {
     const controls = el('details', { class: 'message-menu chat-menu' });
@@ -615,9 +624,56 @@ function renderTranscript() {
     const reportedDate = new Date(message.wechatTime?.at);
     const reportedTime = message.wechatTime?.source === 'user_reported' && Number.isFinite(reportedDate.getTime()) ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(reportedDate) : '';
     const label = message.speaker === 'self' ? message.provenance === 'inferred_from_followup' ? '我 · 推定使用' : '我' : state.detail.counterpart.alias;
-    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `本人标注的微信时间 ${message.wechatTime.at}（未核验）；原软件录入时间 ${recordedAt}` : recordedAt ? `本软件录入时间 ${recordedAt}，不是微信实际收发时间` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls));
+    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `本人标注的微信时间 ${message.wechatTime.at}（未核验）；原软件录入时间 ${recordedAt}` : recordedAt ? `本软件录入时间 ${recordedAt}，不是微信实际收发时间` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls), messageAnnotation(message));
   }));
   if (!messages.length) $('transcript').append(el('p', { class: 'helper' }, '还没有对话。按说话人逐条加入原文，也可以先补充此前背景。'));
+  if (focusedKey) {
+    const note = [...document.querySelectorAll('.message-annotation')].find((element) => element.dataset.annotationKey === focusedKey);
+    const input = note?.querySelector('textarea');
+    if (note?.open && input && document.activeElement === document.body) { input.focus({ preventScroll: true }); if (selection) input.setSelectionRange(...selection); }
+  }
+}
+function messageAnnotation(message) {
+  const id = state.selectedId, userId = state.me?.user.id;
+  const key = JSON.stringify([userId, id, message.id]);
+  const note = el('details', { class: 'message-annotation', 'data-annotation-key': key });
+  note.open = state.annotationOpen.has(key);
+  const summary = el('summary', {}, message.annotation?.text ? '批注 · 已补背景' : '批注');
+  const input = el('textarea', { rows: '2', maxlength: '5000', 'aria-label': '这条消息的背景批注', placeholder: '如：这句话接着线下的话题；她当时是在开玩笑。我的补充，不是对方原话。' });
+  input.value = state.annotationDrafts.get(key)?.text ?? message.annotation?.text ?? '';
+  const form = el('form', { class: 'message-annotation-form' }, el('label', {}, '背景批注 · 本人补充', input));
+  const save = el('button', { class: 'quiet-button', type: 'submit', disabled: state.annotationCalls.has(key) }, state.annotationCalls.has(key) ? '保存批注…' : '保存批注');
+  save.dataset.locked = String(state.annotationCalls.has(key));
+  const close = el('button', { class: 'quiet-button', type: 'button', onclick: () => { note.open = false; state.annotationOpen.delete(key); summary.focus({ preventScroll: true }); } }, '收起');
+  form.append(el('div', { class: 'button-row' }, save, close), el('p', { class: 'small muted' }, '只补充背景，不改原话；清空并保存可移除。'));
+  if (state.annotationErrors.has(key)) form.append(el('p', { class: 'form-error', role: 'alert' }, state.annotationErrors.get(key)));
+  input.addEventListener('input', () => state.annotationDrafts.set(key, { text: input.value }));
+  note.addEventListener('toggle', () => { if (note.isConnected && state.me?.user.id === userId && state.selectedId === id) { if (note.open) state.annotationOpen.add(key); else state.annotationOpen.delete(key); } });
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (state.annotationCalls.has(key)) return;
+    const submitted = state.annotationDrafts.get(key) || { text: input.value };
+    const hadFocus = form.contains(document.activeElement);
+    state.annotationErrors.delete(key);
+    state.annotationDrafts.set(key, submitted); state.annotationCalls.add(key); save.dataset.locked = 'true';
+    void perform(save, '保存批注…', async () => {
+      await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/annotation`, { method: 'PATCH', body: { annotationText: submitted.text } });
+      if (state.me?.user.id !== userId) return;
+      if (state.annotationDrafts.get(key) === submitted) state.annotationDrafts.delete(key);
+      await refreshCounterpart(id, { autoAnalyze: false });
+      if (state.me?.user.id === userId && state.selectedId === id) announce('背景批注已保存；后续建议会结合这段补充。');
+    }, { userId, counterpartId: id }).finally(() => {
+      const error = form.querySelector('.form-error');
+      if (state.me?.user.id === userId && error && !error.hidden) state.annotationErrors.set(key, error.textContent);
+      state.annotationCalls.delete(key); save.dataset.locked = 'false';
+      if (state.me?.user.id === userId && state.selectedId === id) {
+        renderTranscript();
+        if (hadFocus && document.activeElement === document.body) [...document.querySelectorAll('.message-annotation')].find((element) => element.dataset.annotationKey === key && element.open)?.querySelector('textarea').focus({ preventScroll: true });
+      }
+    });
+  });
+  note.append(summary, form);
+  return note;
 }
 function editMessageTiming(message, menu) {
   const id = state.selectedId, userId = state.me?.user.id;
@@ -688,19 +744,22 @@ function renderClassification(classification) {
   renderFieldCoach(classification);
   const busy = state.modelCalls.get(currentContextKey());
   const options = new Map((classification?.options || []).map((option) => [option.topicMove, option]));
-  const available = options.size === 3;
+  const requested = state.topicChangeContexts.has(currentContextKey());
+  const changing = requested || classification?.topicDecision?.mode === 'change';
+  const available = classification?.topicDecision?.mode === 'change' && options.size === 3;
   const missing = coachPrerequisite();
-  $('classification-summary').textContent = missing || (available
-    ? `${confidenceNames[classification.confidence] || '证据有限'}${classification.status === 'needs_context' ? ' · 还需要更多背景' : ''}。建议占比是相对推荐，尚未校准；点任一方向生成。`
-    : classificationUnavailable() ? '方向分析试用已用完，直接给一句；本轮不展示虚构百分比。'
-      : busy?.type === 'classify' ? '正在分析三个方向…' : '等待方向分析；暂无建议占比。');
-  $('direction-options').replaceChildren(...['up', 'down', 'sideways'].map((direction) => {
+  $('classification-summary').textContent = missing || (busy?.type === 'classify' ? '正在结合完整对话看当前局面…'
+    : changing ? classification?.topicDecision?.reason || '选择一个方向，换个话题。'
+      : classification?.topicDecision?.reason || '结合当前阶段与上下文给建议，也可以主动换个话题。');
+  $('direction-options').hidden = !changing || Boolean(missing);
+  $('change-topic').setAttribute('aria-expanded', String(changing && !missing));
+  $('direction-options').replaceChildren(...(changing ? ['up', 'down', 'sideways'] : []).map((direction) => {
     const option = options.get(direction);
-    const button = el('button', { type: 'button', class: 'direction-option', disabled: !option || Boolean(busy) || Boolean(missing), 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}，${option ? `建议占比 ${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'}`, 'data-direction': direction,
-      onclick: () => void coachCall('reply', button, { direction }) },
+    const button = el('button', { type: 'button', class: 'direction-option', disabled: Boolean(busy) || Boolean(missing) || state.me?.quota?.dailyReplyRemaining === 0, 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}${available ? `，建议占比 ${Math.round(option.weight * 100)}%` : ''}`, 'data-direction': direction,
+      onclick: () => void coachCall('reply', button, { direction, topicChangeRequested: true }) },
       el('span', { class: 'direction-name' }, directionNames[direction].split(' · ')[0], el('span', { class: 'direction-check', 'aria-hidden': 'true' }, '✓')),
-      el('span', { class: 'weight' }, option ? `${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'));
-    button.title = option ? `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}` : directionNames[direction];
+      el('span', { class: 'weight' }, available ? `${Math.round(option.weight * 100)}%` : directionNames[direction].split(' · ')[1]));
+    button.title = available ? `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}` : directionNames[direction];
     button.classList.toggle('selected', state.selectedDirection === direction);
     return button;
   }));
@@ -744,6 +803,11 @@ fieldCoachViewport.addEventListener('change', ({ matches }) => {
   closeFieldCoach({ restoreFocus: matches && inside });
   if (!matches && inside && (lostFocus || !focused.checkVisibility())) $('field-coach-title').focus({ preventScroll: true });
 });
+function currentSuggestion() {
+  const item = state.suggestion;
+  return item && (state.detail?.currentSuggestionIds?.includes(item.id) || state.detail?.directReply?.id === item.id) ? item : null;
+}
+function workingFocus() { return currentSuggestion()?.workingFocus || state.detail?.classification?.workingFocus || null; }
 function renderFieldCoach(classification) {
   const coach = classification?.fieldCoach;
   const heat = classification ? state.detail?.heat : null;
@@ -756,9 +820,13 @@ function renderFieldCoach(classification) {
   $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : insufficient ? '信息不足' : heatNames[heat.status] || '结合当前互动判断';
   const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
   $('field-coach-heat-basis').textContent = heat ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度` : '记录对方的新消息后再判断。';
+  const focus = workingFocus();
+  $('field-coach-focus').textContent = `本轮重点：${focusNames[focus?.stage] || focusNames.unknown}`;
+  $('field-coach-focus').title = focus?.reason || '';
 
   const obstacle = classification?.obstacle?.type;
-  let action = coach?.initiative || '本轮主导建议待判断。';
+  const guidance = currentSuggestion()?.guidance;
+  let action = guidance?.ownWordsGuide || coach?.initiative || '本轮主导建议待判断。';
   let pitfall = coach?.pitfall || (coach ? '通用提醒：别连续追问，别同一话题反复升温。' : '本轮雷点待判断。');
   if (paused) {
     action = '停止这类推进，尊重她的边界。';
@@ -769,7 +837,7 @@ function renderFieldCoach(classification) {
   } else if (obstacle === 'ambiguous') {
     action = '先弄清她的意思，轻松接住疑虑。';
     pitfall = '别把疑虑当调侃，也别继续加码。';
-  } else if (!classification) {
+  } else if (!classification && !guidance) {
     action = classificationUnavailable() ? '可以直接生成一句回复。' : '先记录对方的新消息。';
   }
   // Keep historical advice intact, including later conditions and negations.
@@ -780,7 +848,9 @@ function renderFieldCoach(classification) {
   const highest = options.length ? Math.max(...options.map(({ weight }) => weight)) : null;
   const recommended = options.filter(({ weight }) => weight === highest);
   $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
-    : !recommended.length ? '本轮方向待分析。'
+    : guidance?.reentryWhen ? guidance.reentryWhen
+      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '结合当前话题给建议。'
+    : !recommended.length ? '可以主动选择一个换题方向。'
       : `${recommended.length > 1 ? '并列可选' : '推荐'}${recommended.map(({ topicMove }) => directionNames[topicMove]?.split(' · ')[0] || '待判断').join(' / ')} · ${obstacle === 'ambiguous' ? '先澄清她的意思，暂不升级。' : recommended[0].reason}`;
 
   $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '待判断'}`;
@@ -815,25 +885,27 @@ function renderFieldCoachPlan() {
     el('p', { class: 'helper' }, `时机：${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}`), details);
 }
 function currentContextKey() { return JSON.stringify([state.me?.user.id, state.selectedId, state.detail?.counterpart, state.detail?.messages, state.detail?.meeting, state.me?.profile]); }
-function requestId(type, id, direction = '', intent = '') {
-  const contextKey = JSON.stringify([type, id, direction, intent, currentContextKey()]);
+function requestId(type, id, direction = '', intent = '', topicChangeRequested = false) {
+  const contextKey = JSON.stringify([type, id, direction, intent, topicChangeRequested, currentContextKey()]);
   if (!state.requestIds.has(contextKey)) state.requestIds.set(contextKey, crypto.randomUUID());
   return { id: state.requestIds.get(contextKey), key: contextKey };
 }
 function updateCoachBusy() {
   const busy = state.modelCalls.get(currentContextKey());
   $('coach-loading').hidden = busy?.type !== 'classify';
-  if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整体系与当前背景分析三个方向…';
+  if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整对话看当前局面…';
   $('coach-panel').setAttribute('aria-busy', String(Boolean(busy)));
   $('classify').disabled = Boolean(busy) || Boolean(coachPrerequisite());
-  $('direct-reply').disabled = Boolean(busy) || Boolean(coachPrerequisite());
+  $('direct-reply').disabled = Boolean(busy) || Boolean(coachPrerequisite()) || state.me?.quota?.dailyReplyRemaining === 0;
+  $('direct-reply').textContent = busy?.type === 'reply' ? '正在给建议…' : state.me?.quota?.dailyReplyRemaining === 0 ? '今日免费回复已用完' : '给我建议';
+  $('change-topic').disabled = Boolean(busy) || Boolean(coachPrerequisite());
   renderClassification(state.detail?.classification);
   renderSuggestion();
 }
 function coachPrerequisite() {
   if (!state.me || !state.detail || !state.selectedId) return '先添加一位聊天对象，填写认识背景。';
   if (!state.me.profile?.background || state.me.requiresQuestionnaireUpdate || state.me.profile.requiresQuestionnaireUpdate) return '先在「资料 → 我的画像」补全自己的背景和聊天偏好。';
-  if (!state.detail.messages?.some(({ speaker }) => speaker === 'other')) return '先在下方粘贴对方的一条消息，再为你推荐回复方向。';
+  if (!state.detail.messages?.some(({ speaker }) => speaker === 'other')) return '先在下方粘贴对方的一条消息，再结合局面给建议。';
   return '';
 }
 function maybeAutoCoach() {
@@ -841,18 +913,19 @@ function maybeAutoCoach() {
   if (state.detail.classification) return;
   const context = currentContextKey();
   if (state.autoAttempts.has(context) || state.modelCalls.has(context)) return;
-  const exhausted = classificationUnavailable();
-  const attempted = state.detail.modelContext?.[exhausted ? 'directReplyAttempted' : 'classificationAttempted'];
-  if (attempted || exhausted && state.detail.directReply) return;
+  if (classificationUnavailable() || state.detail.modelContext?.classificationAttempted) return;
   state.autoAttempts.add(context);
-  void coachCall(exhausted ? 'reply' : 'classify', null, { automatic: true });
+  void coachCall('classify', null, { automatic: true });
 }
-async function coachCall(type, button, { direction, automatic = false } = {}) {
+async function coachCall(type, button, { direction, automatic = false, topicChangeRequested = false } = {}) {
   if (button?.disabled || coachPrerequisite()) return;
   const id = state.selectedId, userId = state.me.user.id, inputContext = currentContextKey();
   if (state.modelCalls.has(inputContext)) return;
+  if (topicChangeRequested) state.topicChangeContexts.add(inputContext);
+  topicChangeRequested = topicChangeRequested || type === 'reply' && state.topicChangeContexts.has(inputContext);
   const call = { type, id, direction, previousDirection: state.selectedDirection };
   const focusReply = type === 'reply' && button && document.activeElement === button;
+  const focusTopicChange = type === 'classify' && topicChangeRequested && button && document.activeElement === button;
   if (type === 'reply') {
     if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value);
     state.replyFeedback = null;
@@ -862,7 +935,7 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
   state.modelCalls.set(inputContext, call);
   closeInlineCards();
   const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
-  const request = requestId(type, id, direction, intent);
+  const request = requestId(type, id, direction, intent, topicChangeRequested);
   let localError = $('coach-error');
   if (!localError) { localError = el('p', { id: 'coach-error', class: 'form-error', role: 'alert' }); $('coach-loading').after(localError); }
   localError.hidden = true;
@@ -871,14 +944,15 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
     $('suggestion-panel').scrollIntoView({ block: 'nearest' });
     if (focusReply) $('suggestion-panel').focus({ preventScroll: true });
   }
-  let replyAccepted = false;
+  let replyAccepted = false, classificationAccepted = false;
   try {
-    const data = await post(`${counterpartPath(id)}/${type}`, { requestId: request.id, ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) });
+    const data = await post(`${counterpartPath(id)}/${type}`, { requestId: request.id, ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) });
     state.requestIds.delete(request.key);
     if (state.me?.user.id !== userId) return;
     updateQuota(data.quota);
     if (state.selectedId === id && currentContextKey() === inputContext) {
       if (type === 'classify') {
+        classificationAccepted = true;
         state.detail.classification = data.classification; state.detail.heat = data.heat;
         renderHeat(data.heat);
       } else {
@@ -892,8 +966,8 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
           text: `${name ? `已切换到${name}` : '回复已更新'}${data.cached ? ' · 使用已保存结果' : ''}` };
         const suggestions = state.detail.suggestions || (state.detail.suggestions = []);
         if (!suggestions.some((item) => item.id === data.suggestion.id)) suggestions.push(data.suggestion);
-        if (!direction && !intent) state.detail.directReply = data.suggestion;
-        renderSuggestion(); scrollToLatest();
+        if (!direction && !intent && !topicChangeRequested) state.detail.directReply = data.suggestion;
+        renderSuggestion();
       }
       announce('');
     }
@@ -919,16 +993,20 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
       try { await loadCounterpart(id, { autoAnalyze: false }); } catch { /* No automatic retry. */ }
     }
     if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
-    if (error.code === 'CLASSIFICATION_QUOTA_EXHAUSTED' && automatic && state.selectedId === id && currentContextKey() === inputContext) {
-      state.modelCalls.delete(inputContext); updateCoachBusy();
-      void coachCall('reply', null, { automatic: true });
-    }
     if (state.selectedId === id) {
       try { const detail = await api(counterpartPath(id)); if (state.selectedId === id) renderJobs(detail.jobs || []); } catch { /* Read only. */ }
     }
   } finally {
     if (state.modelCalls.get(inputContext) === call) state.modelCalls.delete(inputContext);
-    if (state.selectedId === id && currentContextKey() === inputContext) updateCoachBusy();
+    if (state.selectedId === id && currentContextKey() === inputContext) {
+      updateCoachBusy();
+      // The complete editor/guidance appears only after the busy state clears.
+      if (replyAccepted) scrollToLatest();
+      if (classificationAccepted && focusTopicChange && (document.activeElement === button || document.activeElement === document.body)) {
+        $('direction-options').querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+        $('direction-options').scrollIntoView({ block: 'nearest' });
+      }
+    }
   }
 }
 function renderSuggestion() {
@@ -975,13 +1053,13 @@ function renderSuggestion() {
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
   $('suggestion-reason').textContent = suggestion.reason || '';
   $('suggestion-style').textContent = suggestion.styleNote || '';
-  $('reply-relation').textContent = suggestion.action === 'pause' ? relationMoveNames.pause : relationMoveNames[suggestion.guidance?.relationMove] || (noReply ? relationMoveNames[suggestion.action] : '这条旧建议未保存关系动作');
+  $('reply-relation').textContent = `${focusNames[currentSuggestion()?.workingFocus?.stage] || focusNames.unknown} · ${suggestion.action === 'pause' ? relationMoveNames.pause : relationMoveNames[suggestion.guidance?.relationMove] || (noReply ? relationMoveNames[suggestion.action] : '这条旧建议未保存关系动作')}`;
   $('reply-own-words').textContent = suggestion.guidance?.ownWordsGuide || (noReply ? '本轮先不发送，不必硬续一句。' : '这条旧建议未保存表达指引，可保留原意，用你的说法改写。');
   $('reply-reentry').textContent = suggestion.guidance?.reentryWhen || '这条旧建议未保存具体条件，不必按固定时长等待。';
   $('reply-wait-reason').hidden = !noReply;
   $('reply-wait-reason').textContent = noReply ? `现在不回的依据：${suggestion.reason || '这条旧建议未保存具体依据。'}` : '';
   updateReplyCopyState();
-  updateSentState(); updateComposer();
+  updateSentState(); updateComposer(); renderFieldCoach(state.detail?.classification);
 }
 function isNoReplySuggestion(suggestion) { return ['wait', 'pause'].includes(suggestion?.action); }
 function updateReplyCopyState() {
@@ -1150,6 +1228,7 @@ function clearSessionUI() {
   state.messageDrafts.clear(); state.messageCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
   state.composerImage = null; state.imageCalls.clear(); state.imageSelectionSerial++;
   state.intakeDrafts.clear();
+  state.topicChangeContexts.clear(); state.annotationDrafts.clear(); state.annotationOpen.clear(); state.annotationCalls.clear(); state.annotationErrors.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.copyCalls.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
@@ -1360,6 +1439,12 @@ $('message-form').addEventListener('submit', (event) => {
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
 $('direct-reply').addEventListener('click', () => void coachCall('reply', $('direct-reply')));
+$('change-topic').addEventListener('click', () => {
+  if ($('change-topic').disabled || coachPrerequisite()) return;
+  state.topicChangeContexts.add(currentContextKey());
+  if (classificationUnavailable()) { renderClassification(state.detail?.classification); $('direction-options').querySelector('button')?.focus({ preventScroll: true }); }
+  else void coachCall('classify', $('change-topic'), { topicChangeRequested: true });
+});
 $('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
 $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '复制中…', async () => {
   const id = state.selectedId, userId = state.me?.user.id, suggestionId = state.suggestion?.id, copiedText = $('suggestion-text').value;

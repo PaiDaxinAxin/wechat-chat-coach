@@ -83,6 +83,7 @@ export async function createPostgresStore({
   };
   const timestamp = () => new Date(now()).toISOString();
   const day = () => timestamp().slice(0, 10);
+  const replyDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now()));
   try {
     await transaction(async () => {
       const row = await get('SELECT version FROM schema_version WHERE singleton = TRUE');
@@ -111,7 +112,7 @@ export async function createPostgresStore({
         replyInterval = { fromAt: sentTime.at, toAt: wechatTime.at, elapsedMs: valid ? delta : null, fromSource: 'user_reported_wechat_sent', toSource: 'user_reported_wechat_received', reliability: valid ? 'user_reported_interval' : 'unknown', interpretation: 'not_verified_wechat_latency' };
       }
     }
-    return { id: row.id, speaker: row.speaker, text: row.text, suggestionId: row.suggestion_id, provenance: row.provenance, recordedAt: row.created_at, wechatTime, replyInterval, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, speaker: row.speaker, text: row.text, suggestionId: row.suggestion_id, provenance: row.provenance, recordedAt: row.created_at, wechatTime, replyInterval, createdAt: row.created_at, updatedAt: row.updated_at, ...(row.annotation_json ? { annotation: parse(row.annotation_json) } : {}), ...(row.annotation_revision ? { annotationRevision: row.annotation_revision, annotationUpdatedAt: row.annotation_updated_at } : {}) };
   };
   const touch = async (id) => (await run('UPDATE counterparts SET revision=revision+1,updated_at=$1 WHERE id=$2', timestamp(), id));
   const suggestionSource = async (row) => {
@@ -128,13 +129,18 @@ export async function createPostgresStore({
     const baselineMessages = Array.isArray(baseline) ? new Map(baseline.map((message) => [message.id, message])) : null;
     const laterSelf = (await all("SELECT * FROM messages WHERE user_id=$1 AND counterpart_id=$2 AND speaker='self' ORDER BY seq", row.user_id, row.counterpart_id))
       .filter((message) => baselineMessages ? baselineMessages.get(message.id)?.speaker !== 'self' || baselineMessages.get(message.id)?.text !== message.text : message.updated_at >= row.created_at);
+    const changedAnnotations = (await all('SELECT * FROM messages WHERE user_id=$1 AND counterpart_id=$2 AND annotation_updated_at IS NOT NULL', row.user_id, row.counterpart_id))
+      .filter((message) => baselineMessages ? message.annotation_revision !== (baselineMessages.get(message.id)?.annotationRevision ?? 0) : message.annotation_revision > 0);
     if (copy === undefined) copy = replyText === undefined
-      ? (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 ORDER BY copied_at DESC,_ordinal DESC LIMIT 1', row.user_id, row.counterpart_id, row.id))
-      : (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 AND copied_text=$4 ORDER BY copied_at DESC,_ordinal DESC LIMIT 1', row.user_id, row.counterpart_id, row.id, replyText));
+      ? (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 ORDER BY _ordinal DESC LIMIT 1', row.user_id, row.counterpart_id, row.id))
+      : (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 AND copied_text=$4 ORDER BY _ordinal DESC LIMIT 1', row.user_id, row.counterpart_id, row.id, replyText));
     const matchingCopy = copy && (replyText === undefined || copy.copied_text === replyText) ? copy : null;
-    const copyRestores = matchingCopy && laterSelf.every((message) => Date.parse(matchingCopy.copied_at) > Date.parse(message.updated_at));
-    const superseded = laterSelf.length > 0 && !copyRestores;
-    const manualSuperseded = superseded && laterSelf.some((message) => message.provenance !== 'inferred_from_followup' && (!matchingCopy || Date.parse(matchingCopy.copied_at) <= Date.parse(message.updated_at)));
+    const copiedAnnotationRevisions = parse(matchingCopy?.annotation_revisions_json);
+    // Version capture is ordered by the same transaction as annotation edits;
+    // clock skew or replaying an old request cannot restore a stale draft.
+    const copyRestores = matchingCopy && laterSelf.every((message) => Date.parse(matchingCopy.copied_at) > Date.parse(message.updated_at)) && changedAnnotations.every((message) => copiedAnnotationRevisions?.[message.id] === message.annotation_revision);
+    const superseded = (laterSelf.length > 0 || changedAnnotations.length > 0) && !copyRestores;
+    const manualSuperseded = superseded && (changedAnnotations.length > 0 || laterSelf.some((message) => message.provenance !== 'inferred_from_followup' && (!matchingCopy || Date.parse(matchingCopy.copied_at) <= Date.parse(message.updated_at))));
     const activeCopy = superseded ? null : matchingCopy;
     const text = replyText ?? activeCopy?.copied_text ?? source.suggestion.reply;
     const consumed = (await consumedSource(row.user_id, row.counterpart_id, row.id, text, matchingCopy));
@@ -156,24 +162,30 @@ export async function createPostgresStore({
   };
   const jobValue = (row) => row ? ({ id: row.id, userId: row.user_id, counterpartId: row.counterpart_id, operation: row.operation, requestId: row.request_id, contextHash: row.context_hash, knowledgeHash: row.knowledge_hash, state: row.state, result: parse(row.result_json), errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at, workerId: row.worker_id, cacheOf: row.cache_of }) : null;
   const budget = async (subject, forDay) => { (await run('INSERT INTO provider_budget(subject,day) VALUES($1,$2) ON CONFLICT DO NOTHING', subject, forDay)); return (await get('SELECT * FROM provider_budget WHERE subject=$1 AND day=$2', subject, forDay)); };
+  const replyBudget = async (userId, forDay) => { await run('INSERT INTO reply_daily_usage(user_id,day) VALUES($1,$2) ON CONFLICT DO NOTHING', userId, forDay); return await get('SELECT * FROM reply_daily_usage WHERE user_id=$1 AND day=$2', userId, forDay); };
+  const limitedReplies = (account) => account.plan === 'free' && account.role !== 'owner';
   const providerLimit = (account) => account.plan === 'paid' ? paidProviderDailyLimit : freeProviderDailyLimit;
   const quota = async (userId) => {
     const account = (await user(userId));
     const currentDay = day();
     const local = (await budget(userId, currentDay)), global = (await budget('global', currentDay));
+    const currentReplyDay = replyDay(), replies = await replyBudget(userId, currentReplyDay);
     return {
       classificationRemaining: account.plan === 'paid' ? null : Math.max(0, 3 - account.classification_used - account.classification_reserved),
       providerRemaining: Math.max(0, Math.min(providerLimit(account) - local.used - local.reserved, globalProviderDailyLimit - global.used - global.reserved)),
       providerDay: currentDay,
+      dailyReplyRemaining: limitedReplies(account) ? Math.max(0, 3 - replies.used - replies.reserved) : null,
+      replyDay: currentReplyDay, replyTimeZone: 'Asia/Shanghai',
     };
   };
   async function releaseJob(row, code) {
     if (!row || !['reserved', 'running'].includes(row.state)) return;
     if (row.classification_reservation) (await run('UPDATE users SET classification_reserved=GREATEST(0,classification_reserved-1) WHERE id=$1', row.user_id));
+    if (row.reply_reservation) await run('UPDATE reply_daily_usage SET reserved=GREATEST(0,reserved-1) WHERE user_id=$1 AND day=$2', row.user_id, row.reply_day);
     if (row.provider_reservation) {
       for (const subject of [row.user_id, 'global']) (await run('UPDATE provider_budget SET reserved=GREATEST(0,reserved-1) WHERE subject=$1 AND day=$2', subject, row.budget_day));
     }
-    (await run("UPDATE model_jobs SET state='failed',error_code=$1,classification_reservation=0,provider_reservation=0,updated_at=$2 WHERE id=$3", code, timestamp(), row.id));
+    (await run("UPDATE model_jobs SET state='failed',error_code=$1,classification_reservation=0,reply_reservation=0,provider_reservation=0,updated_at=$2 WHERE id=$3", code, timestamp(), row.id));
     (await run("UPDATE model_jobs SET state='failed',error_code=$1,updated_at=$2 WHERE cache_of=$3 AND state='linked'", code, timestamp(), row.id));
   }
 
@@ -413,6 +425,21 @@ export async function createPostgresStore({
         return (await messageValue((await get('SELECT * FROM messages WHERE id=$1', id))));
       }));
     },
+    async putMessageAnnotation(userId, counterpartId, id, annotationText) {
+      await counterpartRow(userId, counterpartId);
+      if (typeof annotationText !== 'string' || annotationText.trim().length > 5_000) throw new BetaError('MESSAGE_ANNOTATION_INVALID');
+      const content = annotationText.trim();
+      return await transaction(async () => {
+        const row = await get('SELECT * FROM messages WHERE id=$1 AND user_id=$2 AND counterpart_id=$3', id, userId, counterpartId);
+        if (!row) throw new BetaError('MESSAGE_NOT_FOUND', 404);
+        if ((parse(row.annotation_json)?.text ?? '') !== content) {
+          const annotation = content ? { text: content, source: 'user_annotation', updatedAt: timestamp() } : null;
+          await run('UPDATE messages SET annotation_json=$1,annotation_updated_at=$2,annotation_revision=annotation_revision+1 WHERE id=$3', annotation ? json(annotation) : null, timestamp(), id);
+          await touch(counterpartId); await audit(userId, 'message_annotation_saved', id, { source: 'user_annotation', removed: !content });
+        }
+        return await messageValue(await get('SELECT * FROM messages WHERE id=$1', id));
+      });
+    },
     async getMeeting(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); const row = (await get('SELECT * FROM meetings WHERE user_id=$1 AND counterpart_id=$2', userId, counterpartId)); return row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' }; },
     async putMeeting(userId, counterpartId, value) {
       (await counterpartRow(userId, counterpartId));
@@ -442,7 +469,8 @@ export async function createPostgresStore({
           return { copyReceipt: { id: existing.id, suggestionId, copiedAt: existing.copied_at, provenance: 'clipboard_copied' }, cached: true };
         }
         const id = randomUUID(), copiedAt = timestamp();
-        (await run('INSERT INTO reply_copy_receipts VALUES($1,$2,$3,$4,$5,$6,$7,$8)', id, userId, counterpartId, suggestionId, requestId, payloadHash, text, copiedAt));
+        const annotationRevisions = Object.fromEntries((await all('SELECT id,annotation_revision FROM messages WHERE user_id=$1 AND counterpart_id=$2 AND annotation_revision>0', userId, counterpartId)).map((message) => [message.id, message.annotation_revision]));
+        (await run('INSERT INTO reply_copy_receipts(id,user_id,counterpart_id,suggestion_id,request_id,payload_hash,copied_text,copied_at,annotation_revisions_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', id, userId, counterpartId, suggestionId, requestId, payloadHash, text, copiedAt, json(annotationRevisions)));
         (await audit(userId, 'reply_copy_reported', id, { suggestionId, provenance: 'clipboard_copied', sendingVerified: false }));
         return { copyReceipt: { id, suggestionId, copiedAt, provenance: 'clipboard_copied' }, cached: false };
       }));
@@ -467,7 +495,7 @@ export async function createPostgresStore({
           copy = (await get('SELECT * FROM reply_copy_receipts WHERE id=$1 AND user_id=$2 AND counterpart_id=$3', previousCopyReceiptId, userId, counterpartId));
           if (!copy || copy.suggestion_id !== previousSuggestionId) throw new BetaError('COPY_RECEIPT_NOT_FOUND', 404);
           if (copy.copied_text !== previousReplyText) copy = null;
-        } else if (source && previousReplyText) copy = (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 AND copied_text=$4 ORDER BY copied_at DESC,_ordinal DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText));
+        } else if (source && previousReplyText) copy = (await get('SELECT * FROM reply_copy_receipts WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 AND copied_text=$4 ORDER BY _ordinal DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText));
         if (source) {
           const row = (await get('SELECT * FROM suggestions WHERE id=$1 AND user_id=$2 AND counterpart_id=$3', previousSuggestionId, userId, counterpartId));
           const state = (await pendingState(row, source, { replyText: previousReplyText, copy }));
@@ -514,6 +542,11 @@ export async function createPostgresStore({
     },
     async findSentMessage(userId, counterpartId, suggestionId, actualSentText) { (await counterpartRow(userId, counterpartId)); return (await messageValue((await get("SELECT * FROM messages WHERE user_id=$1 AND counterpart_id=$2 AND suggestion_id=$3 AND speaker='self' AND text=$4 AND provenance='user_confirmed_record' ORDER BY seq DESC LIMIT 1", userId, counterpartId, suggestionId, actualSentText)))); },
     async latestSuccessful(userId, counterpartId, operation, contextHash) { (await counterpartRow(userId, counterpartId)); return jobValue((await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation=$3 AND context_hash=$4 AND state='succeeded' ORDER BY updated_at DESC LIMIT 1", userId, counterpartId, operation, contextHash))); },
+    async latestSuccessfulForContexts(userId, counterpartId, operation, contextHashes) {
+      await counterpartRow(userId, counterpartId);
+      if (!Array.isArray(contextHashes) || contextHashes.length !== 2 || contextHashes.some((hash) => typeof hash !== 'string')) throw new BetaError('INPUT_INVALID');
+      return jobValue(await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation=$3 AND context_hash IN ($4,$5) AND state='succeeded' ORDER BY _ordinal DESC LIMIT 1", userId, counterpartId, operation, ...contextHashes));
+    },
     async hasModelAttempt(userId, counterpartId, operation, contextHash) { (await counterpartRow(userId, counterpartId)); return Boolean((await get('SELECT id FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation=$3 AND context_hash=$4 LIMIT 1', userId, counterpartId, operation, contextHash))); },
     async latestCoachPlan(userId, counterpartId, baseContextHash) {
       (await counterpartRow(userId, counterpartId));
@@ -547,12 +580,18 @@ export async function createPostgresStore({
         }
         const account = (await user(userId)), classReservation = operation === 'classify' && account.plan === 'free' ? 1 : 0;
         if (classReservation && account.classification_used + account.classification_reserved >= 3) throw new BetaError('CLASSIFICATION_QUOTA_EXHAUSTED', 402);
+        const forReplyDay = replyDay(), replyReservation = operation === 'reply' && limitedReplies(account) ? 1 : 0;
+        if (replyReservation) {
+          const replies = await replyBudget(userId, forReplyDay);
+          if (replies.used + replies.reserved >= 3) throw new BetaError('DAILY_REPLY_QUOTA_EXHAUSTED', 402);
+        }
         const local = (await budget(userId, currentDay)), global = (await budget('global', currentDay));
         if (local.used + local.reserved >= providerLimit(account) || global.used + global.reserved >= globalProviderDailyLimit) throw new BetaError('PROVIDER_BUDGET_EXHAUSTED', 429);
         if (classReservation) (await run('UPDATE users SET classification_reserved=classification_reserved+1 WHERE id=$1', userId));
+        if (replyReservation) await run('UPDATE reply_daily_usage SET reserved=reserved+1 WHERE user_id=$1 AND day=$2', userId, forReplyDay);
         for (const subject of [userId, 'global']) (await run('UPDATE provider_budget SET reserved=reserved+1 WHERE subject=$1 AND day=$2', subject, currentDay));
         const snapshotJson = contextSnapshot ? json(contextSnapshot) : null;
-        (await run('INSERT INTO model_jobs(id,user_id,counterpart_id,operation,request_id,context_hash,knowledge_hash,state,classification_reservation,provider_reservation,budget_day,worker_id,provider_model,created_at,updated_at,context_snapshot_json,snapshot_hash,lease_expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)', id, userId, counterpartId, operation, requestId, contextHash, knowledgeHash, 'reserved', classReservation, 1, currentDay, workerId, providerModel, createdAt, createdAt, snapshotJson, snapshotJson ? digest(snapshotJson) : null, now() + leaseMs));
+        (await run('INSERT INTO model_jobs(id,user_id,counterpart_id,operation,request_id,context_hash,knowledge_hash,state,classification_reservation,provider_reservation,budget_day,worker_id,provider_model,created_at,updated_at,context_snapshot_json,snapshot_hash,lease_expires_at,reply_reservation,reply_day) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)', id, userId, counterpartId, operation, requestId, contextHash, knowledgeHash, 'reserved', classReservation, 1, currentDay, workerId, providerModel, createdAt, createdAt, snapshotJson, snapshotJson ? digest(snapshotJson) : null, now() + leaseMs, replyReservation, replyReservation ? forReplyDay : null));
         (await audit(userId, 'model_job_reserved', id, { operation, knowledgeHash, contextHash }));
         return { job: jobValue((await get('SELECT * FROM model_jobs WHERE id=$1', id))), fresh: true, cached: false };
       }));
@@ -572,8 +611,12 @@ export async function createPostgresStore({
         if (!row || row.state !== 'running') throw new BetaError('JOB_NOT_AVAILABLE', 409);
         if (Number(row.lease_expires_at) <= now()) throw new BetaError('JOB_INTERRUPTED', 409);
         if (row.classification_reservation) (await run('UPDATE users SET classification_reserved=GREATEST(0,classification_reserved-1),classification_used=classification_used+1 WHERE id=$1', row.user_id));
+        if (row.reply_reservation) {
+          const sendable = typeof suggestion?.reply === 'string' && suggestion.reply.trim().length > 0 && !['wait', 'pause'].includes(suggestion.action);
+          await run('UPDATE reply_daily_usage SET reserved=GREATEST(0,reserved-1),used=used+$1 WHERE user_id=$2 AND day=$3', sendable ? 1 : 0, row.user_id, row.reply_day);
+        }
         if (suggestion) (await run('INSERT INTO suggestions(id,user_id,counterpart_id,value_json,context_hash,knowledge_hash,created_at,origin_job_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', suggestion.id, row.user_id, row.counterpart_id, json(suggestion), row.context_hash, row.knowledge_hash, timestamp(), id));
-        (await run("UPDATE model_jobs SET state='succeeded',result_json=$1,classification_reservation=0,updated_at=$2 WHERE id=$3", json(result), timestamp(), id));
+        (await run("UPDATE model_jobs SET state='succeeded',result_json=$1,classification_reservation=0,reply_reservation=0,updated_at=$2 WHERE id=$3", json(result), timestamp(), id));
         (await run("UPDATE model_jobs SET state='succeeded',result_json=$1,updated_at=$2 WHERE cache_of=$3 AND state='linked'", json(result), timestamp(), id));
         (await audit(row.user_id, 'model_job_completed', id, { operation: row.operation, knowledgeHash: row.knowledge_hash }));
         return jobValue((await get('SELECT * FROM model_jobs WHERE id=$1', id)));
@@ -678,7 +721,7 @@ export async function createPostgresStore({
       }));
     },
   };
-  const readMethods = new Set(['getCurrentKnowledgeVersion', 'getUser', 'getUserByUsername', 'listUsers', 'authenticate', 'lookupSession', 'lookupMcpToken', 'getProfile', 'getStyleLearning', 'getAppliedPersonalStyle', 'listCounterparts', 'getCounterpart', 'listMessages', 'getMeeting', 'listSuggestions', 'getSuggestion', 'getSuggestionCase', 'findSentMessage', 'latestSuccessful', 'hasModelAttempt', 'latestCoachPlan', 'listJobs', 'previousClassification', 'getFeedback', 'listFeedback', 'getKnowledgeApproval']);
+  const readMethods = new Set(['getCurrentKnowledgeVersion', 'getUser', 'getUserByUsername', 'listUsers', 'authenticate', 'lookupSession', 'lookupMcpToken', 'getProfile', 'getStyleLearning', 'getAppliedPersonalStyle', 'listCounterparts', 'getCounterpart', 'listMessages', 'getMeeting', 'listSuggestions', 'getSuggestion', 'getSuggestionCase', 'findSentMessage', 'latestSuccessful', 'latestSuccessfulForContexts', 'hasModelAttempt', 'latestCoachPlan', 'listJobs', 'previousClassification', 'getFeedback', 'listFeedback', 'getKnowledgeApproval']);
   const facade = { dataDir: null, close: async () => {} };
   for (const [name, method] of Object.entries(store)) {
     if (typeof method !== 'function' || name === 'close') continue;

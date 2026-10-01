@@ -64,12 +64,12 @@ export function createMcpServer({
   };
 
   server.registerTool('coach_classify', {
-    description: '根据双方背景和聊天记录，给出三个话题方向的建议权重与当前关系反馈；建议权重不是成功概率。',
+    description: '结合完整背景判断当前动作、着力点和热度；仅需调整话题时提供上切、下切、平移的建议权重，权重不是成功概率。',
     inputSchema: ChatInputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   }, safe((input) => coach(classifyFn, input)));
   server.registerTool('coach_reply', {
-    description: '根据聊天背景及所选方向生成简短回复与解释。',
+    description: '结合完整背景和消息批注生成当前合适的简短回复与动作指引；默认无需选择话题方向。',
     inputSchema: ReplyInputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   }, safe((input) => coach(replyFn, input)));
