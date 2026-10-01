@@ -1,5 +1,6 @@
 FROM node:26-bookworm-slim
 WORKDIR /app
+COPY LICENSE LICENSING.md ./
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 COPY src ./src

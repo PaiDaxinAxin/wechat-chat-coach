@@ -2,7 +2,7 @@
   "mcpServers": {
     "wechat-chat-coach-local-owner": {
       "command": "node",
-      "args": ["/Users/paidaxin/wechat-chat-coach/src/mcp.mjs"]
+      "args": ["/absolute/path/to/wechat-chat-coach/src/mcp.mjs"]
     }
   }
 }

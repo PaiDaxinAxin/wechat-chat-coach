@@ -1,6 +1,8 @@
 # WeChat Chat Coach
 
-Personal project owned by [PaiDaxinAxin](https://github.com/PaiDaxinAxin), maintained in a private repository.
+Personal project owned by [PaiDaxinAxin](https://github.com/PaiDaxinAxin). Code is licensed under [MIT](LICENSE); the complete knowledge and identified framework documents use [CC BY 4.0](knowledge/LICENSE.md). See [license scope](LICENSING.md) and [contributing](CONTRIBUTING.md). Personal conversations, profiles, credentials and runtime records are excluded. [Model access and reviewed improvement](docs/model-access-and-learning.md) distinguishes current capabilities from planned features.
+
+Self-hosting with your own compatible model API uses your provider account and does not charge this project. Configure `AGNES_API_KEY`, `AGNES_BASE_URL` and `AGNES_MODEL` privately; these historical environment names also accept a compatible provider other than Agnes. The provider must support the native function-result format used by this application; image support and full-context capacity are separate requirements. There is currently no per-user API-key settings page, official payment checkout, appreciation destination or central opt-in learning service. Those are planned; free/paid beta labels are not payment processing.
 
 The first stage combines the complete game framework, current and desired expression style, counterpart context and feedback to support online interaction and mutually agreed meetings. Users paste conversations, review suggestions and send messages themselves. Display-profile coaching and offline instruction are deferred.
 
@@ -20,7 +22,7 @@ The owner issues individual free or paid-beta invitations in the management view
 
 Free users have three lifetime successful classifications. Persisted context replays and direction changes do not reclassify; failed classifications do not consume those trials. After exhaustion, the user can generate a reply directly with the complete knowledge and without fabricated classifier weights. Provider attempts have separate bounded daily budgets, including failed calls.
 
-Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent storage, recovery and controlled external access. A localhost address is usable only on the owner's machine. Personal hosting uses the Leon Vercel workspace and the existing personal Supabase project. The owner preview is protected by Vercel Authentication; public signup and external access remain deferred. See [personal hosting](docs/personal-cloud-hosting.md) for the exact targets and access boundary. Never give testers the private repository, server image or knowledge file.
+Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent storage, recovery and controlled external access. A localhost address is usable only on the owner's machine. Personal hosting uses the Leon Vercel workspace and the existing personal Supabase project. The owner preview is protected by Vercel Authentication; public signup and external access remain deferred. See [personal hosting](docs/personal-cloud-hosting.md) for the exact targets and access boundary. Open-source distribution of code and knowledge does not grant access to this live owner workspace or its private data.
 
 ## Project records
 
@@ -28,6 +30,7 @@ Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent sto
 - [Complete knowledge and preserved game 3.3 source](knowledge/game-system.md)
 - [MCP access boundary](docs/mcp-architecture.md)
 - [Feedback cleaning contract](docs/feedback-data.md)
+- [Proposed open-source, model access and reviewed improvement](docs/model-access-and-learning.md)
 - [Questionnaires and provisional heat rules](docs/questionnaires.md)
 - [Beta API and account contract](docs/beta-contract.md)
 - [Requirement acceptance matrix](docs/beta-acceptance.md)
@@ -57,7 +60,7 @@ The server-controlled model receives the complete knowledge; the external MCP cl
 
 Only `coach_classify`, `coach_reply` and `feedback_submit` are available. The knowledge stays on the server and enters only the server-controlled model context. No source reader, search, resources, arbitrary files or owner-mode switch is exposed. The external client's model can organize calls; it cannot directly reason over private text it has not received.
 
-Non-local listening requires explicit `CHAT_COACH_HOST`, `CHAT_COACH_ALLOWED_HOSTS` and `CHAT_COACH_ALLOWED_ORIGINS`. `CHAT_COACH_PORT` and `CHAT_COACH_RATE_LIMIT_PER_MINUTE` configure the development listener. Do not distribute this private repository or expose the owner entry to external users.
+Non-local listening requires explicit `CHAT_COACH_HOST`, `CHAT_COACH_ALLOWED_HOSTS` and `CHAT_COACH_ALLOWED_ORIGINS`. `CHAT_COACH_PORT` and `CHAT_COACH_RATE_LIMIT_PER_MINUTE` configure the development listener. Do not expose an owner's administrative entry or private configuration to external users.
 
 This single-token development entry is retained for transport tests and local experimentation. Use the account-scoped beta server for invited testers.
 
