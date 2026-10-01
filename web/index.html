@@ -72,12 +72,13 @@
           <div id="coach-update-note" class="coach-update-note" hidden><span id="coach-update-text" role="status"></span><button id="view-coach-update" class="quiet-button" type="button" aria-controls="field-coach" hidden>查看</button></div>
         </div>
         <section id="profile-view" class="inline-card" hidden aria-labelledby="profile-title">
-          <div class="section-heading"><h2 id="profile-title">我的表达，和想练习的地方</h2><button type="button" class="quiet-button" data-close="profile-view" aria-label="收起我的画像">收起</button></div><p class="helper" id="profile-intro">当前特点与成长目标分别记录，随时可以纠正。</p>
+          <div class="section-heading"><h2 id="profile-title">我的表达，和想练习的地方</h2><button type="button" class="quiet-button" data-close="profile-view" aria-label="收起我的画像">收起</button></div><p class="helper" id="profile-intro">先填一点会更了解你，也可以边聊边补。聊天中明确提到的背景会自动整理。</p>
           <form id="profile-form">
-            <label>真实背景与生活<textarea id="profile-background" required rows="3" maxlength="20000" placeholder="工作、兴趣、生活节奏，愿意分享的真实经历"></textarea></label>
-            <label>我现在的表达风格<textarea id="profile-style" required rows="3" maxlength="10000" placeholder="写两三句你自己会说的话，也可以写不喜欢的表达"></textarea></label>
-            <label>希望练习的地方<textarea id="profile-growth" required rows="2" maxlength="10000" placeholder="如自然表达兴趣、接住玩笑、把话题带到见面"></textarea></label>
-            <label>当前关系目标<textarea id="profile-goal" required rows="2" maxlength="10000" placeholder="先认识再判断也可以"></textarea></label>
+            <div id="profile-chat-facts" class="chat-facts" hidden></div>
+            <label>真实背景与生活（可选）<textarea id="profile-background" rows="3" maxlength="20000" placeholder="工作、兴趣、生活节奏；也可以纠正聊天中整理的信息"></textarea></label>
+            <label>我现在的表达风格（可选）<textarea id="profile-style" rows="3" maxlength="10000" placeholder="写两三句你自己会说的话，也可以写不喜欢的表达"></textarea></label>
+            <label>希望练习的地方（可选）<textarea id="profile-growth" rows="2" maxlength="10000" placeholder="如自然表达兴趣、接住玩笑、把话题带到见面"></textarea></label>
+            <label>当前关系目标（可选）<textarea id="profile-goal" rows="2" maxlength="10000" placeholder="先认识再判断也可以"></textarea></label>
             <details id="style-preferences" class="style-preferences">
               <summary>我的表达偏好</summary>
               <p class="helper">记录自己喜欢怎样表达，或愿意练习什么。只有明确采用的规则才用于你的后续辅助；候选和自述评价不会自动生效。</p>
@@ -105,24 +106,26 @@
               <div id="style-rule-list"></div>
               <details id="style-review-history"><summary>我的表达评价记录</summary><div id="style-review-list"></div></details>
             </details>
-            <details class="questionnaire-details"><summary>聊天偏好问卷</summary><p class="helper">自编偏好题，不是正式人格测评。1 很不符合，5 很符合。</p><label>问卷类型<select id="questionnaire-kind"><option value="short">精简版</option><option value="full">完整版 · 付费内测</option></select></label><div id="questionnaire" class="questionnaire"></div></details>
+            <details class="questionnaire-details"><summary>聊天偏好问卷 · 可稍后填</summary><p class="helper">可以只答一部分，未答的不会替你填写。1 很不符合，5 很符合；这是自编偏好题。</p><label>问卷类型<select id="questionnaire-kind"><option value="short">精简版</option><option value="full">完整版 · 付费内测</option></select></label><div id="questionnaire" class="questionnaire"></div></details>
             <p id="profile-saved" class="helper"></p><button class="primary" type="submit">保存画像</button>
           </form>
         </section>
         <section id="counterpart-dialog" class="inline-card" hidden aria-labelledby="counterpart-dialog-title">
           <form id="counterpart-form"><div class="section-heading"><h2 id="counterpart-dialog-title">添加聊天对象</h2><button id="close-counterpart-dialog" type="button" class="quiet-button" aria-label="收起对象背景">收起</button></div>
             <p id="counterpart-channel" class="small muted" hidden></p><p id="counterpart-background" class="small muted" hidden></p>
+            <p class="helper">先填一个称呼即可。已在聊天里提到的信息会自动补充，不用再填一遍。</p>
             <label>称呼或代号<input id="intake-alias" required maxlength="80" placeholder="用你能认出的代号即可"></label>
-            <label>认识渠道<select id="intake-channel"><option value="app">交友软件</option><option value="offline">线下认识</option><option value="other">其他渠道</option></select></label>
+            <label>认识渠道<select id="intake-channel"><option value="other">暂不填写 / 其他渠道</option><option value="app">交友软件</option><option value="offline">线下认识</option></select></label>
             <label id="app-profile-field">交友软件资料<textarea id="intake-app" rows="3" maxlength="20000" placeholder="自我介绍、兴趣，以及资料里的相关信息"></textarea></label>
             <label id="offline-scene-field" hidden>线下场景与当时互动<textarea id="intake-offline" rows="3" maxlength="20000" placeholder="在哪认识、如何开场、当时的互动"></textarea></label>
-            <label>此前大约聊了多少个完整话题（轮）<input id="intake-rounds" type="number" required min="0" max="100000" step="1" value="0"></label>
-            <label>背景与目前关系<textarea id="intake-background" required rows="3" maxlength="20000" placeholder="认识多久、已知信息、期待或边界。猜测请单独说明"></textarea></label>
+            <label>此前大约聊了多少个完整话题（轮，可选）<input id="intake-rounds" type="number" min="0" max="100000" step="1" placeholder="不记得可以先空着"></label>
+            <div id="counterpart-chat-facts" class="chat-facts" hidden></div>
+            <label>其他背景或纠正（可选）<textarea id="intake-background" rows="3" maxlength="20000" placeholder="补充聊天里没提到的信息，或纠正自动整理的内容"></textarea></label>
             <div class="button-row"><button class="primary" type="submit">保存对象</button><button id="cancel-counterpart-dialog" type="button" class="quiet-button">取消</button><button id="delete-counterpart" type="button" class="quiet-button danger" hidden>删除对象</button></div>
           </form>
         </section>
         <section id="heat-panel" class="inline-card" hidden aria-labelledby="heat-title"><div class="section-heading"><h2 id="heat-title">互动依据</h2><button type="button" class="quiet-button" data-close="heat-panel">收起</button></div><p id="heat-explanation" class="helper"></p><div id="heat-dimensions" class="heat-grid"></div><p id="heat-confidence" class="small muted"></p></section>
-        <section id="meeting-panel" class="inline-card" hidden aria-labelledby="meeting-title"><div class="section-heading"><h2 id="meeting-title">见面安排</h2><button type="button" class="quiet-button" data-close="meeting-panel">收起</button></div><p id="meeting-status" class="small muted"></p><form id="meeting-form"><label>当前状态<select id="meeting-kind"><option value="none">尚无安排</option><option value="proposed">已提出邀约</option><option value="alternative">正在协商其他时间</option><option value="confirmed">双方已确认</option><option value="declined">本次邀约未接受</option></select></label><label>时间<input id="meeting-time" maxlength="500" placeholder="如周六 19:00"></label><label>地点<input id="meeting-place" maxlength="500" placeholder="具体地点或双方认可的范围"></label><label>补充记录<textarea id="meeting-note" rows="2" maxlength="2000" placeholder="实际说过的安排或待确认事项"></textarea></label><button class="primary" type="submit">保存安排</button></form></section>
+        <section id="meeting-panel" class="inline-card" hidden aria-labelledby="meeting-title"><div class="section-heading"><h2 id="meeting-title">见面安排</h2><button type="button" class="quiet-button" data-close="meeting-panel">收起</button></div><p id="meeting-status" class="small muted"></p><form id="meeting-form"><label>当前状态<select id="meeting-kind"><option value="none">尚无安排</option><option value="proposed">已提出邀约</option><option value="alternative">正在协商其他时间</option><option value="confirmed">双方已确认</option><option value="declined">本次邀约未接受</option></select></label><label>时间<input id="meeting-time" maxlength="500" placeholder="如周六 19:00"></label><label>地点<input id="meeting-place" maxlength="500" placeholder="具体地点或双方认可的范围"></label><label>补充记录<textarea id="meeting-note" rows="2" maxlength="2000" placeholder="实际说过的安排或待确认事项"></textarea></label><button class="primary" type="submit">保存修改</button></form></section>
         <section id="admin-view" class="inline-card" hidden aria-labelledby="admin-title"><div class="section-heading"><h2 id="admin-title">内测管理与反馈审阅</h2><button type="button" class="quiet-button" data-close="admin-view">收起</button></div><p class="helper">先清洗，再决定是否采用；审阅不等于训练模型参数。</p><button id="reload-admin" class="quiet-button" type="button">刷新管理记录</button><details><summary>邀请与账号权限</summary><form id="invite-form"><label>内测权限<select id="invite-plan"><option value="free">免费 · 三次方向分析</option><option value="paid">付费内测 · 完整问卷</option></select></label><button class="primary" type="submit">创建邀请码</button></form><div id="invite-result" hidden><label>邀请码<input id="generated-invite" readonly autocomplete="off"></label><button id="copy-invite" class="quiet-button" type="button">复制邀请码</button></div><div id="admin-users"></div></details><h3>反馈记录 <span id="feedback-count" class="small muted"></span></h3><div id="admin-feedback-list"></div></section>
       </div>
       <form id="message-form" class="chat-composer">

@@ -220,6 +220,7 @@ try {
       await page.locator('#add-counterpart').click(); await page.locator('#counterpart-form').waitFor({ state: 'visible' });
       await scan('counterpart-form');
       await page.locator('#intake-alias').fill(`虚构空聊-${width}-${theme}`);
+      await page.locator('#intake-channel').selectOption('app');
       await page.locator('#intake-app').fill('仅供隔离可访问性验收的虚构资料。');
       await page.locator('#intake-background').fill('尚未录入对方消息。');
       const requestsBeforeEmpty = modelRequests, callsBeforeEmpty = { ...report.mockCalls };
@@ -239,12 +240,13 @@ try {
       });
       const requestsBeforeProfileGap = modelRequests;
       await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-      await page.waitForFunction(() => document.getElementById('classification-summary').textContent.includes('我的画像'));
+      await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
       if (!await page.locator('#profile-background').isVisible()) await menuItem('[data-view=profile]');
-      assert.ok((await page.locator('#classification-summary').textContent()).includes('我的画像'));
-      assert.equal(await page.locator('#classify').isDisabled(), true); assert.equal(await page.locator('#direct-reply').isDisabled(), true);
-      await scan('profile-prerequisite');
-      assert.equal(modelRequests, requestsBeforeProfileGap, 'Missing-profile guidance never dispatches a model operation');
+      assert.equal(await page.locator('#profile-background').inputValue(), '');
+      assert.equal(await page.locator('#profile-background').evaluate((node) => node.required), false);
+      assert.equal(await page.locator('#classify').isDisabled(), false); assert.equal(await page.locator('#direct-reply').isDisabled(), false);
+      await scan('optional-profile');
+      assert.equal(modelRequests, requestsBeforeProfileGap, 'Viewing incomplete intake reuses the existing analysis');
       await page.unroute('**/api/me');
     } finally { await context.close(); }
   }

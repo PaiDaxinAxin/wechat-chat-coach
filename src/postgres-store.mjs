@@ -440,10 +440,17 @@ export async function createPostgresStore({
         return await messageValue(await get('SELECT * FROM messages WHERE id=$1', id));
       });
     },
-    async getMeeting(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); const row = (await get('SELECT * FROM meetings WHERE user_id=$1 AND counterpart_id=$2', userId, counterpartId)); return row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' }; },
+    async getMeetingState(userId, counterpartId) {
+      await counterpartRow(userId, counterpartId);
+      const row = await get('SELECT * FROM meetings WHERE user_id=$1 AND counterpart_id=$2', userId, counterpartId);
+      const { _saveReceipt = null, _atSaveMessageIds = null, ...meeting } = row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' };
+      return { meeting, updatedAt: row?.updated_at ?? null, receiptId: _saveReceipt, atSaveMessageIds: _atSaveMessageIds };
+    },
+    async getMeeting(userId, counterpartId) { return (await this.getMeetingState(userId, counterpartId)).meeting; },
     async putMeeting(userId, counterpartId, value) {
       (await counterpartRow(userId, counterpartId));
-      (await run('INSERT INTO meetings VALUES($1,$2,$3,$4) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json(value), timestamp()));
+      const atSaveMessageIds = (await all('SELECT id FROM messages WHERE user_id=$1 AND counterpart_id=$2', userId, counterpartId)).map(({ id }) => id);
+      (await run('INSERT INTO meetings VALUES($1,$2,$3,$4) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json({ ...value, _saveReceipt: randomUUID(), _atSaveMessageIds: atSaveMessageIds }), timestamp()));
       (await audit(userId, 'meeting_saved', counterpartId, { status: value.status }));
       return value;
     },
@@ -558,6 +565,11 @@ export async function createPostgresStore({
     async previousClassification(userId, counterpartId) {
       await counterpartRow(userId, counterpartId);
       const row = await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY _ordinal DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
+    async latestContextUpdates(userId, counterpartId) {
+      await counterpartRow(userId, counterpartId);
+      const row = await get("SELECT * FROM model_jobs WHERE user_id=$1 AND counterpart_id=$2 AND operation IN ('classify','reply') AND state='succeeded' AND cache_of IS NULL AND (jsonb_typeof(result_json::jsonb #> '{classification,contextUpdates}')='object' OR jsonb_typeof(result_json::jsonb #> '{suggestion,contextUpdates}')='object') ORDER BY _ordinal DESC LIMIT 1", userId, counterpartId);
       return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
     },
     async reserveJob({ userId, counterpartId, operation, requestId, contextHash, knowledgeHash, workerId, providerModel, contextSnapshot }) {
@@ -725,7 +737,7 @@ export async function createPostgresStore({
       }));
     },
   };
-  const readMethods = new Set(['getCurrentKnowledgeVersion', 'getUser', 'getUserByUsername', 'listUsers', 'authenticate', 'lookupSession', 'lookupMcpToken', 'getProfile', 'getStyleLearning', 'getAppliedPersonalStyle', 'listCounterparts', 'getCounterpart', 'listMessages', 'getMeeting', 'listSuggestions', 'getSuggestion', 'getSuggestionCase', 'findSentMessage', 'latestSuccessful', 'latestSuccessfulForContexts', 'hasModelAttempt', 'latestCoachPlan', 'listJobs', 'previousClassification', 'getFeedback', 'listFeedback', 'getKnowledgeApproval']);
+  const readMethods = new Set(['getCurrentKnowledgeVersion', 'getUser', 'getUserByUsername', 'listUsers', 'authenticate', 'lookupSession', 'lookupMcpToken', 'getProfile', 'getStyleLearning', 'getAppliedPersonalStyle', 'listCounterparts', 'getCounterpart', 'listMessages', 'getMeeting', 'getMeetingState', 'listSuggestions', 'getSuggestion', 'getSuggestionCase', 'findSentMessage', 'latestSuccessful', 'latestSuccessfulForContexts', 'hasModelAttempt', 'latestCoachPlan', 'listJobs', 'previousClassification', 'latestContextUpdates', 'getFeedback', 'listFeedback', 'getKnowledgeApproval']);
   const facade = { dataDir: null, close: async () => {} };
   for (const [name, method] of Object.entries(store)) {
     if (typeof method !== 'function' || name === 'close') continue;

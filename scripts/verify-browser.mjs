@@ -132,6 +132,8 @@ async function register(username, invite) {
   await page.locator('#invite').fill(invite);
   await page.locator('#username').fill(username); await page.locator('#password').fill('SyntheticPassword2026');
   await waitRequest('/api/register', 'POST', () => page.locator('#auth-submit').click());
+  await page.locator('#workspace').waitFor({ state: 'visible' });
+  await menuAction('[data-view=profile]');
   await page.locator('#profile-view').waitFor({ state: 'visible' });
 }
 async function verifySessionBoundaries() {
@@ -195,13 +197,14 @@ try {
   await profile('short');
   await page.locator('#add-counterpart').click();
   await page.locator('#intake-alias').fill('对象 A');
+  await page.locator('#intake-channel').selectOption('app');
   await page.locator('#intake-app').fill('资料提到设计工作、城市散步和咖啡。');
   await page.locator('#intake-background').fill('交友软件认识，聊过两轮，未见面。');
   await page.locator('#intake-rounds').fill('2');
   const created = await waitRequest('/api/counterparts', 'POST', () => page.locator('#counterpart-form button[type=submit]').click());
   const id = created.counterpart.id;
   await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  for (const [speaker, text] of [['other', '最近一直在忙工作。'], ['self', '你是做设计方面的吗？'], ['other', '对，最近在做新项目。你平时下班喜欢做什么？']]) {
+  for (const [speaker, text] of [['self', '你是做设计方面的吗？'], ['other', '最近一直在忙工作。'], ['other', '对，最近在做新项目。你平时下班喜欢做什么？']]) {
     await page.locator('#message-speaker').selectOption(speaker);
     await page.locator('#message-text').fill(text);
     await waitRequest(`/api/counterparts/${id}/${speaker === 'other' ? 'followup' : 'messages'}`, 'POST', () => page.locator('#save-message').click());

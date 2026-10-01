@@ -61,7 +61,7 @@ function classification(context) {
   const first = context.messages[0].id, interest = context.messages[240].id, agreed = context.messages[300].id;
   const unknown = { level: 'unknown', evidenceIds: [] };
   return {
-    status: 'ready', confidence: 'moderate', phase: 'ordinary',
+    status: 'ready', confidence: 'moderate', phase: 'ordinary', contextUpdates: { facts: [], meeting: null },
     workingFocus: { stage: 'security', reason: '落实已确认安排。', evidenceIds: [agreed] },
     topicDecision: { mode: 'stay', reason: '见面安排已确认，当前可以自然收尾。' },
     obstacle: { type: 'negative', evidenceIds: [first], reason: '此前拒绝私人场所的边界仍然有效。' },
@@ -75,7 +75,7 @@ function classification(context) {
     fieldCoach: { currentTopic: '见面安排后的自然收尾', topicStatus: 'closing', topicMessageIds: [agreed, context.messages.at(-1).id], initiative: '保留已确认的公共场所安排。', nextAction: '暂时留白，临近见面再确认。', warmingLayer: 'none', reason: '完整记录仍包含未撤回的边界。' },
   };
 }
-const reply = { workingFocus: { stage: 'unknown', reason: '以实际安排为准。', evidenceIds: [] }, reply: '', action: 'wait', reason: '安排已确认，可以自然结束这个话题。', styleNote: '保留简洁表达。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先不发送，保留自然留白。', reentryWhen: '临近已确认的见面时再确认。' } };
+const reply = { contextUpdates: { facts: [], meeting: null }, workingFocus: { stage: 'unknown', reason: '以实际安排为准。', evidenceIds: [] }, reply: '', action: 'wait', reason: '安排已确认，可以自然结束这个话题。', styleNote: '保留简洁表达。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先不发送，保留自然留白。', reentryWhen: '临近已确认的见面时再确认。' } };
 const plan = (context) => ({ verdict: 'suitable', reason: '公共场所见面符合之前的边界。', timingSuggestion: { status: 'wait', guidance: '临近已约好的见面时再确认。', evidenceIds: [context.messages[300].id] }, nextAction: '先按当前安排，留意新的实际变化。' });
 
 function response(value) {

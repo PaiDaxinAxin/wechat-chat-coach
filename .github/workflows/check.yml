@@ -26,6 +26,7 @@ jobs:
       - run: npm run test:topics
       - run: npm run test:recovery
       - run: npm run test:coach-updates
+      - run: npm run test:context-learning
       - run: node scripts/verify-reply-guidance.mjs
       - run: node tests/verify-image-input.mjs
       - run: git diff --check

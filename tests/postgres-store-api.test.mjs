@@ -42,12 +42,12 @@ test('two HTTP/MCP instances use Postgres ownership, tasks and atomic context co
     if (completionGate) { completionStarted.resolve(); await completionGate.promise; }
     return originalComplete(...args);
   };
-  const replyFn = async (_input, config) => {
+  const replyFn = async ({ context }, config) => {
     modelCalls++;
     assert.ok(config.knowledgeText === knowledgeText);
     providerStarted.resolve();
     await providerGate.promise;
-    return { reply: '你最近看了什么电影？', reason: '延伸当前话题。', action: 'reply', styleNote: '保持简短自然。' };
+    return { reply: '你最近看了什么电影？', reason: '延伸当前话题。', action: 'reply', styleNote: '保持简短自然。', contextUpdates: { facts: [{ subject: 'other', field: 'availability', value: '最近工作忙', evidence: [{ messageId: context.messages[0].id, quote: context.messages[0].text, source: 'text' }] }], meeting: null } };
   };
   for (const database of [store, peer]) {
     const server = await createBetaServer({ store: database, storeKnowledge: { read: async () => knowledge }, archiveKnowledge: async (snapshot) => ({ hash: snapshot.hash, bytes: snapshot.bytes, version: 'synthetic-version', archived: true }), ownsStore: false, webDir: null, providerEnv: {}, replyFn, classifyFn: async () => { throw new Error('UNEXPECTED_CLASSIFICATION'); } });
@@ -108,6 +108,18 @@ test('two HTTP/MCP instances use Postgres ownership, tasks and atomic context co
   assert.equal((await call(1, 'GET', '/knowledge/game-system.md')).status, 404);
   assert.equal((await call(1, 'POST', '/api/demo/session', {})).status, 404);
 
+  const extractionRequest = { requestId: randomUUID() };
+  const extracted = await call(1, 'POST', `/api/counterparts/${id}/reply`, extractionRequest);
+  assert.equal(extracted.status, 200); assert.equal(extracted.payload.data.backgroundContext.facts.length, 1);
+  assert.equal(modelCalls, 3);
+  const readback = await call(0, 'GET', `/api/counterparts/${id}`);
+  assert.deepEqual(readback.payload.data.backgroundContext, extracted.payload.data.backgroundContext);
+  const extractionReplay = await call(0, 'POST', `/api/counterparts/${id}/reply`, extractionRequest);
+  assert.equal(extractionReplay.payload.data.cached, true); assert.equal(modelCalls, 3);
+  assert.deepEqual(extractionReplay.payload.data.backgroundContext, extracted.payload.data.backgroundContext);
+  assert.deepEqual(await peer.getMeeting(owner.id, id), readback.payload.data.manualMeeting);
+  assert.ok(!JSON.stringify(readback.payload).includes('manualMeetingReceipt'));
+
   const { token } = await store.createMcpToken({ ownerId: owner.id, userId: owner.id });
   const mcp = async (index, message) => {
     const response = await fetch(origin(index) + '/mcp', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify(message) });
@@ -119,5 +131,5 @@ test('two HTTP/MCP instances use Postgres ownership, tasks and atomic context co
   const listed = await mcp(0, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'counterparts_list', arguments: {} } });
   assert.equal(listed.status, 200);
   assert.ok(!JSON.stringify(listed.payload).includes(knowledgeText));
-  assert.equal(modelCalls, 2);
+  assert.equal(modelCalls, 3);
 });

@@ -378,6 +378,38 @@ test('Postgres relational store preserves contracts across independent instances
     await assert.rejects(peer.latestSuccessfulForContexts(owner.id, id, 'classify', hashes), { code: 'COUNTERPART_NOT_FOUND' });
   });
 
+  await t.test('private extraction readback uses durable non-cache order and manual saves keep a stable cutoff without leaking receipts', async () => {
+    const user = await account('paid'), other = await account(), id = await context(user);
+    const message = (await store.listMessages(user.id, id))[0];
+    const extracted = { facts: [{ subject: 'other', field: 'availability', value: 'Today', evidence: [{ messageId: message.id, quote: message.text, source: 'text' }] }], meeting: null };
+    const first = await reservation(user, id, 'classify');
+    await store.markJobRunning(first.job.id);
+    await peer.completeJob(first.job.id, { classification: { contextUpdates: extracted } });
+    advance(-1_000);
+    const second = await reservation(user, id, 'reply');
+    await peer.markJobRunning(second.job.id);
+    await store.completeJob(second.job.id, { suggestion: { contextUpdates: extracted } });
+    assert.equal((await peer.latestContextUpdates(user.id, id)).id, second.job.id);
+    assert.deepEqual((await peer.latestContextUpdates(user.id, id)).contextSnapshot.modelInput.messages, (await store.listMessages(user.id, id)));
+    const legacy = await reservation(user, id, 'reply');
+    await store.markJobRunning(legacy.job.id); await peer.completeJob(legacy.job.id, { suggestion: { reply: 'Legacy reply.' } });
+    assert.equal((await store.latestContextUpdates(user.id, id)).id, second.job.id, 'A legacy reply without new output does not fabricate an extraction');
+    const cached = await peer.reserveJob({ userId: user.id, counterpartId: id, operation: 'reply', requestId: randomUUID(), contextHash: second.job.contextHash, knowledgeHash: second.job.knowledgeHash, workerId: 'test-worker', providerModel: 'fixture-model' });
+    assert.equal(cached.cached, true);
+    assert.equal((await peer.latestContextUpdates(user.id, id)).id, second.job.id);
+    const none = { status: 'none', time: '', place: '', note: '' };
+    await store.putMeeting(user.id, id, none);
+    const initial = await peer.getMeetingState(user.id, id);
+    await peer.putMeeting(user.id, id, none);
+    const again = await store.getMeetingState(user.id, id);
+    assert.equal(initial.updatedAt, again.updatedAt); assert.notEqual(initial.receiptId, again.receiptId);
+    assert.deepEqual(again.atSaveMessageIds, [message.id]);
+    assert.deepEqual(await peer.getMeeting(user.id, id), none);
+    assert.ok(!(await peer.listJobs(user.id, id)).some((job) => 'contextSnapshot' in job));
+    await assert.rejects(peer.latestContextUpdates(other.id, id), { code: 'COUNTERPART_NOT_FOUND' });
+    await assert.rejects(peer.getMeetingState(other.id, id), { code: 'COUNTERPART_NOT_FOUND' });
+  });
+
   await t.test('feedback cleaning, deduplication and owner approval remain traceable and isolated', async () => {
     const user = await account(), id = await context(user), suggestion = await suggested(user, id);
     await store.putMessage(user.id, id, { speaker: 'self', text: suggestion.reply, suggestionId: suggestion.id });

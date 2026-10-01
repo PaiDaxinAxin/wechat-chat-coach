@@ -269,7 +269,7 @@ try {
   assert.equal(classifications, 3); assert.equal(replies, 1); assert.deepEqual(pageErrors, []);
   // A completed request for another object cannot clear this object's draft or loading state.
   await page.locator('#add-counterpart').click();
-  await page.locator('#intake-alias').fill('虚构对象 B'); await page.locator('#intake-app').fill('虚构资料，喜欢电影。');
+  await page.locator('#intake-alias').fill('虚构对象 B'); await page.locator('#intake-channel').selectOption('app'); await page.locator('#intake-app').fill('虚构资料，喜欢电影。');
   await page.locator('#intake-background').fill('虚构跨对象并发验收。');
   const second = await response('/api/counterparts', 'POST', () => page.locator('#counterpart-form button[type=submit]').click());
   const secondId = second.counterpart.id;

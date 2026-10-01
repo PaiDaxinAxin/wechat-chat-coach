@@ -77,29 +77,26 @@ const QuestionnaireSchema = z.strictObject({
   answers: z.record(z.string(), z.number().int().min(1).max(5)),
 }).superRefine(({ kind, answers }, context) => {
   const expected = new Set(QUESTIONNAIRES[kind].map(({ id }) => id));
-  if (Object.keys(answers).length !== expected.size || Object.keys(answers).some((id) => !expected.has(id)) || [...expected].some((id) => !Object.hasOwn(answers, id))) {
-    context.addIssue({ code: 'custom', path: ['answers'], message: 'Answer every item from the selected questionnaire, without extra items.' });
+  if (Object.keys(answers).some((id) => !expected.has(id))) {
+    context.addIssue({ code: 'custom', path: ['answers'], message: 'Answer only items from the selected questionnaire.' });
   }
 });
 
 export const ProfileInputSchema = z.strictObject({
-  background: requiredText(),
-  style: requiredText(10_000),
-  growthGoals: requiredText(10_000),
-  relationshipGoal: requiredText(10_000),
-  questionnaire: QuestionnaireSchema,
+  background: text().default(''),
+  style: text(10_000).default(''),
+  growthGoals: text(10_000).default(''),
+  relationshipGoal: text(10_000).default(''),
+  questionnaire: QuestionnaireSchema.nullable().default(null),
 });
 
 export const CounterpartInputSchema = z.strictObject({
   alias: requiredText(80),
-  channel: z.enum(['app', 'offline', 'other']),
+  channel: z.enum(['app', 'offline', 'other']).default('other'),
   appProfile: text().default(''),
   offlineScene: text().default(''),
   background: text().default(''),
-  rounds: z.number().int().min(0).max(100_000),
-}).superRefine((value, context) => {
-  if (value.channel === 'app' && !value.appProfile) context.addIssue({ code: 'custom', path: ['appProfile'], message: 'An app introduction is required for this channel.' });
-  if (value.channel === 'offline' && !value.offlineScene) context.addIssue({ code: 'custom', path: ['offlineScene'], message: 'An offline scene is required for this channel.' });
+  rounds: z.number().int().min(0).max(100_000).nullable().default(null),
 });
 
 export const MeetingInputSchema = z.strictObject({
@@ -138,17 +135,19 @@ function parse(schema, value, code) {
 
 export function validateProfile(input, plan = 'free') {
   const profile = parse(ProfileInputSchema, input, 'INVALID_PROFILE');
-  if (profile.questionnaire.kind === 'full' && plan !== 'paid') throw new DomainError('FULL_QUESTIONNAIRE_PAID_ONLY');
+  if (profile.questionnaire?.kind === 'full' && plan !== 'paid') throw new DomainError('FULL_QUESTIONNAIRE_PAID_ONLY');
   return { ...profile, questionnaireVersion: QUESTIONNAIRE_VERSION, questionnaireHypotheses: analyzeQuestionnaire(profile.questionnaire) };
 }
 
 export function analyzeQuestionnaire(questionnaire) {
+  if (questionnaire === undefined || questionnaire === null) return null;
   const { kind, answers } = parse(QuestionnaireSchema, questionnaire, 'INVALID_QUESTIONNAIRE');
+  if (Object.keys(answers).length === 0) return null;
   const dimensions = Object.fromEntries(QUESTION_GROUPS.map(([dimension, label]) => {
-    const items = QUESTIONNAIRES[kind].filter((item) => item.dimension === dimension);
+    const items = QUESTIONNAIRES[kind].filter((item) => item.dimension === dimension && Object.hasOwn(answers, item.id));
     const values = items.map((item) => item.reverse ? 6 - answers[item.id] : answers[item.id]);
-    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-    return [dimension, { label, mean: Math.round(mean * 100) / 100, itemCount: items.length, basis: 'self_report', status: 'hypothesis' }];
+    const mean = values.length ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length * 100) / 100 : null;
+    return [dimension, { label, mean, itemCount: items.length, basis: 'self_report', status: items.length ? 'hypothesis' : 'unknown' }];
   }));
   return { version: QUESTIONNAIRE_VERSION, kind, dimensions, interpretation: 'Custom self-reported chat preferences; provisional hypotheses, not a validated personality test or an official type.' };
 }
@@ -156,25 +155,31 @@ export function analyzeQuestionnaire(questionnaire) {
 const StoredProfileSchema = ProfileInputSchema.extend({ questionnaireVersion: z.string().optional(), questionnaireHypotheses: z.unknown().optional() });
 const StoredCounterpartSchema = CounterpartInputSchema.extend({ id: z.string().optional(), updatedAt: z.string().optional(), createdAt: z.string().optional() });
 const MessageSchema = ChatMessageSchema.strip().extend({ id: requiredText(128), text: requiredText(20_000) });
+const ManualMeetingBoundarySchema = z.strictObject({
+  source: z.literal('user_recorded_meeting'),
+  messageIdsAtSave: z.array(requiredText(128)).refine((ids) => new Set(ids).size === ids.length).nullable(),
+});
 
-export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting, personalStyle, topicChangeRequested } = {}) {
-  const profile = parse(StoredProfileSchema, profileInput, 'PROFILE_REQUIRED');
+export function buildChatContext(profileInput, counterpartInput, messageInput, { intent, meeting, manualMeetingBoundary, personalStyle, topicChangeRequested } = {}) {
+  const profile = parse(StoredProfileSchema, profileInput ?? {}, 'PROFILE_REQUIRED');
   const counterpart = parse(StoredCounterpartSchema, counterpartInput, 'INVALID_COUNTERPART');
   const messages = parse(z.array(MessageSchema), messageInput, 'INVALID_MESSAGES');
   if (new Set(messages.map(({ id }) => id)).size !== messages.length) throw new DomainError('INVALID_MESSAGES');
   if (topicChangeRequested !== undefined && typeof topicChangeRequested !== 'boolean') throw new DomainError('INVALID_TOPIC_REQUEST');
+  const meetingBoundary = manualMeetingBoundary === undefined ? undefined : parse(ManualMeetingBoundarySchema, manualMeetingBoundary, 'INVALID_MEETING_BOUNDARY');
+  if (meetingBoundary && meeting === undefined) throw new DomainError('INVALID_MEETING_BOUNDARY');
   const personalContext = {
     background: profile.background,
     currentStyle: profile.style,
     growthGoals: profile.growthGoals,
     relationshipGoal: profile.relationshipGoal,
-    questionnaire: {
+    questionnaire: profile.questionnaire ? {
       version: QUESTIONNAIRE_VERSION,
       kind: profile.questionnaire.kind,
-      answers: QUESTIONNAIRES[profile.questionnaire.kind].map((item) => ({ ...item, answer: profile.questionnaire.answers[item.id] })),
-    },
+      answers: QUESTIONNAIRES[profile.questionnaire.kind].filter((item) => Object.hasOwn(profile.questionnaire.answers, item.id)).map((item) => ({ ...item, answer: profile.questionnaire.answers[item.id] })),
+    } : null,
     questionnaireHypotheses: analyzeQuestionnaire(profile.questionnaire),
-    interpretationRule: 'Keep real background, current expression and learning goals separate. Questionnaire summaries are self-report hypotheses; prefer actual conversation evidence. Do not fabricate identity or experiences. One round is one complete topic, not one message. By default proactively attempt one mild A warming per complete topic, then adapt to feedback; 10–20 messages is only a topic check-in reference. A is a shallow sincere evaluation or definition, B the male-to-female romantic frame, and C a clear private or intimate implication; comfort and positive interaction are prerequisites for C rather than its definition. Unknown does not justify C; respect explicit refusals.',
+    interpretationRule: 'Keep real background, current expression and learning goals separate. Missing background, style, goals and questionnaire answers are unknown; do not infer personality from blank fields or impute neutral answers. Questionnaire summaries are self-report hypotheses based only on answered items; prefer actual conversation evidence. Do not fabricate identity or experiences. One round is one complete topic, not one message. By default proactively attempt one mild A warming per complete topic, then adapt to feedback; 10–20 messages is only a topic check-in reference. A is a shallow sincere evaluation or definition, B the male-to-female romantic frame, and C a clear private or intimate implication; comfort and positive interaction are prerequisites for C rather than its definition. Unknown does not justify C; respect explicit refusals.',
     relationshipInterpretation: 'This coaching concerns voluntary intimacy between adults; the current product stage is online interaction toward a mutually agreed offline meeting. Sexual attraction, trust and willingness to pursue a romantic relationship are separate questions with separate evidence, not interchangeable scores. Heat, flirting, a meeting or past intimacy is not consent to another act, and sex does not guarantee a romantic relationship.',
   };
   if (personalStyle !== undefined) {
@@ -186,6 +191,10 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
     counterpartProfile: JSON.stringify({
       alias: counterpart.alias, channel: counterpart.channel, appProfile: counterpart.appProfile, offlineScene: counterpart.offlineScene, background: counterpart.background, previousRounds: counterpart.rounds,
       ...(meeting === undefined ? {} : { meeting: parse(MeetingInputSchema, meeting, 'INVALID_MEETING') }),
+      ...(meetingBoundary === undefined ? {} : {
+        manualMeetingBoundary: meetingBoundary,
+        manualMeetingRule: 'The meeting fields are a user-recorded arrangement or cancellation. Messages listed in messageIdsAtSave predate that save and cannot overwrite it. Only new conversation evidence after this boundary may update the arrangement. If messageIdsAtSave is null, the save boundary is unknown; do not treat existing chat as newer evidence. A recorded arrangement is not consent to intimacy and does not erase expressed personal boundaries.',
+      }),
       recordedContext: { scope: 'all_supplied_messages_in_recorded_order', messageCount: messages.length, firstMessageId: messages[0]?.id ?? null, lastMessageId: messages.at(-1)?.id ?? null, completeWechatHistoryVerified: false, missingBackground: counterpart.background ? [] : ['relationship_background'] },
       interpretationRule: 'Assess both full profiles, how the pair met and all supplied messages together. Revisit earlier approaches, the counterpart response, subsequent handling, boundaries and later changes across complete topics. Distinguish an observed change from contradictory or missing evidence. Recent text does not erase earlier relevant evidence; a single laugh or emoji cannot establish a global decline. Do not assume that unsupplied messages or unrecorded warming attempts occurred. Timing sources remain estimates or user reports; compare the known pattern without treating a lone delay as the relationship state.',
       unknownsRule: 'Absent information is unknown, not zero interest or refusal. A recorded meeting is user reported; respect its current state and do not repeat a confirmed invitation.',

@@ -741,3 +741,212 @@ test('a latest pause cannot resurrect an earlier high range with tied or regress
     assert.equal(sparse.data.heat.preliminaryRange.basis, 'observed_dimensions');
   }
 });
+
+const contextFact = (message, field, value, subject = message.speaker, source = 'text') => ({ subject, field, value, evidence: [{ messageId: message.id, quote: source === 'annotation' ? message.annotation.text : message.text, source }] });
+
+test('automatic background readback works without manual profiles, replays without extra calls and remains account scoped through MCP', async (t) => {
+  let calls = 0, received, receivedKnowledge;
+  const updates = (context) => ({ facts: [contextFact(context.messages[0], 'location', '杭州')], meeting: null });
+  const f = await fixture(t, { classifyFn: async (context, options) => { calls++; received = context; receivedKnowledge = options.knowledgeText; return { ...classification(context), contextUpdates: updates(context) }; }, replyFn: async ({ context }, options) => { calls++; received = context; receivedKnowledge = options.knowledgeText; return { ...reply(), contextUpdates: updates(context) }; } });
+  const user = await f.register('backgroundAutoUser'), outsider = await f.register('backgroundOtherUser');
+  const created = await user.call('POST', '/api/counterparts', { alias: '只有姓名的对象' });
+  assert.equal(created.status, 200);
+  const id = created.data.counterpart.id, path = `/api/counterparts/${id}`;
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '我在杭州做设计。' });
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '周末常去跑步。' });
+  const first = await user.call('POST', `${path}/classify`, { requestId: 'context_updates_first' });
+  assert.equal(first.status, 200);
+  assert.equal(JSON.parse(received.userProfile).questionnaire, null);
+  assert.equal(JSON.parse(received.userProfile).background, '');
+  assert.equal(receivedKnowledge, f.knowledgeText);
+  assert.equal(first.data.backgroundContext.facts[0].value, '杭州');
+  assert.deepEqual(first.data.meeting, first.data.manualMeeting);
+  assert.equal(f.server.betaStore.getProfile(user.user.id), null, 'A projection never manufactures a stored profile');
+  assert.equal(f.server.betaStore.getCounterpart(user.user.id, id).background, '');
+  const replay = await user.call('POST', `${path}/classify`, { requestId: 'context_updates_replay' });
+  assert.equal(replay.data.cached, true); assert.equal(calls, 1);
+  assert.deepEqual(replay.data.backgroundContext, first.data.backgroundContext);
+  assert.equal((await outsider.call('GET', path)).status, 404);
+  assert.throws(() => f.server.betaStore.latestContextUpdates(outsider.user.id, id), { code: 'COUNTERPART_NOT_FOUND' });
+  const mcp = createAccountMcpServer({ accountId: user.user.id, invoke: f.server.invokeForAccount });
+  const client = new Client({ name: 'context-updates-account-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair(); await mcp.connect(b); await client.connect(a);
+  t.after(async () => { await client.close(); await mcp.close(); });
+  const mcpReadback = await client.callTool({ name: 'coach_classify', arguments: { counterpartId: id, requestId: 'context_updates_mcp' } });
+  assert.deepEqual(JSON.parse(mcpReadback.content[0].text).backgroundContext, first.data.backgroundContext);
+  assert.equal(calls, 1);
+  // Exhaust only the separate lifetime classification trials. Free direct reply
+  // still uses the same complete raw input and validates the same extraction.
+  const db = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
+  try { db.prepare('UPDATE users SET classification_used=3 WHERE id=?').run(user.user.id); }
+  finally { db.close(); }
+  const direct = await user.call('POST', `${path}/reply`, { requestId: 'context_updates_free_reply' });
+  assert.equal(direct.status, 200); assert.equal(calls, 2);
+  assert.equal(direct.data.quota.classificationRemaining, 0);
+  assert.equal(direct.data.quota.dailyReplyRemaining, 2);
+  assert.deepEqual(direct.data.backgroundContext, first.data.backgroundContext);
+  assert.equal(received.messages.length, 2);
+  assert.ok(!JSON.stringify(received).includes('contextUpdates'), 'Derived facts do not feed back into hashes or model input');
+  assert.equal(f.server.betaStore.latestContextUpdates(user.user.id, id).operation, 'reply');
+  const detail = (await user.call('GET', path)).data;
+  assert.deepEqual(detail.backgroundContext, direct.data.backgroundContext);
+  assert.ok(!JSON.stringify(detail).includes('manualMeetingReceipt'));
+});
+
+test('automatic facts survive appended messages, invalidate on corrected evidence, and rebuild only from new successful analysis', async (t) => {
+  let calls = 0;
+  const f = await fixture(t, { paidProviderDailyLimit: 100, classifyFn: async (context) => { calls++; return { ...classification(context), contextUpdates: { facts: [contextFact(context.messages[0], 'work', '设计')], meeting: null } }; } });
+  const user = await f.register('contextEvidenceUser', 'paid'), id = await f.addContext(user), path = `/api/counterparts/${id}`;
+  const message = f.server.betaStore.listMessages(user.user.id, id)[0];
+  await user.call('PUT', `${path}/messages/${message.id}`, { speaker: 'other', text: '我做设计。' });
+  const analyze = (requestId) => user.call('POST', `${path}/classify`, { requestId });
+  assert.equal((await analyze('context_evidence_first')).status, 200);
+  const original = structuredClone(f.server.betaStore.latestContextUpdates(user.user.id, id));
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '今天下班去跑步。' });
+  assert.equal((await user.call('GET', path)).data.backgroundContext.facts.length, 1);
+  assert.equal(calls, 1);
+  for (const [index, update] of [
+    () => user.call('PATCH', `${path}/messages/${message.id}/annotation`, { annotationText: '实际只是以前做设计。' }),
+    () => user.call('PATCH', `${path}/messages/${message.id}/annotation`, { annotationText: '' }),
+    () => user.call('PUT', `${path}/messages/${message.id}`, { speaker: 'other', text: '我做设计，不过工作内容变了。' }),
+  ].entries()) {
+    assert.equal((await update()).status, 200);
+    assert.deepEqual((await user.call('GET', path)).data.backgroundContext.facts, []);
+    assert.equal((await analyze(`context_evidence_new_${index}`)).status, 200);
+    assert.equal((await user.call('GET', path)).data.backgroundContext.facts.length, 1);
+  }
+  assert.deepEqual(f.server.betaStore.listJobs(user.user.id, id).find(({ id: jobId }) => jobId === original.id).result, original.result);
+  assert.ok(!f.server.betaStore.listJobs(user.user.id, id).some((job) => 'contextSnapshot' in job));
+  assert.equal((await user.call('DELETE', `${path}/messages/${message.id}`)).status, 200);
+  assert.deepEqual((await user.call('GET', path)).data.backgroundContext.facts, []);
+  assert.equal(calls, 4, 'Editing/readback itself performs no extraction request');
+});
+
+test('injected extraction output must cite actual records, and inferred drafts never become profile facts', async (t) => {
+  let calls = 0, useDraft = false;
+  const f = await fixture(t, { classifyFn: async (context) => { calls++; return { ...classification(context), contextUpdates: { facts: useDraft ? [contextFact(context.messages.find(({ provenance }) => provenance === 'inferred_from_followup'), 'work', '医生')] : [{ subject: 'other', field: 'work', value: '医生', evidence: [{ messageId: 'nonexistent-message', quote: '我是医生', source: 'text' }] }], meeting: null } }; } });
+  const user = await f.register('invalidExtractionUser'), id = await f.addContext(user), path = `/api/counterparts/${id}`;
+  const invalid = await user.call('POST', `${path}/classify`, { requestId: 'invalid_context_quote' });
+  assert.equal(invalid.status, 502); assert.equal(invalid.error.code, 'INVALID_MODEL_OUTPUT');
+  const auditDb = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
+  try {
+    const diagnostics = auditDb.prepare("SELECT details_json FROM audit_log WHERE action='model_job_failed' ORDER BY rowid DESC LIMIT 1").get();
+    assert.ok(diagnostics.details_json.includes('invalid_context_evidence_reference'));
+    assert.ok(!diagnostics.details_json.includes('nonexistent-message'));
+    assert.ok(!diagnostics.details_json.includes('医生'));
+  } finally { auditDb.close(); }
+  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 3);
+  const invalidReplay = await user.call('POST', `${path}/classify`, { requestId: 'invalid_context_quote' });
+  assert.equal(invalidReplay.status, 409); assert.equal(calls, 1);
+  const suggestion = (await user.call('POST', `${path}/reply`, { requestId: 'draft_context_source' })).data.suggestion;
+  const followup = await user.call('POST', `${path}/followup`, { requestId: 'draft_context_followup', text: '你今天忙吗？', previousSuggestionId: suggestion.id, previousReplyText: '我是医生。' });
+  assert.equal(followup.data.previousMessage.provenance, 'inferred_from_followup');
+  useDraft = true;
+  const inferred = await user.call('POST', `${path}/classify`, { requestId: 'invalid_inferred_fact' });
+  assert.equal(inferred.status, 502); assert.equal(inferred.error.code, 'INVALID_MODEL_OUTPUT');
+  assert.deepEqual((await user.call('GET', path)).data.backgroundContext.facts, []);
+  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 3);
+  assert.equal(f.server.betaStore.latestContextUpdates(user.user.id, id), null);
+});
+
+test('manual meeting cancellation wins through same-clock saves and reversals until new chat evidence updates it', async (t) => {
+  let clock = Date.parse('2026-10-01T10:00:00Z'), useLatest = false, calls = 0;
+  const f = await fixture(t, { now: () => clock, paidProviderDailyLimit: 100, classifyFn: async (context) => {
+    calls++; const proposal = useLatest ? context.messages.at(-1) : context.messages[0];
+    return { ...classification(context), contextUpdates: { facts: [], meeting: { status: 'proposed', time: '周六下午', place: '公园', note: '', evidence: [{ messageId: proposal.id, quote: proposal.text, source: 'text' }] } } };
+  } });
+  const user = await f.register('manualMeetingPriority', 'paid'), id = await f.addContext(user), path = `/api/counterparts/${id}`;
+  const message = f.server.betaStore.listMessages(user.user.id, id)[0];
+  await user.call('PUT', `${path}/messages/${message.id}`, { speaker: 'other', text: '周六下午在公园见面怎么样？' });
+  const first = await user.call('POST', `${path}/classify`, { requestId: 'automatic_meeting_first' });
+  assert.equal(first.status, 200); assert.equal(first.data.meeting.status, 'proposed');
+  assert.equal(first.data.manualMeeting.status, 'none');
+  const manualNone = { status: 'none', time: '', place: '', note: '' };
+  await user.call('PUT', `${path}/meeting`, manualNone);
+  assert.equal((await user.call('GET', path)).data.meeting.status, 'none', 'An explicit same-value save revokes the previous automatic proposal');
+  const originalReceipt = f.server.betaStore.getMeetingState(user.user.id, id).receiptId;
+  const oldEvidence = await user.call('POST', `${path}/classify`, { requestId: 'manual_boundary_reanalyze' });
+  assert.equal(oldEvidence.status, 200); assert.equal(oldEvidence.data.meeting.status, 'none');
+  assert.equal(oldEvidence.data.backgroundContext.meetingSource, 'manual');
+  clock -= 5_000;
+  await user.call('PUT', `${path}/meeting`, manualNone);
+  assert.notEqual(f.server.betaStore.getMeetingState(user.user.id, id).receiptId, originalReceipt);
+  assert.equal((await user.call('GET', path)).data.meeting.status, 'none');
+  const modelInput = f.server.betaStore.latestContextUpdates(user.user.id, id).contextSnapshot.modelInput;
+  assert.deepEqual(JSON.parse(modelInput.counterpartProfile).manualMeetingBoundary.messageIdsAtSave, f.server.betaStore.listMessages(user.user.id, id).map(({ id }) => id));
+  useLatest = true;
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '那改成周六下午在公园见面怎么样？' });
+  const later = await user.call('POST', `${path}/classify`, { requestId: 'manual_boundary_new_chat' });
+  assert.equal(later.status, 200); assert.equal(later.data.meeting.status, 'proposed');
+  assert.equal(later.data.manualMeeting.status, 'none');
+  assert.equal(later.data.backgroundContext.meetingSource, 'chat_evidence');
+  assert.deepEqual(f.server.betaStore.getMeeting(user.user.id, id), manualNone);
+  assert.ok(!JSON.stringify((await user.call('GET', path)).data).includes('_saveReceipt'));
+  assert.equal(calls, 3);
+});
+
+test('full-profile downgrade hides automatic projections while preserving raw readback and blocking paid context generation', async (t) => {
+  let calls = 0;
+  const f = await fixture(t, { classifyFn: async (context) => { calls++; return { ...classification(context), contextUpdates: { facts: [contextFact(context.messages[0], 'availability', '近期工作忙')], meeting: null } }; } });
+  const user = await f.register('contextDowngradeUser', 'paid'), id = await f.addContext(user, '完整版对象', { kind: 'full' }), path = `/api/counterparts/${id}`;
+  assert.equal((await user.call('POST', `${path}/classify`, { requestId: 'downgrade_extract_first' })).status, 200);
+  f.server.betaStore.updatePlan({ ownerId: f.owner.id, userId: user.user.id, plan: 'free' });
+  const detail = await user.call('GET', path);
+  assert.equal(detail.status, 200); assert.deepEqual(detail.data.backgroundContext.facts, []);
+  assert.equal(detail.data.messages.length, 2); assert.deepEqual(detail.data.meeting, detail.data.manualMeeting);
+  const rejected = await user.call('POST', `${path}/reply`, { requestId: 'downgrade_extract_block' });
+  assert.equal(rejected.status, 403); assert.equal(rejected.error.code, 'FULL_PROFILE_REQUIRES_UPDATE');
+  assert.equal(calls, 1);
+});
+
+test('a same-value manual meeting save during a call fences the immutable result despite identical clocks and model input', async (t) => {
+  const clock = Date.parse('2026-10-01T10:00:00Z');
+  let release, started;
+  const gate = new Promise((resolve) => { release = resolve; }), ready = new Promise((resolve) => { started = resolve; });
+  t.after(() => release());
+  const f = await fixture(t, { now: () => clock, classifyFn: async (context) => { started(); await gate; return { ...classification(context), contextUpdates: { facts: [contextFact(context.messages[0], 'availability', '近期工作忙')], meeting: null } }; } });
+  const user = await f.register('contextMeetingFence'), id = await f.addContext(user), path = `/api/counterparts/${id}`;
+  const none = { status: 'none', time: '', place: '', note: '' };
+  await user.call('PUT', `${path}/meeting`, none);
+  const prior = f.server.betaStore.getMeetingState(user.user.id, id);
+  const pending = user.call('POST', `${path}/classify`, { requestId: 'meeting_identical_clock' });
+  await ready;
+  await user.call('PUT', `${path}/meeting`, none);
+  const current = f.server.betaStore.getMeetingState(user.user.id, id);
+  assert.deepEqual(prior.meeting, current.meeting); assert.equal(prior.updatedAt, current.updatedAt);
+  assert.deepEqual(prior.atSaveMessageIds, current.atSaveMessageIds); assert.notEqual(prior.receiptId, current.receiptId);
+  release();
+  const failed = await pending;
+  assert.equal(failed.status, 409); assert.equal(failed.error.code, 'CONTEXT_CHANGED');
+  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 3);
+  assert.equal(f.server.betaStore.quota(user.user.id).providerRemaining, 9);
+  assert.equal(f.server.betaStore.latestContextUpdates(user.user.id, id), null);
+  assert.deepEqual((await user.call('GET', path)).data.backgroundContext.facts, []);
+});
+
+test('old agreement plus an unrelated new quote cannot resurrect a manually cancelled meeting', async (t) => {
+  let citeUnrelated = false, calls = 0;
+  const f = await fixture(t, { classifyFn: async (context) => {
+    calls++;
+    const evidence = context.messages.slice(0, 2).map((message) => ({ messageId: message.id, quote: message.text, source: 'text' }));
+    if (citeUnrelated) evidence.push({ messageId: context.messages.at(-1).id, quote: context.messages.at(-1).text, source: 'text' });
+    return { ...classification(context), contextUpdates: { facts: [], meeting: { status: 'confirmed', time: '周六下午两点', place: '公园北门', note: '', evidence } } };
+  } });
+  const user = await f.register('meetingBoundaryNoBypass', 'paid');
+  const id = (await user.call('POST', '/api/counterparts', { alias: '边界案例对象' })).data.counterpart.id, path = `/api/counterparts/${id}`;
+  await user.call('POST', `${path}/messages`, { speaker: 'self', text: '周六下午两点在公园北门见面，怎么样？' });
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '好，就这么定，周六下午两点在公园北门见面。' });
+  const original = await user.call('POST', `${path}/classify`, { requestId: 'boundary_original_agreement' });
+  assert.equal(original.status, 200); assert.equal(original.data.meeting.status, 'confirmed');
+  const manual = { status: 'none', time: '', place: '', note: '' };
+  await user.call('PUT', `${path}/meeting`, manual);
+  await user.call('POST', `${path}/messages`, { speaker: 'other', text: '最近忙工作。' });
+  citeUnrelated = true;
+  const updated = await user.call('POST', `${path}/classify`, { requestId: 'boundary_unrelated_new_quote' });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.data.classification.contextUpdates.meeting, null);
+  assert.deepEqual(updated.data.meeting, manual);
+  assert.equal(updated.data.backgroundContext.meetingSource, 'manual');
+  assert.deepEqual((await user.call('GET', path)).data.meeting, manual);
+  assert.equal(calls, 2);
+});

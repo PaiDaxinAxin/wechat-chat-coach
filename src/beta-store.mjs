@@ -530,12 +530,21 @@ export function createBetaStore({
         return messageValue(get('SELECT * FROM messages WHERE id=?', id));
       });
     },
-    getMeeting(userId, counterpartId) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM meetings WHERE user_id=? AND counterpart_id=?', userId, counterpartId); return row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' }; },
+    getMeetingState(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get('SELECT * FROM meetings WHERE user_id=? AND counterpart_id=?', userId, counterpartId);
+      const { _saveReceipt = null, _atSaveMessageIds = null, ...meeting } = row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' };
+      return { meeting, updatedAt: row?.updated_at ?? null, receiptId: _saveReceipt, atSaveMessageIds: _atSaveMessageIds };
+    },
+    getMeeting(userId, counterpartId) { return this.getMeetingState(userId, counterpartId).meeting; },
     putMeeting(userId, counterpartId, value) {
       counterpartRow(userId, counterpartId);
-      run('INSERT INTO meetings VALUES(?,?,?,?) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json(value), timestamp());
-      audit(userId, 'meeting_saved', counterpartId, { status: value.status });
-      return value;
+      return transaction(() => {
+        const atSaveMessageIds = all('SELECT id FROM messages WHERE user_id=? AND counterpart_id=?', userId, counterpartId).map(({ id }) => id);
+        run('INSERT INTO meetings VALUES(?,?,?,?) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json({ ...value, _saveReceipt: randomUUID(), _atSaveMessageIds: atSaveMessageIds }), timestamp());
+        audit(userId, 'meeting_saved', counterpartId, { status: value.status });
+        return value;
+      });
     },
     listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY rowid', userId, counterpartId).map(suggestionValue); },
     getSuggestion(userId, counterpartId, id) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return suggestionValue(row); },
@@ -648,6 +657,11 @@ export function createBetaStore({
     previousClassification(userId, counterpartId) {
       counterpartRow(userId, counterpartId);
       const row = get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY rowid DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
+    latestContextUpdates(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation IN ('classify','reply') AND state='succeeded' AND cache_of IS NULL AND (json_type(result_json,'$.classification.contextUpdates')='object' OR json_type(result_json,'$.suggestion.contextUpdates')='object') ORDER BY rowid DESC LIMIT 1", userId, counterpartId);
       return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
     },
     reserveJob({ userId, counterpartId, operation, requestId, contextHash, knowledgeHash, workerId, providerModel, contextSnapshot }) {

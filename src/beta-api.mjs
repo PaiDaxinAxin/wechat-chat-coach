@@ -10,6 +10,7 @@ import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './kno
 import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs';
 import { StyleLearningInputSchema } from './style-learning.mjs';
 import { generateFieldCoachPlan } from './field-coach.mjs';
+import { validateContextUpdates } from './context-updates.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import { interpretChatImage, validateChatImage, guardImageBytes, validateImageInterpretation, IMAGE_BODY_LIMIT, IMAGE_INPUT_VERSION } from './image-input.mjs';
 import {
@@ -80,6 +81,7 @@ function parse(schema, value, code = 'INPUT_INVALID') {
 }
 function normalizedError(error) {
   if (error instanceof BetaError) return error;
+  if (error?.code === 'INVALID_CONTEXT_UPDATES') return new BetaError('INVALID_MODEL_OUTPUT', 502);
   const known = new Set([
     'FULL_QUESTIONNAIRE_PAID_ONLY', 'INVALID_PROFILE', 'INVALID_COUNTERPART', 'INVALID_MEETING', 'INVALID_MESSAGES',
     'PROFILE_REQUIRED', 'INVALID_INTENT', 'INVALID_TOPIC_REQUEST', 'INVALID_FEEDBACK', 'INVALID_FEEDBACK_REVIEW', 'FEEDBACK_NOT_CLEANED',
@@ -100,15 +102,19 @@ const DIAGNOSTIC_CODES = new Set([
   'private_knowledge_excerpt', 'unknown_topic_with_evidence', 'unknown_topic_with_asserted_label', 'observed_topic_without_evidence', 'refusal_with_warming', 'unsupported_private_warming',
   'unknown_timing_with_evidence', 'unknown_timing_with_precision', 'missing_context_with_asserted_timing', 'adjusted_plan_required', 'unexpected_adjusted_plan',
   'stay_with_topic_options', 'unknown_focus_with_evidence', 'observed_focus_without_evidence',
+  'invalid_context_updates', 'duplicate_context_evidence', 'invalid_context_evidence_reference', 'invalid_context_quote', 'speculative_annotation_fact', 'invalid_context_records', 'duplicate_context_message_ids', 'nonliteral_text_is_not_evidence',
+  'duplicate_context_fact_field', 'inferred_draft_is_not_fact', 'context_subject_speaker_mismatch', 'meeting_history_subject_mismatch', 'unsupported_meeting_anchor',
+  'confirmed_meeting_requires_time_and_place', 'confirmed_meeting_requires_both_speakers', 'confirmed_meeting_requires_self_arrangement', 'confirmed_meeting_requires_explicit_other_agreement',
 ]);
 const DIAGNOSTIC_FIELDS = new Set([
   'status', 'confidence', 'phase', 'obstacle', 'type', 'evidenceIds', 'reason', 'heat', 'activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough', 'level',
   'options', 'topicMove', 'relationAction', 'weight', 'uncertainties', 'recommendationKind', 'fieldCoach', 'currentTopic', 'topicStatus', 'topicMessageIds', 'initiative', 'nextAction', 'pitfall', 'warmingLayer',
   'reply', 'action', 'styleNote', 'verdict', 'timingSuggestion', 'guidance', 'adjustedPlan', 'relationMove', 'ownWordsGuide', 'reentryWhen', 'description', 'kind', 'uncertainty',
   'workingFocus', 'stage', 'topicDecision', 'mode', 'annotation', 'annotationRevision', 'annotationUpdatedAt', 'text', 'source', 'updatedAt', 'topicChangeRequested',
+  'contextUpdates', 'facts', 'subject', 'field', 'value', 'evidence', 'messageId', 'quote', 'meeting', 'time', 'place', 'note',
 ]);
 function safeModelDiagnostics(error) {
-  if (error?.code !== 'invalid_model_output' || !Array.isArray(error.diagnostics)) return [];
+  if (!['invalid_model_output', 'INVALID_CONTEXT_UPDATES'].includes(error?.code) || !Array.isArray(error.diagnostics)) return [];
   return error.diagnostics.slice(0, 12).flatMap((item) => {
     if (!DIAGNOSTIC_CODES.has(item?.code) || !Array.isArray(item.path) || item.path.length > 8) return [];
     if (!item.path.every((part) => typeof part === 'string' ? DIAGNOSTIC_FIELDS.has(part) : Number.isInteger(part) && part >= 0 && part <= 1_000)) return [];
@@ -245,7 +251,7 @@ export async function createBetaServer({
 
   async function visibleProfile(user) {
     const profile = await store.getProfile(user.id);
-    if (user.plan === 'free' && profile?.questionnaire.kind === 'full') {
+    if (user.plan === 'free' && profile?.questionnaire?.kind === 'full') {
       return { background: profile.background, style: profile.style, growthGoals: profile.growthGoals, relationshipGoal: profile.relationshipGoal, questionnaire: { kind: 'short', answers: {} }, requiresQuestionnaireUpdate: true };
     }
     return profile;
@@ -253,14 +259,16 @@ export async function createBetaServer({
   async function capturedChatSnapshot(userId, counterpartId, { intent, topicChangeRequested, allowEmpty = false } = {}) {
     return await withSnapshot(async () => {
       const account = await store.getUser(userId), profile = await store.getProfile(userId), counterpart = await store.getCounterpart(userId, counterpartId);
-      if (!profile) throw new BetaError('PROFILE_REQUIRED');
-      if (account.plan === 'free' && profile.questionnaire.kind === 'full') throw new BetaError('FULL_PROFILE_REQUIRES_UPDATE', 403);
-      const { updatedAt: profileUpdatedAt, ...businessProfile } = profile;
+      if (account.plan === 'free' && profile?.questionnaire?.kind === 'full') throw new BetaError('FULL_PROFILE_REQUIRES_UPDATE', 403);
+      const { updatedAt: profileUpdatedAt = null, ...businessProfile } = profile ?? {};
       const { revision: counterpartRevision, ...businessCounterpart } = counterpart;
       const messages = await store.listMessages(userId, counterpartId);
       if (!allowEmpty && !messages.some((message) => message.speaker === 'other')) throw new BetaError('CONTEXT_REQUIRED');
-      const context = buildChatContext(businessProfile, businessCounterpart, messages, { intent, topicChangeRequested, meeting: await store.getMeeting(userId, counterpartId), personalStyle: await store.getAppliedPersonalStyle(userId) });
-      return { context, profileUpdatedAt, counterpartRevision };
+      const manualMeetingState = await store.getMeetingState(userId, counterpartId);
+      const context = buildChatContext(businessProfile, businessCounterpart, messages, { intent, topicChangeRequested, meeting: manualMeetingState.meeting,
+        ...(manualMeetingState.updatedAt === null ? {} : { manualMeetingBoundary: { source: 'user_recorded_meeting', messageIdsAtSave: manualMeetingState.atSaveMessageIds } }),
+        personalStyle: await store.getAppliedPersonalStyle(userId) });
+      return { context, profileUpdatedAt, counterpartRevision, manualMeetingState };
     });
   }
   async function chatSnapshot(userId, counterpartId, options) {
@@ -298,6 +306,38 @@ export async function createBetaServer({
       throw error;
     }
   }
+  async function currentBackground(userId, counterpartId, knowledgeSnapshot) {
+    return await withSnapshot(async () => {
+      const manualState = await store.getMeetingState(userId, counterpartId);
+      const fallback = { backgroundContext: { facts: [], meetingSource: manualState.updatedAt === null ? 'none' : 'manual' }, meeting: manualState.meeting, manualMeeting: manualState.meeting };
+      const job = await store.latestContextUpdates(userId, counterpartId);
+      if (!job?.contextSnapshot) return fallback;
+      const source = job.contextSnapshot;
+      // Automatic summaries are readback only. The complete original profiles,
+      // messages and manual meeting always remain the model's authoritative input.
+      let current;
+      try { current = await chatSnapshot(userId, counterpartId, { allowEmpty: true }); }
+      catch (error) { if (['FULL_PROFILE_REQUIRES_UPDATE', 'PROFILE_REQUIRED', 'CONTEXT_REQUIRED'].includes(error.code)) return fallback; throw error; }
+      const withoutIntent = (value) => { const copy = { ...value }; delete copy.intent; return copy; };
+      if (source.knowledge?.hash !== knowledgeSnapshot.hash
+        || !heatContextsCompatible(withoutIntent(source.modelInput), withoutIntent(current))
+        || (source.manualMeetingReceipt ?? null) !== manualState.receiptId
+        || (source.manualMeetingUpdatedAt ?? null) !== manualState.updatedAt) return fallback;
+      let updates;
+      try { updates = validateContextUpdates(job.result.classification?.contextUpdates ?? job.result.suggestion?.contextUpdates, source.modelInput); }
+      catch { return fallback; }
+      if (!updates) return fallback;
+      const candidate = updates.meeting;
+      const hasNewMeetingEvidence = candidate?.evidence.some(({ messageId }) => {
+        if (manualState.updatedAt === null) return true;
+        if (Array.isArray(manualState.atSaveMessageIds)) return !manualState.atSaveMessageIds.includes(messageId);
+        const message = current.messages.find(({ id }) => id === messageId);
+        return Number.isFinite(Date.parse(message?.recordedAt)) && Date.parse(message.recordedAt) > Date.parse(manualState.updatedAt);
+      });
+      const derived = candidate && hasNewMeetingEvidence ? { status: candidate.status, time: candidate.time, place: candidate.place, note: candidate.note } : null;
+      return { backgroundContext: { facts: updates.facts, meetingSource: derived ? 'chat_evidence' : fallback.backgroundContext.meetingSource }, meeting: derived ?? manualState.meeting, manualMeeting: manualState.meeting };
+    });
+  }
   async function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
     try {
       const context = await chatSnapshot(userId, counterpartId);
@@ -316,19 +356,19 @@ export async function createBetaServer({
   async function runModel(userId, counterpartId, operation, input) {
     const currentResult = async (result) => {
       if (operation === 'image_read') guardImageBytes(result.imageInterpretation, input.image);
-      if (operation === 'classify') return currentHeatResult(result, context);
-      return result.suggestion ? { ...result, suggestion: await store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
+      const projected = operation === 'classify' ? currentHeatResult(result, context) : result.suggestion ? { ...result, suggestion: await store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
+      return ['classify', 'reply'].includes(operation) ? { ...projected, ...await currentBackground(userId, counterpartId, await knowledge.read()) } : projected;
     };
     const knowledgeSnapshot = await knowledge.read();
     const snapshotOptions = { intent: operation === 'reply' ? input.intent : undefined, topicChangeRequested: ['classify', 'reply'].includes(operation) ? input.topicChangeRequested : undefined, allowEmpty: operation === 'image_read' };
-    const { context, profileUpdatedAt, counterpartRevision } = await capturedChatSnapshot(userId, counterpartId, snapshotOptions);
+    const { context, profileUpdatedAt, counterpartRevision, manualMeetingState } = await capturedChatSnapshot(userId, counterpartId, snapshotOptions);
     const hash = contextHash(context, knowledgeSnapshot.hash, operation, input);
     const model = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
     const classificationContext = ordinaryContext(context);
     const classified = operation === 'reply' ? await latestContextJob(userId, counterpartId, 'classify', classificationContext, knowledgeSnapshot.hash) : null;
     const capturedAt = new Date(now()).toISOString();
     const archived = await archive(knowledgeSnapshot);
-    const contextSnapshot = { schemaVersion: 'coach-case-1', capturedAt, modelInput: context, profileUpdatedAt, counterpartRevision, baseContextHash: contextHash(classificationContext, knowledgeSnapshot.hash, 'conversation'), ...(input.plan === undefined ? {} : { request: { plan: input.plan } }),
+    const contextSnapshot = { schemaVersion: 'coach-case-1', capturedAt, modelInput: context, profileUpdatedAt, counterpartRevision, manualMeetingReceipt: manualMeetingState.receiptId, manualMeetingUpdatedAt: manualMeetingState.updatedAt, baseContextHash: contextHash(classificationContext, knowledgeSnapshot.hash, 'conversation'), ...(input.plan === undefined ? {} : { request: { plan: input.plan } }),
       ...(input.image ? { image: { hash: input.image.hash, mime: input.image.mime, bytes: input.image.bytes, version: IMAGE_INPUT_VERSION, explanation: { source: 'user_interpretation', text: input.explanation } } } : {}),
       knowledge: archived, model: { name: model, contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION },
       choice: { requestedDirection: input.direction ?? null, source: operation === 'image_read' ? 'image_read' : operation === 'classify' ? 'classification' : operation === 'coach_plan' ? 'user_plan' : input.direction ? 'user_choice' : 'direct_reply', classificationJobId: classified?.id ?? null, classificationResult: classified?.result ?? null } };
@@ -353,11 +393,15 @@ export async function createBetaServer({
           : operation === 'coach_plan' ? await planFn({ context, plan: input.plan }, options)
           : await replyFn({ context, ...(input.direction === undefined ? {} : { direction: input.direction }) }, options);
         guardRestrictedOutput(output, knowledgeSnapshot.text);
+        if (['classify', 'reply'].includes(operation) && output?.contextUpdates !== undefined) output = { ...output, contextUpdates: validateContextUpdates(output.contextUpdates, context) };
         if (operation === 'image_read') output = validateImageInterpretation(output, input.image);
         return await withTransaction(async () => {
           const currentKnowledge = await knowledge.read();
           const currentContext = await chatSnapshot(userId, counterpartId, snapshotOptions);
-          if (contextHash(currentContext, currentKnowledge.hash, operation, input) !== hash) throw new BetaError('CONTEXT_CHANGED', 409);
+          const currentMeetingState = await store.getMeetingState(userId, counterpartId);
+          if (contextHash(currentContext, currentKnowledge.hash, operation, input) !== hash
+            || currentMeetingState.receiptId !== manualMeetingState.receiptId
+            || currentMeetingState.updatedAt !== manualMeetingState.updatedAt) throw new BetaError('CONTEXT_CHANGED', 409);
           let result, suggestion;
           if (operation === 'classify') {
             const previous = await store.previousClassification(userId, counterpartId);
@@ -443,7 +487,7 @@ export async function createBetaServer({
         const observed = await currentClassification(userId, id, knowledgeSnapshot);
         const jobs = (await store.listJobs(userId, id)).map(({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cacheOf }) => ({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cached: Boolean(cacheOf) }));
         const suggestions = await store.listSuggestions(userId, id);
-        return { counterpart, messages: await store.listMessages(userId, id), suggestions, ...observed, ...await currentModelContext(userId, id, knowledgeSnapshot, suggestions), meeting: await store.getMeeting(userId, id), jobs };
+        return { counterpart, messages: await store.listMessages(userId, id), suggestions, ...observed, ...await currentModelContext(userId, id, knowledgeSnapshot, suggestions), ...await currentBackground(userId, id, knowledgeSnapshot), jobs };
       }
       if (!action && method === 'PUT') return { counterpart: await store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART'), id) };
       if (!action && method === 'DELETE') { await store.deleteCounterpart(userId, id); return { deleted: true }; }
