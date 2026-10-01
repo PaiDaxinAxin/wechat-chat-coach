@@ -31,6 +31,78 @@ function classification(context, level = 'positive') {
 }
 const reply = () => ({ reply: '那你忙完我们再聊，最近有什么有意思的小事？', reason: '给对方留出空间，也提供容易接的话题。', action: 'reply', styleNote: '保留简短表达，练习多一点关注。' });
 
+test('conversation directory ages only evidenced replies, preserves raw heat, and reads without model calls', async (t) => {
+  const day = 86_400_000;
+  let clock = Date.parse('2026-10-01T00:00:00Z'), calls = 0, refusal = false;
+  const f = await fixture(t, { now: () => clock, classifyFn: async (context) => {
+    calls++;
+    const value = classification(context);
+    const ids = context.messages.filter(({ speaker }) => speaker === 'other').slice(-2).map(({ id }) => id);
+    Object.values(value.heat).forEach((dimension, index) => { dimension.level = index < 2 ? 'repeated_positive' : 'positive'; dimension.evidenceIds = ids; });
+    if (refusal) value.obstacle = { type: 'negative', evidenceIds: ids, reason: '对方明确表示不继续。' };
+    return value;
+  } });
+  const user = await f.register('directory-user', 'paid'), stranger = await f.register('directory-stranger');
+  const id = await f.addContext(user, '林禾');
+  const empty = (await user.call('POST', '/api/counterparts', { alias: '暂未聊天' })).data.counterpart;
+  const directory = async () => {
+    const result = await user.call('GET', '/api/counterparts');
+    assert.equal(result.status, 200);
+    return result.data.counterparts.find((person) => person.id === id);
+  };
+  assert.equal((await directory()).directory.heat.value, null);
+  assert.equal((await user.call('GET', '/api/counterparts')).data.counterparts.find((p) => p.id === empty.id).directory.lastReplyAt, null);
+  assert.equal((await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'directory-first' })).status, 200);
+  const initial = await directory();
+  assert.equal(initial.remark, '');
+  assert.equal(initial.heat.score, 80);
+  assert.equal(initial.directory.heat.value, 80);
+  assert.equal(initial.directory.lastReplyPreview, '我周末也会去跑步。');
+  const anchor = initial.directory.heat.anchorAt;
+  clock += day;
+  assert.equal((await directory()).directory.heat.value, 79);
+  clock += day;
+  const aged = await directory();
+  assert.equal(aged.directory.heat.value, 78);
+  assert.equal(aged.heat.score, 80);
+  assert.equal(aged.heat.observedAt, initial.heat.observedAt);
+  assert.equal(calls, 1, 'Repeated reads do not infer or consume quotas');
+
+  await user.call('PUT', `/api/counterparts/${id}`, { ...counterpart('林禾'), remark: '书店认识的小禾' });
+  const renamed = await directory();
+  assert.equal(renamed.remark, '书店认识的小禾');
+  assert.equal(renamed.directory.lastReplyAt, initial.directory.lastReplyAt);
+  assert.equal(renamed.directory.heat.value, 78, 'Display remark edits do not discard or refresh the assessment');
+  await user.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '今天工作怎么样？' });
+  assert.equal((await directory()).directory.heat.value, 78, 'Unassessed outgoing messages do not revive the old baseline');
+  await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'directory-self' });
+  assert.equal((await directory()).directory.heat.value, 78, 'Reanalysis does not reset inactivity');
+
+  const incoming = (await user.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'other', text: '周末我想去书店，你呢？' })).data.message;
+  assert.equal((await directory()).directory.heat.value, 78, 'New unassessed text does not revive old evidence');
+  await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'directory-new' });
+  const renewed = await directory();
+  assert.equal(renewed.directory.heat.value, 80);
+  assert.notEqual(renewed.directory.heat.anchorAt, anchor);
+  assert.equal(renewed.directory.lastReplyAt, new Date(clock).toISOString());
+
+  const corrected = new Date(clock - day).toISOString();
+  await user.call('PATCH', `/api/counterparts/${id}/messages/${incoming.id}/timing`, { actualWechatAt: corrected });
+  const invalidated = await directory();
+  assert.equal(invalidated.directory.lastReplyAt, corrected);
+  assert.equal(invalidated.directory.heat.value, null, 'Edited evidence invalidates the old assessment');
+  await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'directory-corrected' });
+  assert.equal((await directory()).directory.heat.value, 79);
+  refusal = true;
+  await user.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'other', text: '不要再联系我。' });
+  await user.call('POST', `/api/counterparts/${id}/classify`, { requestId: 'directory-refusal' });
+  assert.equal((await directory()).directory.heat.kind, 'pause');
+  assert.equal((await directory()).directory.heat.value, null);
+  assert.deepEqual((await stranger.call('GET', '/api/counterparts')).data.counterparts, []);
+  assert.equal((await stranger.call('GET', `/api/counterparts/${id}`)).status, 404);
+  assert.equal(calls, 5);
+});
+
 async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'chat-coach-beta-'));
   const dataDir = join(directory, 'data');

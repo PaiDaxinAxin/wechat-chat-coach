@@ -184,7 +184,10 @@ test('message annotations remain user-sourced complete context and cleared recei
 });
 
 test('counterparts need only an alias while confirmed meetings still require time and place', () => {
-  assert.deepEqual(CounterpartInputSchema.parse({ alias: ' 虚构对象 ' }), { alias: '虚构对象', channel: 'other', appProfile: '', offlineScene: '', background: '', rounds: null });
+  assert.deepEqual(CounterpartInputSchema.parse({ alias: ' 虚构对象 ' }), { alias: '虚构对象', remark: '', channel: 'other', appProfile: '', offlineScene: '', background: '', rounds: null });
+  assert.equal(CounterpartInputSchema.parse({ alias: '林禾', remark: ' 书店认识的小禾 ' }).remark, '书店认识的小禾');
+  assert.equal(CounterpartInputSchema.safeParse({ alias: '林禾', remark: '字'.repeat(201) }).success, false);
+  assert.deepEqual(buildChatContext(profile(), { ...counterpart(), remark: '书店认识的小禾' }, messages), buildChatContext(profile(), counterpart(), messages), 'Display-only remarks do not change the model context');
   assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: null }).rounds, null);
   assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: 0 }).rounds, 0, 'Explicit zero remains different from unknown');
   assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: 12 }).rounds, 12);

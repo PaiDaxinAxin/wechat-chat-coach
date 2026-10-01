@@ -92,6 +92,7 @@ export const ProfileInputSchema = z.strictObject({
 
 export const CounterpartInputSchema = z.strictObject({
   alias: requiredText(80),
+  remark: text(200).default(''),
   channel: z.enum(['app', 'offline', 'other']).default('other'),
   appProfile: text().default(''),
   offlineScene: text().default(''),

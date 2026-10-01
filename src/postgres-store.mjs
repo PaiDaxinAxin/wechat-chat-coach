@@ -97,7 +97,7 @@ export async function createPostgresStore({
   const user = async (id) => { const row = (await get('SELECT * FROM users WHERE id=$1', id)); if (!row) throw new BetaError('ACCOUNT_NOT_FOUND', 404); return row; };
   const owner = async (id) => { const row = (await user(id)); if (row.role !== 'owner') throw new BetaError('OWNER_REQUIRED', 403); return row; };
   const counterpartRow = async (userId, id) => { const row = (await get('SELECT * FROM counterparts WHERE id=$1 AND user_id=$2', id, userId)); if (!row) throw new BetaError('COUNTERPART_NOT_FOUND', 404); return row; };
-  const counterpartValue = (row) => ({ ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
+  const counterpartValue = (row) => ({ remark: '', ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
   const messageValue = async (row) => {
     if (!row) return null;
     const wechatTime = parse(row.wechat_time_json);

@@ -68,9 +68,17 @@ test('two HTTP/MCP instances use Postgres ownership, tasks and atomic context co
   assert.equal((await call(1, 'GET', '/api/me', undefined, false)).status, 401);
   const profile = { background: '虚构设计师。', style: '简短自然。', growthGoals: '练习表达兴趣。', relationshipGoal: '双方愿意时见面。', questionnaire: { kind: 'short', answers: Object.fromEntries(QUESTIONNAIRES.short.map(({ id }) => [id, 3])) } };
   assert.equal((await call(0, 'PUT', '/api/profile', profile)).status, 200);
-  const created = await call(0, 'POST', '/api/counterparts', { alias: '虚构对象', channel: 'app', appProfile: '喜欢电影。', offlineScene: '', background: '虚构背景。', rounds: 2 });
+  const created = await call(0, 'POST', '/api/counterparts', { alias: '虚构对象', remark: '电影话题', channel: 'app', appProfile: '喜欢电影。', offlineScene: '', background: '虚构背景。', rounds: 2 });
   const id = created.payload.data.counterpart.id;
   assert.equal((await call(0, 'POST', `/api/counterparts/${id}/messages`, { speaker: 'other', text: '最近一直忙工作。' })).status, 200);
+  const directory = await call(1, 'GET', '/api/counterparts');
+  assert.equal(directory.status, 200);
+  const directoryEntry = directory.payload.data.counterparts.find((person) => person.id === id);
+  assert.equal(directoryEntry.remark, '电影话题');
+  assert.equal(directoryEntry.directory.lastReplyPreview, '最近一直忙工作。');
+  assert.ok(directoryEntry.directory.lastReplyAt);
+  assert.equal(directoryEntry.directory.heat.value, null);
+  assert.equal(modelCalls, 0);
 
   const request = { requestId: randomUUID(), direction: 'down' };
   const pending = call(0, 'POST', `/api/counterparts/${id}/reply`, request);

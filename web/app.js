@@ -10,6 +10,7 @@ const state = {
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, coachResultRevision: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null, coachUpdate: null, meetingDrafts: new Map(),
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
+  directorySort: 'recent', directoryReadSerial: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
@@ -50,6 +51,7 @@ function announce(message, kind = 'success') {
   $('auth-status').hidden = $('auth').hidden || !message;
 }
 async function api(path, { method = 'GET', body } = {}) {
+  const requestUserId = state.me?.user.id, requestToken = state.csrf;
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (method !== 'GET' && state.csrf && !['/api/login', '/api/register'].includes(path)) headers['x-csrf-token'] = state.csrf;
@@ -63,7 +65,7 @@ async function api(path, { method = 'GET', body } = {}) {
     const error = new Error(payload.error?.message || '操作未完成，请稍后重试。');
     error.code = payload.error?.code;
     error.status = response.status;
-    if (response.status === 401 && state.me) {
+    if (response.status === 401 && state.me?.user.id === requestUserId && state.csrf === requestToken && state.me) {
       clearSessionUI();
       if (state.localDemo) showStartup('演示会话已结束，请重新打开聊天后继续。不会自动调用模型。', { failed: true });
     }
@@ -536,22 +538,108 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
   }, scope);
 }
 function saveRuleAction(button, ruleChange) { return saveProfile(button, { ruleChange }); }
-async function loadCounterparts() {
-  const data = await api('/api/counterparts');
-  state.counterparts = data.counterparts || [];
-  state.topThree = data.topThree || [];
-  renderDirectory();
-  if (state.selectedId && !state.counterparts.some((item) => item.id === state.selectedId)) state.selectedId = null;
-  if (!state.selectedId && state.counterparts.length) await loadCounterpart(state.counterparts[0].id);
+const directorySortModes = new Set(['recent', 'heat_desc']);
+try {
+  const saved = localStorage.getItem('chat-coach-directory-sort');
+  if (directorySortModes.has(saved)) state.directorySort = saved;
+} catch { /* Sorting is also usable without browser storage. */ }
+function counterpartName(person) { return person?.remark || person?.alias || '聊天对象'; }
+function directoryHeat(person) {
+  const heat = person.directory?.heat;
+  if (heat?.kind === 'pause') return { text: '暂停', kind: 'pause', title: '暂停推进；尊重对方已经表达的边界。' };
+  if (!Number.isFinite(heat?.value)) return { text: '—', kind: 'unknown', title: '热度尚不明确，未知不代表低。' };
+  return { text: `${heat.value}°`, kind: heat.kind, title: `${heat.kind === 'preliminary' ? '初步估计；' : ''}热度参考，非成功率；距上次分析采用的互动每满24小时减1°。` };
+}
+function orderedCounterparts() {
+  const lastReply = (person) => Date.parse(person.directory?.lastReplyAt || '');
+  const value = (person) => state.directorySort === 'recent'
+    ? lastReply(person)
+    : person.directory?.heat?.kind === 'pause' ? null : person.directory?.heat?.value;
+  return [...state.counterparts].sort((a, b) => {
+    const left = value(a), right = value(b);
+    if (Number.isFinite(left) !== Number.isFinite(right)) return Number.isFinite(left) ? -1 : 1;
+    if (Number.isFinite(left) && left !== right) return right - left;
+    const aReply = lastReply(a), bReply = lastReply(b);
+    if (Number.isFinite(aReply) !== Number.isFinite(bReply)) return Number.isFinite(aReply) ? -1 : 1;
+    if (Number.isFinite(aReply) && aReply !== bReply) return bReply - aReply;
+    return a.id.localeCompare(b.id);
+  });
+}
+let directoryReads = 0;
+async function loadCounterparts({ selectIfNeeded = true } = {}) {
+  const userId = state.me?.user.id, token = state.csrf, serial = ++state.directoryReadSerial;
+  if (!userId) return;
+  directoryReads++;
+  try {
+    const data = await api('/api/counterparts');
+    if (state.me?.user.id !== userId || state.csrf !== token || serial !== state.directoryReadSerial) return;
+    state.counterparts = data.counterparts || [];
+    state.topThree = data.topThree || [];
+    renderDirectory();
+    // A refresh changes ordering and references, never the active conversation.
+    if (selectIfNeeded && !state.selectedId && state.counterparts.length) await loadCounterpart(orderedCounterparts()[0].id);
+  } finally { directoryReads--; }
 }
 function renderDirectory() {
-  $('counterpart-select').replaceChildren(...state.counterparts.map((person) => {
-    const rank = state.topThree.indexOf(person.id);
-    return el('option', { value: person.id }, `${person.alias}${rank >= 0 ? ` · 优先 ${rank + 1}` : ''}`);
-  }));
-  if (!state.counterparts.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
+  const people = orderedCounterparts(), list = $('counterpart-list');
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  $('directory-sort').value = $('directory-sort-compact').value = state.directorySort;
+  $('directory-empty').hidden = people.length > 0;
+  for (const row of [...list.children]) if (!people.some(({ id }) => id === row.dataset.counterpartId)) row.remove();
+  people.forEach((person, index) => {
+    let row = [...list.children].find((item) => item.dataset.counterpartId === person.id);
+    if (!row) {
+      row = el('li', { 'data-counterpart-id': person.id }, el('button', { type: 'button', class: 'counterpart-item', 'data-counterpart-id': person.id,
+        onclick: () => void selectCounterpart(person.id) },
+      el('span', { class: 'directory-avatar', 'aria-hidden': 'true' }),
+      el('span', { class: 'directory-person' }, el('span', { class: 'directory-name' }), el('span', { class: 'directory-preview' })),
+      el('span', { class: 'directory-heat' })));
+    }
+    const name = counterpartName(person), preview = person.directory?.lastReplyPreview || '';
+    const heat = directoryHeat(person), button = row.querySelector('button');
+    row.querySelector('.directory-avatar').textContent = Array.from(person.alias || name)[0];
+    row.querySelector('.directory-name').textContent = name;
+    row.querySelector('.directory-preview').textContent = person.remark ? `${person.alias}${preview ? ` · ${preview}` : ''}` : preview;
+    const heatNode = row.querySelector('.directory-heat');
+    heatNode.textContent = heat.text; heatNode.dataset.kind = heat.kind; heatNode.title = heat.title;
+    const lastReplyAt = person.directory?.lastReplyAt;
+    const replyTime = Number.isFinite(Date.parse(lastReplyAt || '')) ? new Date(lastReplyAt).toLocaleString('zh-CN') : '';
+    button.title = `${name}${person.remark ? `（${person.alias}）` : ''} · ${heat.title}${replyTime ? ` 最近回复：${replyTime}` : ''}`;
+    button.setAttribute('aria-label', `${name}${person.remark ? `，原名${person.alias}` : ''}，${heat.text === '—' ? '热度未知' : `热度参考${heat.text}`}。${heat.title}`);
+    if (person.id === state.selectedId) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+  });
+  if (focused?.isConnected && document.activeElement === document.body) focused.focus({ preventScroll: true });
+  if (focused && !focused.isConnected && document.activeElement === document.body) (list.querySelector('button[aria-current="true"]') || $('directory-add')).focus({ preventScroll: true });
+  if (focused?.isConnected && document.activeElement === focused) {
+    const bounds = list.getBoundingClientRect(), item = focused.getBoundingClientRect();
+    if (item.top < bounds.top) list.scrollTop -= bounds.top - item.top + 6;
+    else if (item.bottom > bounds.bottom) list.scrollTop += item.bottom - bounds.bottom + 6;
+  }
+  $('counterpart-select').replaceChildren(...people.map((person) => el('option', { value: person.id }, `${counterpartName(person)} · ${directoryHeat(person).text}`)));
+  if (!people.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
+  // Keep a selected conversation during an obsolete or externally changed list.
+  if (state.selectedId && !people.some(({ id }) => id === state.selectedId)) {
+    $('counterpart-select').append(el('option', { value: state.selectedId }, counterpartName(state.detail?.counterpart)));
+  }
   $('counterpart-select').value = state.selectedId || '';
+  const current = people.find(({ id }) => id === state.selectedId) || state.detail?.counterpart;
+  $('counterpart-title').textContent = current ? counterpartName(current) : '模拟微信';
 }
+async function selectCounterpart(id) {
+  if (!state.me || !id || id === state.selectedId) return;
+  const userId = state.me.user.id;
+  try { await loadCounterpart(id); }
+  catch (error) { if (!error.displayed && state.me?.user.id === userId && state.selectedId === id) announce(error.message, 'error'); }
+}
+async function refreshDirectoryReference() {
+  if (document.visibilityState !== 'visible' || !state.me || state.bootLoading || $('workspace').hidden || directoryReads) return;
+  try { await loadCounterparts({ selectIfNeeded: false }); }
+  catch { /* Reference refresh is quiet; the conversation and drafts stay usable. */ }
+}
+setInterval(() => void refreshDirectoryReference(), 60_000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refreshDirectoryReference(); });
 function showCounterpartLoading(message = '', failed = false) {
   $('counterpart-loading').hidden = !message;
   $('counterpart-loading-message').textContent = message;
@@ -563,7 +651,9 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   const coachResultRevision = state.coachResultRevision;
   const userId = state.me?.user.id;
   const previousId = state.detail?.counterpart.id;
-  rememberComposer();
+  // A second selection can arrive while the first object is still loading.
+  // Its disabled form still contains the previous object's text, not a new draft.
+  if (state.detail) rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
   if (changed) { state.conversationVisit++; state.coachUpdate = null; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
@@ -596,8 +686,8 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   if (changed) restoreComposer(id);
   $('empty-state').hidden = true;
   $('counterpart-workspace').hidden = false;
-  $('counterpart-title').textContent = '模拟微信';
-  $('counterpart-select').setAttribute('aria-label', `选择聊天对象，当前是${detail.counterpart.alias}`);
+  $('counterpart-title').textContent = counterpartName(detail.counterpart);
+  $('counterpart-select').setAttribute('aria-label', `选择聊天对象，当前是${counterpartName(detail.counterpart)}`);
   $('counterpart-channel').textContent = `${channelNames[detail.counterpart.channel] || '认识背景'} · ${detail.counterpart.rounds == null ? '此前轮数未填' : `此前约 ${detail.counterpart.rounds} 轮`}`;
   $('counterpart-background').textContent = detail.counterpart.background || '';
   renderBackgroundContext();
@@ -857,16 +947,25 @@ function renderClassification(classification) {
     return button;
   }));
 }
-const fieldCoachViewport = window.matchMedia('(max-width: 1020px)');
+const fieldCoachViewport = window.matchMedia('(max-width: 1279px)');
+const compactDirectoryViewport = window.matchMedia('(max-width: 760px)');
 let fieldCoachFocusWithin = false;
+let directoryFocusWithin = false;
 document.addEventListener('focusin', (event) => {
   // Hiding a focused child can send a synthetic focusin to body before resize.
   // Keep the last real focus location; a composer or header focus still clears it.
-  if (event.target !== document.body && event.target !== document.documentElement) fieldCoachFocusWithin = $('field-coach').contains(event.target);
+  if (event.target !== document.body && event.target !== document.documentElement) {
+    fieldCoachFocusWithin = $('field-coach').contains(event.target);
+    directoryFocusWithin = $('counterpart-directory').contains(event.target);
+  }
+});
+compactDirectoryViewport.addEventListener('change', ({ matches }) => {
+  if (matches && directoryFocusWithin && (document.activeElement === document.body || $('counterpart-directory').contains(document.activeElement))) $('counterpart-select').focus({ preventScroll: true });
 });
 function setFieldCoachModal(open) {
   const modal = open && fieldCoachViewport.matches;
   $('workspace').inert = modal;
+  $('counterpart-directory').inert = modal;
   document.querySelector('.skip-link').inert = modal;
   $('field-coach-backdrop').hidden = !modal;
   if (modal) {
@@ -1325,7 +1424,7 @@ function updateIntakeChannel() {
   $('offline-scene-field').hidden = channel !== 'offline';
 }
 function readIntakeForm() {
-  return { alias: $('intake-alias').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
+  return { alias: $('intake-alias').value, remark: $('intake-remark').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
 }
 function openCounterpart(person = null) {
   state.intakeInstance++;
@@ -1333,7 +1432,7 @@ function openCounterpart(person = null) {
   const draft = state.intakeDrafts.get(state.editingCounterpartId || 'new') || person;
   $('counterpart-form').reset();
   $('counterpart-dialog-title').textContent = person ? '编辑认识背景' : '添加聊天对象';
-  for (const [id, key] of [['intake-alias', 'alias'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'other' : '');
+  for (const [id, key] of [['intake-alias', 'alias'], ['intake-remark', 'remark'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'other' : '');
   $('intake-rounds').value = draft?.rounds ?? '';
   const error = $('counterpart-form').querySelector('.form-error');
   if (error) error.hidden = true;
@@ -1437,6 +1536,7 @@ $('auth-form').addEventListener('submit', (event) => {
   });
 });
 function clearSessionUI() {
+  state.directoryReadSerial++;
   state.conversationVisit++; state.coachErrorContext = null; state.coachUpdate = null;
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
@@ -1449,7 +1549,8 @@ function clearSessionUI() {
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
   $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
-  for (const id of ['counterpart-select', 'transcript', 'direction-options', 'questionnaire', 'admin-feedback-list', 'admin-users', 'profile-chat-facts', 'counterpart-chat-facts']) $(id).replaceChildren();
+  for (const id of ['counterpart-select', 'counterpart-list', 'transcript', 'direction-options', 'questionnaire', 'admin-feedback-list', 'admin-users', 'profile-chat-facts', 'counterpart-chat-facts']) $(id).replaceChildren();
+  $('counterpart-select').setAttribute('aria-label', '选择聊天对象');
   for (const id of ['counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
   $('counterpart-title').textContent = '模拟微信';
   $('generated-invite').value = ''; $('invite-result').hidden = true;
@@ -1529,10 +1630,16 @@ $('counterpart-select').addEventListener('change', async (event) => {
   const id = event.target.value;
   if (!id || id === state.selectedId) return;
   event.target.disabled = true;
-  try { await loadCounterpart(id); }
-  catch (error) { if (!error.displayed) announce(error.message, 'error'); }
+  try { await selectCounterpart(id); }
   finally { event.target.disabled = false; }
 });
+for (const id of ['directory-sort', 'directory-sort-compact']) $(id).addEventListener('change', (event) => {
+  if (!directorySortModes.has(event.target.value)) return;
+  state.directorySort = event.target.value;
+  try { localStorage.setItem('chat-coach-directory-sort', state.directorySort); } catch { /* Keep the selected order for this page. */ }
+  renderDirectory();
+});
+$('directory-add').addEventListener('click', () => openCounterpart());
 $('retry-counterpart').addEventListener('click', () => {
   const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
   void perform($('retry-counterpart'), '读取中…', async () => {
@@ -1566,7 +1673,7 @@ $('counterpart-form').addEventListener('submit', (event) => {
   void perform(event.submitter, '保存中…', async () => {
     const editingId = state.editingCounterpartId, selectedId = state.selectedId, userId = state.me?.user.id, key = editingId || 'new', instance = state.intakeInstance;
     const submitted = readIntakeForm(); state.intakeDrafts.set(key, submitted);
-    const input = { alias: $('intake-alias').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: $('intake-rounds').value === '' ? null : Number($('intake-rounds').value) };
+    const input = { alias: $('intake-alias').value.trim(), remark: $('intake-remark').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: $('intake-rounds').value === '' ? null : Number($('intake-rounds').value) };
     const data = editingId ? await put(counterpartPath(editingId), input) : await post('/api/counterparts', input);
     if (state.me?.user.id !== userId) return;
     // A reopened intake is a new editing session, even when both target "new".
@@ -1592,12 +1699,13 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   state.intentDrafts.delete(id); state.requestIds.clear();
   state.messageDrafts.delete(id);
   state.intakeDrafts.delete(id);
+  state.counterparts = state.counterparts.filter((person) => person.id !== id);
   state.selectedId = null; state.detail = null; state.suggestion = null;
   $('suggestion-text').value = ''; $('intent').value = '';
   for (const element of ['transcript', 'direction-options', 'heat-dimensions']) $(element).replaceChildren();
   $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
-  closeInlineCards(); updateComposer();
+  closeInlineCards(); updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
   await loadCounterparts(); announce('对象及其关联记录已删除。');
 }));
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);

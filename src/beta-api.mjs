@@ -11,6 +11,7 @@ import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs
 import { StyleLearningInputSchema } from './style-learning.mjs';
 import { generateFieldCoachPlan } from './field-coach.mjs';
 import { validateContextUpdates } from './context-updates.mjs';
+import { buildDirectoryHeat, latestCounterpartReply } from './directory-heat.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import { interpretChatImage, validateChatImage, guardImageBytes, validateImageInterpretation, IMAGE_BODY_LIMIT, IMAGE_INPUT_VERSION } from './image-input.mjs';
 import {
@@ -338,6 +339,33 @@ export async function createBetaServer({
       return { backgroundContext: { facts: updates.facts, meetingSource: derived ? 'chat_evidence' : fallback.backgroundContext.meetingSource }, meeting: derived ?? manualState.meeting, manualMeeting: manualState.meeting };
     });
   }
+  async function directoryEntry(userId, counterpart, knowledgeSnapshot) {
+    const messages = await store.listMessages(userId, counterpart.id);
+    const observed = await currentClassification(userId, counterpart.id, knowledgeSnapshot);
+    let directoryHeat = observed.heat;
+    let sourceMessages = messages;
+    if (!observed.classification) {
+      const previous = await store.previousClassification(userId, counterpart.id);
+      const source = previous?.contextSnapshot;
+      if (source?.knowledge?.hash === knowledgeSnapshot.hash) {
+        try {
+          const current = await chatSnapshot(userId, counterpart.id, { allowEmpty: true });
+          if (heatContextsCompatible(ordinaryContext(source.modelInput), ordinaryContext(current))) {
+            directoryHeat = currentHeatResult(previous.result, source.modelInput).heat;
+            sourceMessages = source.modelInput.messages;
+          }
+        } catch (error) {
+          if (!['FULL_PROFILE_REQUIRES_UPDATE', 'PROFILE_REQUIRED', 'CONTEXT_REQUIRED'].includes(error.code)) throw error;
+        }
+      }
+    }
+    // This read-only display projection never replaces the evidence score or
+    // changes classification quota, invitation gates, or the Top Three contract.
+    return { ...counterpart, heat: observed.heat, directory: {
+      ...latestCounterpartReply(messages),
+      heat: buildDirectoryHeat(directoryHeat, sourceMessages, { now: now() }),
+    } };
+  }
   async function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
     try {
       const context = await chatSnapshot(userId, counterpartId);
@@ -474,7 +502,7 @@ export async function createBetaServer({
     if (path === '/api/style-learning' && method === 'GET') return await store.getStyleLearning(userId);
     if (path === '/api/counterparts' && method === 'GET') {
       const knowledgeSnapshot = await knowledge.read();
-      const counterparts = await Promise.all((await store.listCounterparts(userId)).map(async (counterpart) => ({ ...counterpart, heat: (await currentClassification(userId, counterpart.id, knowledgeSnapshot)).heat })));
+      const counterparts = await withSnapshot(async () => await Promise.all((await store.listCounterparts(userId)).map((counterpart) => directoryEntry(userId, counterpart, knowledgeSnapshot))));
       return { counterparts, topThree: rankTopThree(counterparts) };
     }
     if (path === '/api/counterparts' && method === 'POST') return { counterpart: await store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART')) };

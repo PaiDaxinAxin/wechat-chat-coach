@@ -28,6 +28,12 @@
       </div>
     </section>
     <div class="conversation-layout">
+    <aside id="counterpart-directory" class="counterpart-directory" aria-labelledby="directory-title">
+      <div class="directory-heading"><h2 id="directory-title">聊天对象</h2><button id="directory-add" class="quiet-button" type="button" aria-label="添加聊天对象">＋</button></div>
+      <label class="directory-sort-label"><span class="visually-hidden">对象排序</span><select id="directory-sort" aria-label="对象排序"><option value="recent">最近回复</option><option value="heat_desc">热度从高到低</option></select></label>
+      <p id="directory-empty" class="directory-empty small muted">添加一位对象，开始记录对话。</p>
+      <ul id="counterpart-list" class="counterpart-list" aria-label="聊天对象列表"></ul>
+    </aside>
     <section id="workspace" class="chat-shell" hidden aria-label="模拟微信聊天">
       <header class="chat-toolbar">
         <div class="chat-title-row"><h1 id="counterpart-title">模拟微信</h1><button id="toggle-field-coach" class="quiet-button field-coach-toggle" type="button" aria-controls="field-coach" aria-expanded="false">场外教练</button><span id="demo-banner" class="demo-badge" hidden title="本机 Demo，预置虚构人物和对话，可修改后体验 AI；演示画像不代表你的真实资料。分析和生成会调用 Agnes，并使用完整知识库。">虚构演示</span></div>
@@ -39,6 +45,7 @@
             <button data-view="profile" type="button" class="quiet-button">我的画像</button>
             <button id="open-heat" type="button" class="quiet-button">互动依据</button>
             <button id="open-meeting" type="button" class="quiet-button">见面安排</button>
+            <label class="directory-sort-compact"><span>对象排序</span><select id="directory-sort-compact"><option value="recent">最近回复</option><option value="heat_desc">热度从高到低</option></select></label>
             <button id="admin-nav" data-view="admin" type="button" class="quiet-button" hidden>内测管理</button>
             <div id="account-bar" hidden><span id="account-name" class="small muted"></span><span id="plan-badge" class="badge"></span><button id="logout" class="quiet-button" type="button">退出</button></div>
           </div></details>
@@ -114,7 +121,8 @@
           <form id="counterpart-form"><div class="section-heading"><h2 id="counterpart-dialog-title">添加聊天对象</h2><button id="close-counterpart-dialog" type="button" class="quiet-button" aria-label="收起对象背景">收起</button></div>
             <p id="counterpart-channel" class="small muted" hidden></p><p id="counterpart-background" class="small muted" hidden></p>
             <p class="helper">先填一个称呼即可。已在聊天里提到的信息会自动补充，不用再填一遍。</p>
-            <label>称呼或代号<input id="intake-alias" required maxlength="80" placeholder="用你能认出的代号即可"></label>
+            <label>名字<input id="intake-alias" required maxlength="80" placeholder="对方的名字或昵称"></label>
+            <label>备注（可选）<input id="intake-remark" maxlength="200" placeholder="用你能认出的备注，不改原名"></label>
             <label>认识渠道<select id="intake-channel"><option value="other">暂不填写 / 其他渠道</option><option value="app">交友软件</option><option value="offline">线下认识</option></select></label>
             <label id="app-profile-field">交友软件资料<textarea id="intake-app" rows="3" maxlength="20000" placeholder="自我介绍、兴趣，以及资料里的相关信息"></textarea></label>
             <label id="offline-scene-field" hidden>线下场景与当时互动<textarea id="intake-offline" rows="3" maxlength="20000" placeholder="在哪认识、如何开场、当时的互动"></textarea></label>

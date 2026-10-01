@@ -201,7 +201,7 @@ export function createBetaStore({
   const user = (id) => { const row = get('SELECT * FROM users WHERE id=?', id); if (!row) throw new BetaError('ACCOUNT_NOT_FOUND', 404); return row; };
   const owner = (id) => { const row = user(id); if (row.role !== 'owner') throw new BetaError('OWNER_REQUIRED', 403); return row; };
   const counterpartRow = (userId, id) => { const row = get('SELECT * FROM counterparts WHERE id=? AND user_id=?', id, userId); if (!row) throw new BetaError('COUNTERPART_NOT_FOUND', 404); return row; };
-  const counterpartValue = (row) => ({ ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
+  const counterpartValue = (row) => ({ remark: '', ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
   const messageValue = (row) => {
     if (!row) return null;
     const wechatTime = parse(row.wechat_time_json);

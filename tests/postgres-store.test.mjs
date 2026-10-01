@@ -80,8 +80,10 @@ test('Postgres relational store preserves contracts across independent instances
     const id = await context(user), otherId = await context(other);
     assert.equal((await peer.getProfile(user.id)).style, profile().style);
     assert.equal((await peer.listCounterparts(user.id)).length, 1);
-    await store.putCounterpart(user.id, { ...counterpart(), alias: 'Updated fictional peer' }, id);
+    assert.equal((await peer.getCounterpart(user.id, id)).remark, '', 'Legacy rows default to an empty remark');
+    await store.putCounterpart(user.id, { ...counterpart(), alias: 'Updated fictional peer', remark: 'Bookshop friend' }, id);
     assert.equal((await peer.getCounterpart(user.id, id)).revision, 3);
+    assert.equal((await peer.getCounterpart(user.id, id)).remark, 'Bookshop friend');
     const msg = await store.putMessage(user.id, id, { speaker: 'self', text: 'A draft.' });
     await peer.putMessage(user.id, id, { speaker: 'self', text: 'Edited draft.' }, msg.id);
     assert.equal((await store.listMessages(user.id, id)).at(-1).text, 'Edited draft.');
