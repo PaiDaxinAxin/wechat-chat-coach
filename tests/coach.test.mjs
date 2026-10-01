@@ -206,7 +206,7 @@ test('classification retains inferred provenance and time sources and semantical
     { id: 'draft', speaker: 'self', text: '待发草稿。', provenance: 'inferred_from_followup', recordedAt: '2026-10-01T08:00:00.000Z', wechatTime: null, replyInterval: null },
     { ...input.messages[0], provenance: 'user_entered', recordedAt: '2026-10-01T09:00:00.000Z', wechatTime: { at: '2026-10-01T08:50:00.000Z', source: 'user_reported', editedAt: '2026-10-01T09:00:00.000Z' }, replyInterval: { fromAt: '2026-10-01T08:00:00.000Z', toAt: '2026-10-01T09:00:00.000Z', elapsedMs: 3_600_000, fromSource: 'clipboard_copied', toSource: 'counterpart_text_recorded', reliability: 'app_interval_estimate', interpretation: 'not_verified_wechat_latency' } },
   ] };
-  const field = { currentTopic: '最近的工作状态', topicStatus: 'developing', topicMessageIds: ['m1'], initiative: '轻度真诚评价，再自然展开。', nextAction: '看她是否继续聊。', warmingLayer: 'A', reason: '主动轻度尝试一次。' };
+  const field = { currentTopic: '最近的工作状态', topicStatus: 'developing', topicMessageIds: ['m1'], initiative: '了解她最近的工作状态。', nextAction: '问她最近主要忙哪类工作。', pitfall: '避免连续追问多个工作细节。', warmingLayer: 'A', reason: '主动轻度尝试一次。' };
   const value = { ...validClassification(), fieldCoach: field };
   let calls = 0;
   const fetchImpl = async (_url, request) => {
@@ -216,6 +216,19 @@ test('classification retains inferred provenance and time sources and semantical
     const nativeSchema = body.tools[0].function.parameters.properties.fieldCoach;
     assert.equal(nativeSchema.additionalProperties, false);
     assert.deepEqual(nativeSchema.properties.warmingLayer.enum, ['A', 'B', 'C', 'none']);
+    assert.equal(nativeSchema.properties.pitfall.maxLength, 80);
+    assert.equal(nativeSchema.required.includes('pitfall'), false);
+    assert.equal(nativeSchema.properties.initiative.maxLength, 200);
+    assert.equal(nativeSchema.properties.nextAction.maxLength, 200);
+    assert.match(body.messages[2].content, /同一次提交必须提供 fieldCoach/);
+    assert.match(body.messages[2].content, /currentTopic 用短话题名/);
+    assert.match(body.messages[2].content, /initiative 用一句说明当前目标/);
+    assert.match(body.messages[2].content, /nextAction 用一句给出具体可执行动作/);
+    assert.match(body.messages[2].content, /pitfall 用一句说明当前最该避免的动作/);
+    assert.match(body.messages[2].content, /这些文字字段建议各40字以内，不堆叠原理或回复示例/);
+    assert.match(body.messages[2].content, /不编造对方个人雷点/);
+    assert.match(body.messages[2].content, /明确拒绝时 warmingLayer 为 none，不再推进同类升级/);
+    assert.match(body.messages[2].content, /模糊阻力标 ambiguous，不能当作良性阻力/);
     assert.match(body.messages[2].content, /"provenance":"inferred_from_followup"/);
     assert.match(body.messages[2].content, /"source":"user_reported"/);
     assert.match(body.messages[2].content, /"reliability":"app_interval_estimate"/);

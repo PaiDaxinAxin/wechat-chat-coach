@@ -97,7 +97,8 @@ topicMove 与 relationAction 是两个独立维度。不同方向都可以服务
 建议以双方有意愿、可持续互动并在合适时确认线下见面为目标。提交符合指定工具 schema 的字段与长度限制；信息不足时明示不确定性，不伪造成功。`;
 
 const CLASSIFY_TASK = `分析输入，按工具 schema 提交当前阶段、阻力、五维热度与三个话题方向的建议。
-同一次提交尽量提供 fieldCoach 场外教练：currentTopic 当前完整话题，topicStatus developing/repetitive/closing/unknown，topicMessageIds 当前话题实际消息证据，initiative 如何主动主导，nextAction 下一步，warmingLayer A/B/C/none 与当轮短 reason。未知话题 currentTopic 写“未知”且 evidence ids 为空；不要机械按10至20条换题。C是明显私密或亲密暗示，必须有相互舒适及对方接受私密框架的具体依据，舒适度未知或阻力含糊不C；明确拒绝时 warmingLayer 为 none。A可主动轻度尝试，不要求先等积极信号。
+同一次提交必须提供 fieldCoach 场外教练：currentTopic 用短话题名概括当前完整话题，topicStatus developing/repetitive/closing/unknown，topicMessageIds 当前话题实际消息证据，warmingLayer A/B/C/none。initiative 用一句说明当前目标，nextAction 用一句给出具体可执行动作，pitfall 用一句说明当前最该避免的动作，reason 用一句给出当轮必要依据；这些文字字段建议各40字以内，不堆叠原理或回复示例，只保留当前优先动作。
+pitfall 只依据当前记录给出行为提醒，不编造对方个人雷点。未知话题 currentTopic 写“未知”且 evidence ids 为空；不要机械按10至20条换题。C是明显私密或亲密暗示，必须有相互舒适及对方接受私密框架的具体依据，舒适度未知或阻力含糊不C；明确拒绝时 warmingLayer 为 none，不再推进同类升级，不把拒绝解释为测试；模糊阻力标 ambiguous，不能当作良性阻力。A可主动轻度尝试，不要求先等积极信号。
 五维分别对应：activeInteraction 主动互动，responseEngagement 回复参与，personalInterest 对用户本人兴趣，reciprocalFlirting 双向暧昧，actionFollowThrough 行动兑现。
 options 必须恰好包括 up、down、sideways 三个不同方向；weight 是未经校准的相对推荐权重，各在0至1之间且总和等于1。relationAction 与方向分别判断。
 evidenceIds 只能用输入中存在的消息 id，不重复；没有证据时为空。unknown 维度没有观察证据，evidenceIds 必须为空；有具体观察的维度须提供至少一个消息 id。

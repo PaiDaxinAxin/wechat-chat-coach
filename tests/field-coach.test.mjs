@@ -37,6 +37,8 @@ test('plan uses the shared native provider path, exact full knowledge and comple
     assert.match(body.messages[2].content, /一轮是一个完整话题，不是一次来回/);
     assert.match(body.messages[2].content, /不必先等积极信号/);
     assert.match(body.messages[2].content, /不是发给对方的微信回复/);
+    assert.match(body.messages[2].content, /结论 reason、时机 guidance、修改 adjustedPlan（需要时）与下一步 nextAction 各用一句短句，建议各40字以内/);
+    assert.match(body.messages[2].content, /只保留当前优先动作，不列多步计划，不堆叠原理或回复示例/);
     assert.equal(body.tools.length, 1);
     assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
     assert.equal(body.parallel_tool_calls, false);
@@ -130,6 +132,42 @@ test('observation schema preserves active A without positive signal and validate
   for (const warmingLayer of ['A', 'B', 'C']) assert.throws(() => validateFieldCoachObservation({ ...goodObservation(), warmingLayer }, context, { confidence: 'strong', obstacleType: 'negative' }), { code: 'invalid_model_output' });
   assert.deepEqual(validateFieldCoachObservation({ ...goodObservation(), warmingLayer: 'none' }, context, { confidence: 'strong', obstacleType: 'negative' }), { ...goodObservation(), warmingLayer: 'none' });
   assert.equal(FIELD_COACH_SCHEMA.safeParse(goodObservation()).success, true);
+});
+
+test('optional pitfall accepts a short reminder while old observation and plan limits remain compatible', async () => {
+  const legacy = {
+    ...goodObservation(), currentTopic: '题'.repeat(120),
+    initiative: '目'.repeat(200), nextAction: '做'.repeat(200), reason: '依'.repeat(200),
+  };
+  assert.deepEqual(validateFieldCoachObservation(legacy, context), legacy);
+  assert.equal(Object.hasOwn(validateFieldCoachObservation(goodObservation(), context), 'pitfall'), false);
+  const withPitfall = { ...goodObservation(), pitfall: '避'.repeat(80) };
+  assert.deepEqual(validateFieldCoachObservation(withPitfall, context), withPitfall);
+  for (const pitfall of ['', '   ', '长'.repeat(81), null]) {
+    assert.throws(() => validateFieldCoachObservation({ ...goodObservation(), pitfall }, context), (error) => {
+      assert.equal(error.code, 'invalid_model_output');
+      assert.deepEqual(error.diagnostics[0].path, ['pitfall']);
+      return true;
+    });
+  }
+  const legacyPlan = {
+    verdict: 'adjust', reason: '依'.repeat(300), adjustedPlan: '改'.repeat(1_000),
+    timingSuggestion: { status: 'now', guidance: '机'.repeat(200), evidenceIds: ['other-next'] },
+    nextAction: '做'.repeat(300),
+  };
+  assert.deepEqual(await generateFieldCoachPlan(input, options(legacyPlan)), legacyPlan);
+});
+
+test('pitfall participates in private knowledge excerpt rejection without returning the excerpt', () => {
+  const excerpt = knowledgeText.split('\n').find((line) => line.startsWith('独特秘密片段')).slice(0, 60);
+  const observation = { ...goodObservation(), pitfall: `避免：${excerpt}` };
+  assert.equal(FIELD_COACH_SCHEMA.safeParse(observation).success, true);
+  assert.throws(() => validateFieldCoachObservation(observation, context, { knowledgeText }), (error) => {
+    assert.equal(error.code, 'invalid_model_output');
+    assert.deepEqual(error.diagnostics, [{ code: 'private_knowledge_excerpt', path: [] }]);
+    assert.doesNotMatch(JSON.stringify(error), /独特秘密片段/);
+    return true;
+  });
 });
 
 test('C requires non-limited/non-ambiguous metadata and counterpart evidence, never inferred self alone', () => {

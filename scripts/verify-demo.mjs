@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { createBetaServer } from '../src/beta-api.mjs';
 import { DEFAULT_KNOWLEDGE_PATH } from '../src/knowledge.mjs';
+import { computeHeat } from '../src/domain.mjs';
 
 // Synthetic, isolated browser acceptance; never reads provider credentials.
 process.umask(0o077);
@@ -25,7 +26,7 @@ try {
       if (nextFailure) { nextFailure = false; throw Object.assign(new Error('Synthetic classification timeout'), { code: 'PROVIDER_TIMEOUT' }); }
       if (holdClassification) { const held = holdClassification; holdClassification = null; await held; }
       const id = context.messages.at(-1).id;
-      const observed = { level: 'positive', evidenceIds: [id] };
+      const observed = { level: 'positive', evidenceIds: [...new Set([context.messages.find((message) => message.speaker === 'other')?.id || id, id])] };
       return { status: 'ready', confidence: 'moderate', phase: 'ordinary',
         obstacle: { type: 'none', evidenceIds: [], reason: '她主动延续工作话题。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
@@ -67,7 +68,13 @@ try {
   assert.ok((await page.locator('[data-direction=down]').textContent()).includes('10%'));
   assert.equal(await page.locator('[data-direction=down] .weight').textContent(), '10%');
   assert.equal(await page.locator('[data-direction=down]').getAttribute('aria-label'), '下切，建议占比 10%');
-  await page.locator('#field-coach-topic').filter({ hasText: '工作与新项目' }).waitFor();
+  assert.ok((await page.locator('#field-coach-topic').textContent()).includes('工作与新项目'));
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '约65°');
+  assert.equal(await page.locator('.coach-actions > li').count(), 3);
+  assert.ok((await page.locator('#field-coach-heat-basis').textContent()).includes('已观察 3/5 维度'));
+  assert.ok((await page.locator('#field-coach-pitfall').textContent()).startsWith('通用提醒'), 'Legacy cached output uses a labeled generic reminder');
+  assert.equal(await page.locator('#field-coach-details').getAttribute('open'), null);
+  assert.equal(await page.locator('#field-coach-full-guidance').isVisible(), false, 'Long explanations stay collapsed');
   assert.equal(await page.locator('#profile-view').isVisible(), false);
   assert.equal(await page.locator('#heat-panel').isVisible(), false);
   const other = await page.locator('.message.other .message-bubble').first().boundingBox();
@@ -85,6 +92,55 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.matches('#chat-menu > summary')), true, await page.evaluate(() => JSON.stringify({ tag: document.activeElement.tagName, id: document.activeElement.id, visible: document.activeElement.checkVisibility() })));
   await page.screenshot({ path: join(evidenceDir, 'day.png'), fullPage: true });
   const id = await page.locator('#counterpart-select').inputValue();
+  // Actual heat-rule edge cases through the browser, isolated from saved jobs.
+  // Opening/collapsing the coach and reading legacy results make no model calls.
+  const originalDetail = (await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data;
+  const fixtureOther = originalDetail.messages.find((message) => message.speaker === 'other').id;
+  const fixtureLast = originalDetail.messages.at(-1).id;
+  let coachScenario = null;
+  await page.route(`**/api/counterparts/${id}`, async (route) => {
+    if (route.request().method() !== 'GET' || !coachScenario) return route.continue();
+    const received = await route.fetch(); const body = await received.json();
+    body.data.classification = coachScenario;
+    body.data.heat = computeHeat(coachScenario);
+    await route.fulfill({ response: received, json: body });
+  });
+  function scenario(level, evidenceIds, obstacle = 'none') {
+    return { ...originalDetail.classification,
+      obstacle: { type: obstacle, reason: '合成边界验证。', evidenceIds: obstacle === 'negative' ? [fixtureLast] : [] },
+      heat: Object.fromEntries(Object.keys(originalDetail.classification.heat).map((dimension) => [dimension, { level, evidenceIds }])),
+      fieldCoach: { ...originalDetail.classification.fieldCoach, initiative: '邀请她来家里。但先确认她愿意接受这类邀请，未知时不要推进。', pitfall: '别跳过她的真实意愿。' },
+    };
+  }
+  coachScenario = scenario('repeated_positive', [fixtureOther]);
+  assert.equal(computeHeat(coachScenario).score, 100);
+  assert.equal(computeHeat(coachScenario).status, 'insufficient_evidence');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'A 100 index from one message cannot become a temperature');
+  assert.ok((await page.locator('#field-coach-initiative').textContent()).includes('未知时不要推进'), 'Legacy conditions and negations remain intact');
+  await page.locator('#field-coach-details > summary').click();
+  assert.equal(await page.locator('#field-coach-full-guidance').isVisible(), true);
+  assert.equal(classifications, 1); assert.equal(replies, 0); assert.equal(plans, 0);
+  coachScenario = scenario('repeated_positive', [fixtureOther, fixtureLast], 'negative');
+  assert.equal(computeHeat(coachScenario).score, 100);
+  assert.equal(computeHeat(coachScenario).status, 'pause');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '先停推进');
+  assert.equal(await page.locator('#field-coach-initiative').textContent(), '停止这类推进，尊重她的边界。');
+  assert.equal(await page.locator('#field-coach-next').textContent(), '先留白，暂不升级或邀约。');
+  coachScenario = { ...scenario('positive', [fixtureOther, fixtureLast]),
+    options: originalDetail.classification.options.map((option) => ({ ...option, weight: option.topicMove === 'down' ? 0 : .5 })),
+  };
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.ok((await page.locator('#field-coach-next').textContent()).startsWith('并列可选上切 / 平移'));
+  assert.equal(await page.locator('#field-coach-pitfall').textContent(), '别跳过她的真实意愿。');
+  coachScenario = scenario('unknown', []);
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断');
+  await page.unroute(`**/api/counterparts/${id}`);
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '约65°');
+  assert.equal(classifications, 1); assert.equal(replies, 0); assert.equal(plans, 0);
   const originalText = '我刚好也参与了一个品牌项目。';
   await page.locator('#message-text').fill(originalText);
   let lostFollowup;
@@ -272,6 +328,7 @@ try {
   assert.ok(!(await messageCard.locator('.message-label').textContent()).includes('录入'), 'Primary time uses the explicit annotation');
   assert.ok((await messageCard.locator('.message-label').getAttribute('title')).includes(beforeTiming.recordedAt));
   assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
   assert.equal(classifications, 7);
   await page.locator('#cancel-message-edit').click();
@@ -345,7 +402,7 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.deepEqual(pageErrors, []);
   await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, checks: ['direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse'], pageErrors }, null, 2) + '\n');
-  console.log('Direct single-chat demo journey passed: day/night, inline advice, editable reply, automatic directions, inferred followup feedback, mobile and reload. Zero paid calls.');
+  console.log('Direct single-chat demo journey passed: compact coach heat/actions/pitfalls, refusal and uncertainty overrides, day/night, inferred followup, retained drafts, mobile and reload. Zero paid calls.');
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }
