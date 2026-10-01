@@ -4,6 +4,7 @@ const state = {
   selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
+  messageDrafts: new Map(), messageCalls: new Set(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false,
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
@@ -76,15 +77,23 @@ async function perform(button, label, callback, scope) {
   try { return await callback(); }
   catch (error) {
     if (scope && (state.me?.user.id !== scope.userId || state.selectedId !== scope.counterpartId)) return;
+    if (error.displayed) return;
     const message = error.message || '操作未完成，请重试。';
-    announce(message, 'error');
+    announce(form?.isConnected && form.id !== 'auth-form' ? '' : message, 'error');
     if (form?.isConnected) {
       if (!localError) { localError = el('p', { class: 'form-error', role: 'alert' }); form.append(localError); }
       localError.textContent = message; localError.hidden = false;
       localError.scrollIntoView({ block: 'nearest' });
     }
   }
-  finally { if (button?.isConnected) { button.disabled = button.dataset.locked === 'true'; button.textContent = original; if (button.id === 'save-message') updateComposer(); } }
+  finally {
+    if (button?.isConnected) {
+      button.disabled = button.dataset.locked === 'true'; button.textContent = original;
+      if (button.id === 'save-message') updateComposer();
+      if (button.id === 'retry-counterpart' && button.checkVisibility() && !button.disabled && document.activeElement === document.body
+          && (!scope || state.me?.user.id === scope.userId && state.selectedId === scope.counterpartId)) button.focus({ preventScroll: true });
+    }
+  }
 }
 function post(path, body) { return api(path, { method: 'POST', body }); }
 function put(path, body) { return api(path, { method: 'PUT', body }); }
@@ -123,13 +132,42 @@ function closeMenu(menu, { restoreFocus = false } = {}) {
 function scrollToLatest() {
   requestAnimationFrame(() => { $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
 }
+function rememberComposer({ changed = false } = {}) {
+  const id = state.selectedId;
+  if (!id || state.detail?.counterpart.id !== id) return null;
+  const draft = { text: $('message-text').value, speaker: $('message-speaker').value, editingId: state.editingMessageId, beforeEdit: state.composerBeforeEdit };
+  const previous = state.messageDrafts.get(id);
+  if (!changed && previous && Object.keys(draft).every((key) => previous[key] === draft[key])) return previous;
+  state.messageDrafts.set(id, draft);
+  return draft;
+}
+function restoreComposer(id) {
+  const draft = state.messageDrafts.get(id);
+  state.editingMessageId = draft?.editingId || null;
+  state.composerBeforeEdit = draft?.beforeEdit || null;
+  $('message-text').value = draft?.text || '';
+  $('message-speaker').value = draft?.speaker || 'other';
+  $('editing-message').textContent = state.editingMessageId ? '正在编辑已有消息' : '';
+  $('cancel-message-edit').hidden = !state.editingMessageId;
+  const error = $('message-form').querySelector('.form-error');
+  if (error) error.hidden = true;
+}
+function finishComposerSubmission(id, submitted) {
+  // Clear only the submitted version. Typing or editing while a save is in
+  // flight creates a new version, including after switching away and back.
+  if (state.messageDrafts.get(id) !== submitted) return;
+  if (submitted.beforeEdit) state.messageDrafts.set(id, submitted.beforeEdit);
+  else state.messageDrafts.delete(id);
+  if (state.selectedId === id) restoreComposer(id);
+}
 function updateComposer() {
   const ready = Boolean(state.selectedId && state.detail);
+  const saving = state.messageCalls.has(JSON.stringify([state.me?.user.id, state.selectedId]));
   $('message-text').disabled = !ready;
   $('message-speaker').disabled = !ready;
-  $('save-message').disabled = !ready;
-  $('save-message').dataset.locked = String(!ready);
-  $('save-message').textContent = state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
+  $('save-message').disabled = !ready || saving;
+  $('save-message').dataset.locked = String(!ready || saving);
+  $('save-message').textContent = saving ? '保存消息…' : state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
   $('message-text').placeholder = $('message-speaker').value === 'self' ? '填写你已经发出的原话…' : '粘贴对方刚说的话…';
   for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
 }
@@ -353,7 +391,7 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
     if (state.selectedId !== counterpartId) return;
     await reloadMe({ expectedUserId: userId });
     if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
-    if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: !hadProfile && !changes.review && !changes.ruleChange, preserveComposer: true });
+    if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: !hadProfile && !changes.review && !changes.ruleChange });
     if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
     if (includeDraft && state.profileDraftVersion === draftVersion) resetStyleDraft();
     if (!includeDraft && actionHadFocus && document.activeElement === document.body) {
@@ -384,37 +422,48 @@ function renderDirectory() {
   if (!state.counterparts.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
   $('counterpart-select').value = state.selectedId || '';
 }
-async function loadCounterpart(id, { autoAnalyze = true, preserveComposer = false } = {}) {
+function showCounterpartLoading(message = '', failed = false) {
+  $('counterpart-loading').hidden = !message;
+  $('counterpart-loading-message').textContent = message;
+  $('retry-counterpart').hidden = !failed;
+}
+async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   const serial = ++state.detailRequestSerial;
+  const retryHadFocus = document.activeElement === $('retry-counterpart');
   const replyRevision = state.replyRevision;
   const userId = state.me?.user.id;
   const previousId = state.detail?.counterpart.id;
+  rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  const keepComposer = preserveComposer && !changed;
-  if (changed) { closeInlineCards(); closeFieldCoach(); }
+  if (changed) { closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
   if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
   renderDirectory();
-  const detail = await api(counterpartPath(id));
+  let detail;
+  try { detail = await api(counterpartPath(id)); }
+  catch (error) {
+    if (state.selectedId !== id || state.me?.user.id !== userId || serial !== state.detailRequestSerial) return;
+    if (changed) {
+      showCounterpartLoading('这段对话暂时没能加载，请重试；未提交的草稿仍保留。', true);
+      error.displayed = true;
+    }
+    throw error;
+  }
   if (state.selectedId !== id || state.me?.user.id !== userId || serial !== state.detailRequestSerial) return;
   // A concurrent reply may have completed after this read's snapshot. Read the
   // latest state instead of rolling back the reply or discarding incoming messages.
-  if (replyRevision !== state.replyRevision) return loadCounterpart(id, { autoAnalyze, preserveComposer });
+  if (replyRevision !== state.replyRevision) return loadCounterpart(id, { autoAnalyze });
   state.detail = detail;
+  showCounterpartLoading();
   if (!state.planDrafts.has(planDraftKey()) && detail.latestCoachPlan) {
     state.planDrafts.set(planDraftKey(), detail.latestCoachPlan.plan);
     state.planResults.set(JSON.stringify([currentContextKey(), detail.latestCoachPlan.plan]), { planAssessment: detail.latestCoachPlan.planAssessment });
   }
   if (changed) $('intent').value = state.intentDrafts.get(id) || '';
   state.selectedDirection = null;
-  if (!keepComposer) {
-    state.editingMessageId = null;
-    $('message-form').reset();
-    $('editing-message').textContent = '';
-    $('cancel-message-edit').hidden = true;
-  }
+  if (changed) restoreComposer(id);
   $('empty-state').hidden = true;
   $('counterpart-workspace').hidden = false;
   $('counterpart-title').textContent = '模拟微信';
@@ -433,6 +482,7 @@ async function loadCounterpart(id, { autoAnalyze = true, preserveComposer = fals
   renderSuggestion();
   fillMeeting(detail.meeting);
   updateComposer();
+  if (retryHadFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
   if (changed) scrollToLatest();
   updateCoachBusy();
   renderFieldCoachPlan();
@@ -450,9 +500,9 @@ function renderJobs(jobs) {
   const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
   $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
-async function refreshCounterpart(id, { autoAnalyze = false, preserveComposer = false } = {}) {
+async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
-  if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze, preserveComposer });
+  if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze });
 }
 function renderHeat(heat) {
   $('heat-status').textContent = heatNames[heat?.status] || '信息不足';
@@ -514,7 +564,7 @@ function editMessageTiming(message, menu) {
       const actualWechatAt = input.value ? new Date(input.value).toISOString() : null;
       await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
       if (state.selectedId !== id || state.me?.user.id !== userId) return;
-      await refreshCounterpart(id, { preserveComposer: true });
+      await refreshCounterpart(id);
       if (state.selectedId === id) { announce('时间标注已保存，原录入时间保留。方向判断已失效，可重新分析。'); $('message-text').focus({ preventScroll: true }); }
     }, { userId, counterpartId: id });
   });
@@ -532,20 +582,21 @@ function renderTiming() {
   $('timing-note').textContent = `距${from}${elapsedText}（${timing.reliability === 'user_reported_interval' ? '本人补充的收发间隔，未核验' : timing.reliability === 'weak_preparation_estimate' ? '生成到录入的弱估计' : timing.reliability === 'unknown' ? '间隔未知' : '录入估计'}，非微信实际回复速度）。`;
 }
 function editMessage(message) {
+  if (!state.editingMessageId) state.composerBeforeEdit = rememberComposer();
   state.editingMessageId = message.id;
   $('message-speaker').value = message.speaker;
   $('message-text').value = message.text;
   $('editing-message').textContent = '正在编辑已有消息';
   $('cancel-message-edit').hidden = false;
   $('save-message').textContent = '保存修改';
+  rememberComposer({ changed: true });
   updateComposer();
   $('message-text').focus();
 }
 function cancelMessageEdit() {
-  state.editingMessageId = null;
-  $('message-form').reset();
-  $('editing-message').textContent = '';
-  $('cancel-message-edit').hidden = true;
+  if (state.composerBeforeEdit) state.messageDrafts.set(state.selectedId, state.composerBeforeEdit);
+  else state.messageDrafts.delete(state.selectedId);
+  restoreComposer(state.selectedId);
   updateComposer();
 }
 async function deleteMessage(message) {
@@ -563,13 +614,14 @@ function renderClassification(classification) {
   const busy = state.modelCalls.get(currentContextKey());
   const options = new Map((classification?.options || []).map((option) => [option.topicMove, option]));
   const available = options.size === 3;
-  $('classification-summary').textContent = available
+  const missing = coachPrerequisite();
+  $('classification-summary').textContent = missing || (available
     ? `${confidenceNames[classification.confidence] || '证据有限'}${classification.status === 'needs_context' ? ' · 还需要更多背景' : ''}。建议占比是相对推荐，尚未校准；点任一方向生成。`
     : classificationUnavailable() ? '方向分析试用已用完，直接给一句；本轮不展示虚构百分比。'
-      : busy?.type === 'classify' ? '正在分析三个方向…' : '等待方向分析；暂无建议占比。';
+      : busy?.type === 'classify' ? '正在分析三个方向…' : '等待方向分析；暂无建议占比。');
   $('direction-options').replaceChildren(...['up', 'down', 'sideways'].map((direction) => {
     const option = options.get(direction);
-    const button = el('button', { type: 'button', class: 'direction-option', disabled: !option || Boolean(busy), 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}，${option ? `建议占比 ${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'}`, 'data-direction': direction,
+    const button = el('button', { type: 'button', class: 'direction-option', disabled: !option || Boolean(busy) || Boolean(missing), 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}，${option ? `建议占比 ${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'}`, 'data-direction': direction,
       onclick: () => void coachCall('reply', button, { direction }) },
       el('span', { class: 'direction-name' }, directionNames[direction].split(' · ')[0], el('span', { class: 'direction-check', 'aria-hidden': 'true' }, '✓')),
       el('span', { class: 'weight' }, option ? `${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'));
@@ -578,12 +630,45 @@ function renderClassification(classification) {
     return button;
   }));
 }
+const fieldCoachViewport = window.matchMedia('(max-width: 1020px)');
+let fieldCoachFocusWithin = false;
+document.addEventListener('focusin', (event) => {
+  // Hiding a focused child can send a synthetic focusin to body before resize.
+  // Keep the last real focus location; a composer or header focus still clears it.
+  if (event.target !== document.body && event.target !== document.documentElement) fieldCoachFocusWithin = $('field-coach').contains(event.target);
+});
+function setFieldCoachModal(open) {
+  const modal = open && fieldCoachViewport.matches;
+  $('workspace').inert = modal;
+  document.querySelector('.skip-link').inert = modal;
+  $('field-coach-backdrop').hidden = !modal;
+  if (modal) {
+    $('field-coach').setAttribute('role', 'dialog');
+    $('field-coach').setAttribute('aria-modal', 'true');
+  } else {
+    $('field-coach').setAttribute('role', 'complementary');
+    $('field-coach').removeAttribute('aria-modal');
+  }
+}
 function closeFieldCoach({ restoreFocus = false } = {}) {
   const inside = $('field-coach').contains(document.activeElement);
+  const wasModal = $('field-coach').getAttribute('aria-modal') === 'true';
   $('field-coach').dataset.open = 'false';
   $('toggle-field-coach').setAttribute('aria-expanded', 'false');
-  if (restoreFocus && inside) $('toggle-field-coach').focus({ preventScroll: true });
+  setFieldCoachModal(false);
+  if (restoreFocus && (inside || wasModal || fieldCoachFocusWithin)) {
+    const trigger = $('toggle-field-coach').checkVisibility() ? $('toggle-field-coach') : $('chat-menu').querySelector('summary');
+    trigger.focus({ preventScroll: true });
+  }
 }
+fieldCoachViewport.addEventListener('change', ({ matches }) => {
+  const focused = document.activeElement;
+  // CSS may hide a focused child before the media event runs, leaving body focused.
+  const lostFocus = focused === document.body && fieldCoachFocusWithin;
+  const inside = $('field-coach').contains(focused) || lostFocus;
+  closeFieldCoach({ restoreFocus: matches && inside });
+  if (!matches && inside && (lostFocus || !focused.checkVisibility())) $('field-coach-title').focus({ preventScroll: true });
+});
 function renderFieldCoach(classification) {
   const coach = classification?.fieldCoach;
   const heat = classification ? state.detail?.heat : null;
@@ -636,7 +721,7 @@ function renderFieldCoachPlan() {
   const key = planDraftKey();
   $('field-coach-plan').value = state.planDrafts.get(key) || '';
   const busy = state.planCalls.has(currentContextKey());
-  const ready = Boolean(state.me && state.detail && state.selectedId);
+  const ready = !coachPrerequisite();
   $('field-coach-plan-submit').disabled = !ready || busy;
   $('field-coach-plan-submit').textContent = busy ? '教练正在看…' : '问场外教练';
   const result = state.planResults.get(JSON.stringify([currentContextKey(), $('field-coach-plan').value.trim()]));
@@ -665,13 +750,19 @@ function updateCoachBusy() {
   $('coach-loading').hidden = busy?.type !== 'classify';
   if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整体系与当前背景分析三个方向…';
   $('coach-panel').setAttribute('aria-busy', String(Boolean(busy)));
-  $('classify').disabled = Boolean(busy);
-  $('direct-reply').disabled = Boolean(busy);
+  $('classify').disabled = Boolean(busy) || Boolean(coachPrerequisite());
+  $('direct-reply').disabled = Boolean(busy) || Boolean(coachPrerequisite());
   renderClassification(state.detail?.classification);
   renderSuggestion();
 }
+function coachPrerequisite() {
+  if (!state.me || !state.detail || !state.selectedId) return '先添加一位聊天对象，填写认识背景。';
+  if (!state.me.profile?.background || state.me.requiresQuestionnaireUpdate || state.me.profile.requiresQuestionnaireUpdate) return '先在「资料 → 我的画像」补全自己的背景和聊天偏好。';
+  if (!state.detail.messages?.some(({ speaker }) => speaker === 'other')) return '先在下方粘贴对方的一条消息，再为你推荐回复方向。';
+  return '';
+}
 function maybeAutoCoach() {
-  if (!state.me?.profile?.background || state.me.requiresQuestionnaireUpdate || state.me.profile.requiresQuestionnaireUpdate || !state.detail?.messages?.some(({ speaker }) => speaker === 'other')) return;
+  if (coachPrerequisite()) return;
   if (state.detail.classification) return;
   const context = currentContextKey();
   if (state.autoAttempts.has(context) || state.modelCalls.has(context)) return;
@@ -682,7 +773,7 @@ function maybeAutoCoach() {
   void coachCall(exhausted ? 'reply' : 'classify', null, { automatic: true });
 }
 async function coachCall(type, button, { direction, automatic = false } = {}) {
-  if (button?.disabled || !state.selectedId || !state.detail || !state.me) return;
+  if (button?.disabled || coachPrerequisite()) return;
   const id = state.selectedId, userId = state.me.user.id, inputContext = currentContextKey();
   if (state.modelCalls.has(inputContext)) return;
   const call = { type, id, direction, previousDirection: state.selectedDirection };
@@ -729,7 +820,7 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
         if (!direction && !intent) state.detail.directReply = data.suggestion;
         renderSuggestion(); scrollToLatest();
       }
-      announce(data.cached ? '已取回保存结果，没有重复调用模型。' : type === 'classify' ? '' : '建议已生成，修改后自行发到微信；粘贴对方下一句即可继续。');
+      announce('');
     }
     try { await loadCounterparts(); }
     catch {
@@ -746,7 +837,7 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
         state.replyFeedback = { context: inputContext, suggestionId: state.suggestion?.id,
           text: state.suggestion ? '未取回新回复，保留上一条；可手动重试。' : '未取回回复，可手动重试。', error: true };
       }
-      announce(retryMessage, 'error'); localError.textContent = retryMessage; localError.hidden = false;
+      announce(''); localError.textContent = retryMessage; localError.hidden = false;
     }
     try { await reloadMe(); } catch { /* Preserve the original recovery state. */ }
     if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
@@ -778,7 +869,7 @@ function renderSuggestion() {
     state.replyFeedback = null; state.selectedDirection = item.direction || null;
     state.suggestion = item; renderClassification(state.detail?.classification); renderSuggestion();
   } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
-  $('suggestion-panel').hidden = !suggestion && !generating && !feedback;
+  $('suggestion-panel').hidden = !suggestion && !generating;
   $('suggestion-panel').setAttribute('aria-busy', String(generating));
   $('suggestion-panel').classList.toggle('reply-updated', !generating && Boolean(feedback?.highlight));
   if (!generating && feedback?.highlight && !feedback.clearTimer) {
@@ -847,12 +938,19 @@ function updateIntakeChannel() {
   $('intake-app').required = channel === 'app';
   $('intake-offline').required = channel === 'offline';
 }
+function readIntakeForm() {
+  return { alias: $('intake-alias').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
+}
 function openCounterpart(person = null) {
+  state.intakeInstance++;
   state.editingCounterpartId = person?.id || null;
+  const draft = state.intakeDrafts.get(state.editingCounterpartId || 'new') || person;
   $('counterpart-form').reset();
   $('counterpart-dialog-title').textContent = person ? '编辑认识背景' : '添加聊天对象';
-  for (const [id, key] of [['intake-alias', 'alias'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = person?.[key] || (key === 'channel' ? 'app' : '');
-  $('intake-rounds').value = person?.rounds ?? 0;
+  for (const [id, key] of [['intake-alias', 'alias'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'app' : '');
+  $('intake-rounds').value = draft?.rounds ?? 0;
+  const error = $('counterpart-form').querySelector('.form-error');
+  if (error) error.hidden = true;
   updateIntakeChannel();
   $('delete-counterpart').hidden = !person;
   openInlineCard('counterpart-dialog');
@@ -954,6 +1052,8 @@ $('auth-form').addEventListener('submit', (event) => {
 function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
+  state.messageDrafts.clear(); state.messageCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
+  state.intakeDrafts.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.copyCalls.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
@@ -966,6 +1066,7 @@ function clearSessionUI() {
   $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('job-history')?.remove(); $('coach-error')?.remove();
   document.querySelectorAll('form .form-error').forEach((node) => node.remove());
   closeInlineCards(); closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
+  showCounterpartLoading();
   if (!state.localDemo) $('username').focus();
 }
 $('logout').addEventListener('click', () => void perform($('logout'), '退出中…', async () => {
@@ -978,18 +1079,34 @@ document.querySelectorAll('[data-view]').forEach((button) => button.addEventList
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeInlineCards({ restoreFocus: true })));
 document.addEventListener('click', (event) => { document.querySelectorAll('.chat-menu[open]').forEach((menu) => { if (!menu.contains(event.target)) closeMenu(menu); }); });
 document.addEventListener('keydown', (event) => {
+  const modalCoach = fieldCoachViewport.matches && $('field-coach').dataset.open === 'true';
+  if (modalCoach && event.key === 'Tab') {
+    const targets = [...$('field-coach').querySelectorAll('button,a[href],input,textarea,select,summary,[tabindex]')]
+      .filter((node) => !node.disabled && node.tabIndex >= 0 && node.checkVisibility());
+    const index = targets.indexOf(document.activeElement);
+    if (event.shiftKey && index <= 0 || !event.shiftKey && (index < 0 || index === targets.length - 1)) {
+      event.preventDefault();
+      (event.shiftKey ? targets.at(-1) : targets[0])?.focus();
+    }
+    return;
+  }
   if (event.key !== 'Escape') return;
+  if (modalCoach) { event.preventDefault(); closeFieldCoach({ restoreFocus: true }); return; }
   const menus = [...document.querySelectorAll('.chat-menu[open]')];
   if (menus.length) menus.forEach((menu) => closeMenu(menu, { restoreFocus: true }));
   else if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
 });
 $('toggle-field-coach').addEventListener('click', () => {
   const open = $('field-coach').dataset.open !== 'true';
+  if (!open) { closeFieldCoach({ restoreFocus: true }); return; }
   $('field-coach').dataset.open = String(open);
   $('toggle-field-coach').setAttribute('aria-expanded', String(open));
-  if (open) $('field-coach-plan').focus({ preventScroll: true });
+  setFieldCoachModal(open);
+  $('field-coach').scrollTop = 0;
+  $('field-coach-title').focus({ preventScroll: true });
 });
 $('close-field-coach').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
+$('field-coach-backdrop').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
 $('coach-glossary-toggle').addEventListener('change', (event) => {
   $('coach-glossary-terms').hidden = !event.currentTarget.checked;
 });
@@ -1023,8 +1140,14 @@ $('counterpart-select').addEventListener('change', async (event) => {
   if (!id || id === state.selectedId) return;
   event.target.disabled = true;
   try { await loadCounterpart(id); }
-  catch (error) { announce(error.message, 'error'); }
+  catch (error) { if (!error.displayed) announce(error.message, 'error'); }
   finally { event.target.disabled = false; }
+});
+$('retry-counterpart').addEventListener('click', () => {
+  const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
+  void perform($('retry-counterpart'), '读取中…', async () => {
+    if (scope.counterpartId) await loadCounterpart(scope.counterpartId);
+  }, scope);
 });
 for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'meeting-panel']]) $(button).addEventListener('click', () => {
   if (!state.detail) return;
@@ -1045,13 +1168,30 @@ $('profile-form').addEventListener('submit', (event) => {
 for (const id of ['add-counterpart', 'empty-add']) $(id).addEventListener('click', () => openCounterpart());
 $('edit-counterpart').addEventListener('click', () => { if (state.detail) openCounterpart(state.detail.counterpart); });
 $('intake-channel').addEventListener('change', updateIntakeChannel);
-for (const id of ['close-counterpart-dialog', 'cancel-counterpart-dialog']) $(id).addEventListener('click', () => closeInlineCards({ restoreFocus: true }));
+$('close-counterpart-dialog').addEventListener('click', () => closeInlineCards({ restoreFocus: true }));
+$('cancel-counterpart-dialog').addEventListener('click', () => { state.intakeDrafts.delete(state.editingCounterpartId || 'new'); closeInlineCards({ restoreFocus: true }); });
+for (const type of ['input', 'change']) $('counterpart-form').addEventListener(type, () => { state.intakeDrafts.set(state.editingCounterpartId || 'new', readIntakeForm()); });
 $('counterpart-form').addEventListener('submit', (event) => {
   event.preventDefault();
   void perform(event.submitter, '保存中…', async () => {
+    const editingId = state.editingCounterpartId, selectedId = state.selectedId, userId = state.me?.user.id, key = editingId || 'new', instance = state.intakeInstance;
+    const submitted = readIntakeForm(); state.intakeDrafts.set(key, submitted);
     const input = { alias: $('intake-alias').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: Number($('intake-rounds').value) };
-    const data = state.editingCounterpartId ? await put(counterpartPath(state.editingCounterpartId), input) : await post('/api/counterparts', input);
-    closeInlineCards({ restoreFocus: true }); state.selectedId = data.counterpart.id; await loadCounterparts(); await loadCounterpart(data.counterpart.id); showView('coach'); announce('认识背景已保存。自己的猜测仍需要实际互动验证。');
+    const data = editingId ? await put(counterpartPath(editingId), input) : await post('/api/counterparts', input);
+    if (state.me?.user.id !== userId) return;
+    // A reopened intake is a new editing session, even when both target "new".
+    // Its wording must never become an edit of the earlier saved counterpart.
+    if (state.intakeInstance !== instance) {
+      if (state.intakeDrafts.get(key) === submitted) state.intakeDrafts.delete(key);
+      await loadCounterparts(); return;
+    }
+    const newerDraft = state.intakeDrafts.get(key) !== submitted ? state.intakeDrafts.get(key) : null;
+    state.intakeDrafts.delete(key);
+    if (newerDraft) state.intakeDrafts.set(data.counterpart.id, newerDraft);
+    if (state.selectedId !== selectedId || state.activeInlineCard !== 'counterpart-dialog' || state.editingCounterpartId !== editingId) { await loadCounterparts(); return; }
+    closeInlineCards({ restoreFocus: true }); await loadCounterparts(); await loadCounterpart(data.counterpart.id); showView('coach');
+    if (newerDraft) openCounterpart(data.counterpart);
+    announce(newerDraft ? '提交的背景已保存，刚补充的内容仍保留在表单里。' : '认识背景已保存。');
   });
 });
 $('delete-counterpart').addEventListener('click', () => void perform($('delete-counterpart'), '删除中…', async () => {
@@ -1060,6 +1200,8 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   await api(counterpartPath(id), { method: 'DELETE' });
   for (const suggestion of state.detail?.suggestions || []) state.suggestionDrafts.delete(suggestion.id);
   state.intentDrafts.delete(id); state.requestIds.clear();
+  state.messageDrafts.delete(id);
+  state.intakeDrafts.delete(id);
   state.selectedId = null; state.detail = null; state.suggestion = null;
   $('suggestion-text').value = ''; $('intent').value = '';
   for (const element of ['transcript', 'direction-options', 'suggestion-list', 'heat-dimensions']) $(element).replaceChildren();
@@ -1069,7 +1211,8 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   await loadCounterparts(); announce('对象及其关联记录已删除。');
 }));
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);
-$('message-speaker').addEventListener('change', updateComposer);
+$('message-speaker').addEventListener('change', () => { rememberComposer({ changed: true }); updateComposer(); });
+$('message-text').addEventListener('input', () => rememberComposer({ changed: true }));
 $('message-text').addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
   event.preventDefault();
@@ -1078,27 +1221,35 @@ $('message-text').addEventListener('keydown', (event) => {
 $('message-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
+  const callKey = JSON.stringify([scope.userId, scope.counterpartId]);
+  if (state.messageCalls.has(callKey)) return;
   void perform(event.submitter, '保存消息…', async () => {
     const id = state.selectedId, userId = state.me?.user.id;
     if (!id || !state.detail) throw new Error('先添加或选择一位聊天对象。');
+    const submitted = rememberComposer();
     const body = { speaker: $('message-speaker').value, text: $('message-text').value.trim() };
     const editing = state.editingMessageId;
-    if (editing) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(editing)}`, body);
-    else if (body.speaker === 'other') {
-      // A hidden previous draft must not be inferred as the reply used during generation.
-      const previousReplyText = state.modelCalls.get(currentContextKey())?.type !== 'reply' && isPendingSuggestion(state.suggestion) ? $('suggestion-text').value.trim() : '';
-      const copyReceipt = previousReplyText && (state.suggestion.pendingCopyReceiptId || state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText])));
-      const followup = { text: body.text, ...(previousReplyText ? { previousSuggestionId: state.suggestion.id, previousReplyText, ...(copyReceipt ? { previousCopyReceiptId: copyReceipt } : {}) } : {}) };
-      const key = JSON.stringify(['followup', userId, id, followup]);
-      if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
-      await post(`${counterpartPath(id)}/followup`, { ...followup, requestId: state.requestIds.get(key) });
-      state.requestIds.delete(key);
-    } else await post(`${counterpartPath(id)}/messages`, body);
-    if (state.me?.user.id !== userId || state.selectedId !== id) return;
-    cancelMessageEdit(); await refreshCounterpart(id, { autoAnalyze: !editing && body.speaker === 'other' });
-    if (state.selectedId !== id) return;
-    closeInlineCards(); scrollToLatest();
-    announce(body.speaker === 'other' && !editing ? '对方的新消息已记录，后续回应只作为未核实反馈保存。' : '原话已记录。');
+    state.messageCalls.add(callKey);
+    try {
+      if (editing) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(editing)}`, body);
+      else if (body.speaker === 'other') {
+        // A hidden previous draft must not be inferred as the reply used during generation.
+        const previousReplyText = state.modelCalls.get(currentContextKey())?.type !== 'reply' && isPendingSuggestion(state.suggestion) ? $('suggestion-text').value.trim() : '';
+        const copyReceipt = previousReplyText && (state.suggestion.pendingCopyReceiptId || state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText])));
+        const followup = { text: body.text, ...(previousReplyText ? { previousSuggestionId: state.suggestion.id, previousReplyText, ...(copyReceipt ? { previousCopyReceiptId: copyReceipt } : {}) } : {}) };
+        const key = JSON.stringify(['followup', userId, id, followup]);
+        if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
+        await post(`${counterpartPath(id)}/followup`, { ...followup, requestId: state.requestIds.get(key) });
+        state.requestIds.delete(key);
+      } else await post(`${counterpartPath(id)}/messages`, body);
+      if (state.me?.user.id !== userId) return;
+      finishComposerSubmission(id, submitted);
+      if (state.selectedId !== id) return;
+      await refreshCounterpart(id, { autoAnalyze: !editing && body.speaker === 'other' });
+      if (state.selectedId !== id) return;
+      closeInlineCards(); scrollToLatest();
+      announce(body.speaker === 'other' && !editing ? '对方的新消息已记录。' : '原话已记录。');
+    } finally { state.messageCalls.delete(callKey); updateComposer(); }
   }, scope);
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
@@ -1117,7 +1268,7 @@ $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '�
     const data = await post(`${counterpartPath(id)}/suggestions/${encodeURIComponent(suggestionId)}/copied`, { copiedText, requestId: state.requestIds.get(key) });
     state.requestIds.delete(key);
     if (state.me?.user.id === userId) state.copyReceipts.set(JSON.stringify([userId, id, suggestionId, copiedText.trim()]), data.copyReceipt.id);
-    if (state.me?.user.id === userId && state.selectedId === id) await refreshCounterpart(id, { preserveComposer: true });
+    if (state.me?.user.id === userId && state.selectedId === id) await refreshCounterpart(id);
   } catch (error) {
     if (state.me?.user.id === userId && state.selectedId === id) announce(`文本已复制，但复制时间未保存：${error.message} 仍可粘贴对方下一句继续。`, 'error');
   } finally {
