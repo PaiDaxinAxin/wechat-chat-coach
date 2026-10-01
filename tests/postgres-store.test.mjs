@@ -332,6 +332,30 @@ test('Postgres relational store preserves contracts across independent instances
     }
   });
 
+  await t.test('suggestion history retains insertion order for equal timestamps and a backward clock', async () => {
+    const user = await account(), id = await context(user), suffix = randomUUID();
+    async function complete(suggestionId, action) {
+      const reserved = await reservation(user, id);
+      await store.markJobRunning(reserved.job.id);
+      const suggestion = { id: suggestionId, reply: action === 'reply' ? 'A synthetic reply.' : '', action, reason: 'Fictional pacing.', styleNote: 'Test only.' };
+      await store.completeJob(reserved.job.id, { suggestion }, suggestion);
+    }
+    const ids = [`z-first-${suffix}`, `a-second-${suffix}`, `0-last-${suffix}`];
+    await complete(ids[0], 'reply'); await complete(ids[1], 'wait');
+    const tied = await peer.listSuggestions(user.id, id);
+    assert.equal(tied[0].createdAt, tied[1].createdAt);
+    assert.deepEqual(tied.map(({ id }) => id), ids.slice(0, 2));
+    advance(-1);
+    try {
+      await complete(ids[2], 'pause');
+      const history = await peer.listSuggestions(user.id, id);
+      assert.ok(history[2].createdAt < history[0].createdAt);
+      assert.deepEqual(history.map(({ id }) => id), ids);
+      await initializePostgresSchema(pool);
+      assert.deepEqual((await store.listSuggestions(user.id, id)).map(({ id }) => id), ids, 'An idempotent migration retains the established order');
+    } finally { advance(1); }
+  });
+
   await t.test('runtime role can use the store but cannot create tables or expose records to an untrusted role', async () => {
     await pool.query("DO $$ BEGIN IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='chat_coach_app') THEN CREATE ROLE chat_coach_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; END IF; IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='chat_coach_test_untrusted') THEN CREATE ROLE chat_coach_test_untrusted NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; END IF; END $$");
     await grantPostgresRuntimeAccess(pool);
@@ -345,7 +369,9 @@ test('Postgres relational store preserves contracts across independent instances
       assert.equal((await app.listMessages(user.id, id)).at(-1).id, message.id);
       const job = await app.reserveJob({ userId: user.id, counterpartId: id, operation: 'reply', requestId: randomUUID(), contextHash: randomUUID(), knowledgeHash: 'fixture', workerId: 'least-privilege', providerModel: 'fixture' });
       await app.markJobRunning(job.job.id);
-      await app.completeJob(job.job.id, { reply: 'Runtime fixture.' });
+      const suggestion = { id: randomUUID(), reply: 'Runtime fixture.', action: 'reply', reason: 'Test only.', styleNote: 'Synthetic.' };
+      await app.completeJob(job.job.id, { suggestion }, suggestion);
+      assert.equal((await app.listSuggestions(user.id, id)).at(-1).id, suggestion.id, 'The runtime grant covers the new suggestion identity sequence');
       await assert.rejects(appPool.query('CREATE TABLE chat_coach.forbidden_test(id INTEGER)'), { code: '42501' });
       await assert.rejects(untrusted.query('SELECT * FROM chat_coach.users'), { code: '42501' });
       assert.equal((await pool.query("SELECT count(*)::int AS count FROM pg_tables WHERE schemaname='chat_coach' AND NOT rowsecurity")).rows[0].count, 0);

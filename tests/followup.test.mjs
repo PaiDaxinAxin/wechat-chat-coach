@@ -532,3 +532,24 @@ test('wait and pause cannot be copied or inferred by a stale client, including l
   }
   assert.equal(f.calls, 0);
 });
+
+test('suggestion history uses durable insertion order for equal timestamps and a backward clock', async (t) => {
+  const f = await fixture(t), id = await f.addContext(), store = f.server.betaStore;
+  function complete(suggestionId, action) {
+    const reserved = store.reserveJob({ userId: f.owner.id, counterpartId: id, operation: 'reply', requestId: suggestionId, contextHash: suggestionId, knowledgeHash: 'synthetic', workerId: 'fixture', providerModel: 'fixture' });
+    store.markJobRunning(reserved.job.id);
+    const suggestion = { ...reply(), id: suggestionId, action };
+    store.completeJob(reserved.job.id, { suggestion }, suggestion);
+  }
+  complete('z-inserted-first', 'reply');
+  complete('a-inserted-second', 'wait');
+  const tied = store.listSuggestions(f.owner.id, id);
+  assert.equal(tied[0].createdAt, tied[1].createdAt);
+  assert.deepEqual(tied.map(({ id }) => id), ['z-inserted-first', 'a-inserted-second']);
+  f.advance(-1);
+  complete('0-inserted-last', 'pause');
+  const history = (await f.call('GET', `/api/counterparts/${id}`, undefined, f.session)).data.suggestions;
+  assert.ok(history[2].createdAt < history[0].createdAt);
+  assert.deepEqual(history.map(({ id }) => id), ['z-inserted-first', 'a-inserted-second', '0-inserted-last']);
+  assert.equal(f.calls, 0);
+});

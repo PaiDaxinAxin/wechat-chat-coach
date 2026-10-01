@@ -228,14 +228,15 @@ test('isolated PostgreSQL keeps complete immutable versions, transactional CAS a
     await reset();
     const role = `coach_knowledge_${randomUUID().replaceAll('-', '')}`;
     const denied = `coach_knowledge_${randomUUID().replaceAll('-', '')}`;
-    await pool.query(`CREATE ROLE ${role} LOGIN; CREATE ROLE ${denied} LOGIN;
+    await pool.query(`CREATE ROLE ${role} NOLOGIN; CREATE ROLE ${denied} NOLOGIN;
       GRANT USAGE ON SCHEMA chat_coach TO PUBLIC;
       GRANT SELECT ON chat_coach.knowledge_versions,chat_coach.knowledge_current TO PUBLIC;
       CREATE POLICY fixture_public_read ON chat_coach.knowledge_versions FOR SELECT USING(TRUE);`);
-    const roleConnection = (name) => { const url = new URL(connectionString); url.username = name; return url.href; };
-    const serverPool = new Pool({ connectionString: roleConnection(role), max: 4 });
-    const deniedPool = new Pool({ connectionString: roleConnection(denied), max: 2 });
+    const serverPool = new Pool({ connectionString, options: `-c role=${role}`, max: 4 });
+    const deniedPool = new Pool({ connectionString, options: `-c role=${denied}`, max: 2 });
     try {
+      assert.equal((await serverPool.query('SELECT current_user')).rows[0].current_user, role);
+      assert.equal((await deniedPool.query('SELECT current_user')).rows[0].current_user, denied);
       assert.equal((await pool.query("SELECT count(*)::int AS n FROM pg_policies WHERE schemaname='chat_coach'")).rows[0].n, 1);
       await initializePostgresKnowledgeSchema(pool);
       await assert.rejects(deniedPool.query('SELECT text FROM chat_coach.knowledge_versions'), { code: '42501' });

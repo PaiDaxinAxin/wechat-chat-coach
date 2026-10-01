@@ -499,7 +499,7 @@ export function createBetaStore({
       audit(userId, 'meeting_saved', counterpartId, { status: value.status });
       return value;
     },
-    listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY created_at', userId, counterpartId).map(suggestionValue); },
+    listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY rowid', userId, counterpartId).map(suggestionValue); },
     getSuggestion(userId, counterpartId, id) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return suggestionValue(row); },
     getSuggestionCase(userId, counterpartId, id) {
       counterpartRow(userId, counterpartId);

@@ -420,7 +420,7 @@ export async function createPostgresStore({
       (await audit(userId, 'meeting_saved', counterpartId, { status: value.status }));
       return value;
     },
-    async listSuggestions(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); return decorate(await all('SELECT * FROM suggestions WHERE user_id=$1 AND counterpart_id=$2 ORDER BY created_at', userId, counterpartId), suggestionValue); },
+    async listSuggestions(userId, counterpartId) { (await counterpartRow(userId, counterpartId)); return decorate(await all('SELECT * FROM suggestions WHERE user_id=$1 AND counterpart_id=$2 ORDER BY _ordinal', userId, counterpartId), suggestionValue); },
     async getSuggestion(userId, counterpartId, id) { (await counterpartRow(userId, counterpartId)); const row = (await get('SELECT * FROM suggestions WHERE id=$1 AND user_id=$2 AND counterpart_id=$3', id, userId, counterpartId)); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return (await suggestionValue(row)); },
     async getSuggestionCase(userId, counterpartId, id) {
       (await counterpartRow(userId, counterpartId));

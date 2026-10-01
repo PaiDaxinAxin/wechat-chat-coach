@@ -113,6 +113,7 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id TEXT;
 ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS context_snapshot_json TEXT;
 ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS snapshot_hash TEXT;
 ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS origin_job_id TEXT REFERENCES model_jobs(id) ON DELETE CASCADE;
+ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS _ordinal BIGINT GENERATED ALWAYS AS IDENTITY;
 ALTER TABLE followup_receipts ADD COLUMN IF NOT EXISTS previous_suggestion_id TEXT;
 ALTER TABLE followup_receipts ADD COLUMN IF NOT EXISTS previous_reply_hash TEXT;
 ALTER TABLE followup_receipts ADD COLUMN IF NOT EXISTS counterpart_text_hash TEXT;
