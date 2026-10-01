@@ -71,7 +71,7 @@ All submitted feedback starts as raw, untrusted observations in private storage.
 
 ## Checks
 
-Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, `npm run test:demo`, and `npm run test:style`. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; `scripts/verify-style-live.mjs` requires explicit opt-in and attempts one fictional reply using an adopted expression preference. Neither is part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
+Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, `npm run test:demo`, `npm run test:style`, and `npm run test:a11y`. The accessibility journey runs all default axe-core rules over desktop and narrow day/night states, and records incomplete results for manual review. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; `scripts/verify-style-live.mjs` requires explicit opt-in and attempts one fictional reply using an adopted expression preference. Neither is part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
 
 ## Knowledge write recovery
 

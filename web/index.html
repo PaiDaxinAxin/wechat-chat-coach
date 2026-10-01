@@ -45,11 +45,12 @@
           <button id="theme-toggle" type="button" class="quiet-button" aria-label="切换夜间主题">夜间</button>
         </div>
       </header>
-      <div id="chat-thread" class="chat-thread" tabindex="-1" aria-label="对话与辅助建议">
-        <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <div id="chat-thread" class="chat-thread" role="region" tabindex="-1" aria-label="对话与辅助建议">
+        <section id="counterpart-loading" class="conversation-status" role="status" hidden><p id="counterpart-loading-message"></p><button id="retry-counterpart" class="quiet-button" type="button" hidden>重新加载对话</button></section>
         <div id="empty-state" class="empty-state"><h2>从一位对象开始</h2><p>填写相识背景，再粘贴对方的原话。</p><button id="empty-add" class="primary" type="button">添加聊天对象</button></div>
         <div id="counterpart-workspace" hidden>
-          <div id="transcript" class="transcript" aria-label="双方真实对话"></div>
+          <div id="transcript" class="transcript" role="group" aria-label="双方真实对话"></div>
           <section id="coach-panel" class="coach-card" aria-labelledby="coach-title">
             <div class="coach-heading"><span class="coach-mark">AI 辅助</span><span id="heat-status" class="small muted">信息不足</span><span id="message-count" class="small muted"></span></div>
             <h2 id="coach-title">三个回复方向</h2>
@@ -129,8 +130,9 @@
         <p class="composer-hint small muted">请及时粘贴对方的新消息 · Enter 记录 · Shift + Enter 换行</p>
       </form>
     </section>
-    <aside id="field-coach" class="field-coach" aria-labelledby="field-coach-title">
-      <div class="section-heading"><h2 id="field-coach-title">场外教练</h2><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
+    <div id="field-coach-backdrop" class="field-coach-backdrop" hidden aria-hidden="true"></div>
+    <div id="field-coach" class="field-coach" role="complementary" aria-labelledby="field-coach-title">
+      <div class="section-heading"><h2 id="field-coach-title" tabindex="-1">场外教练</h2><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
       <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">待判断</strong></div><p id="field-coach-heat-status" role="status">信息不足</p><p id="field-coach-heat-basis" class="helper">记录对方的新消息后再判断。</p></section>
       <ol class="coach-actions" aria-label="本轮行动指引">
         <li><span class="coach-action-label">现在做</span><p id="field-coach-initiative">先记录对方的新消息。</p></li>
@@ -152,7 +154,7 @@
           <details data-coach-term="round"><summary>一轮 · 完整话题</summary><p>一轮指一个完整话题，可能包含多次来回。主动靠近后先承接回应，再依据投入和新意调整节奏。</p></details>
         </div>
       </section>
-    </aside>
+    </div>
     </div>
   </main>
 </body>
