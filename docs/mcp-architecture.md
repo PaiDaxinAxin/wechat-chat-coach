@@ -2,6 +2,8 @@
 
 Status: Accepted access boundary; owner, legacy restricted development and account-scoped beta MCP verified locally. Date: 2026-09-30. Decider: project owner.
 
+2026-10-01 update: the owner chose to publish the code and complete framework under MIT/CC BY 4.0. The earlier proprietary-distribution rationale below is historical. Runtime account isolation and owner write permissions still apply; public source access does not expose another user's profile, conversation, credentials or administrative MCP. See [model-access-and-learning.md](model-access-and-learning.md) and [LICENSING.md](../LICENSING.md). The personal protected cloud preview is recorded in [personal-cloud-hosting.md](personal-cloud-hosting.md).
+
 ## Context and decision
 
 The owner wants strong client models to discuss the complete framework, while external users may only call coaching capabilities. Full text placed in an external client's context is already disclosed. Prompts cannot reliably make that disclosure unexportable. The owner therefore accepted server-side model execution for external users, with full access on the owner's computer.

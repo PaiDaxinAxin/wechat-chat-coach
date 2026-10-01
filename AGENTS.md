@@ -1,6 +1,6 @@
 # Project entry
 
-This is PaiDaxinAxin's personal project. Keep the private GitHub repository under the personal account, never under LYNCA. Do not modify LYNCA applications or deployments.
+This is PaiDaxinAxin's personal project. Keep the GitHub repository under the personal account, never under LYNCA. Do not modify LYNCA applications or deployments. On 2026-10-01 the owner authorized opening the code and complete knowledge for community collaboration, replacing the earlier proprietary-knowledge requirement. Apply the selected license and inspect release files/history before publication; private runtime data and credentials are excluded. See docs/model-access-and-learning.md for current decisions and pending work.
 
 ## Agreed stage outcome
 
@@ -11,6 +11,7 @@ Use the complete game framework, personal style, counterpart context and actual 
 The user adopted [LYNCA Development Standard v1.0](https://linear.app/lynca/document/00-lynca-development-standard-v10-ce99ee6fb72d) on 2026-09-30; source last updated 2026-09-18T02:40:17.582Z. Apply relevant engineering, review, evidence and delivery requirements. Use the personal stage outcome above; company ownership, collectible strategy and deployment targets do not transfer here.
 
 - Inspect the current diff and preserve unrelated work. Use branches and reviewable PRs, required CI, and independent review for authorization, persistence and model-policy changes.
+- The owner reviews community PRs before merge. CI or agent review cannot substitute for that human approval. Production release requires the owner's authorization for the reviewed revision; do not grant contributors direct upstream/cloud write access or bypass protection. Code/knowledge publication does not itself authorize a production deployment.
 - Keep one path and one authoritative source per fact. Do not create Linear issues or company project entries by default.
 - Write new engineering records in English. Preserve Chinese source knowledge, interview answers, product copy and historical artifacts.
 - Distinguish implemented, verified, merged and accepted. Mock tests and API smoke do not establish real chat effectiveness.
@@ -22,7 +23,7 @@ The user adopted [LYNCA Development Standard v1.0](https://linear.app/lynca/docu
 - Separate current style from growth goals. Weights are uncalibrated recommendations, not success probabilities. Unknown is not failure. Do not invent experiences or interpret explicit refusal as a test.
 - Owner stdio MCP may read the full knowledge and append reviewed supplements. Restricted HTTP MCP cannot expose files, search, exports, resources or owner operations. Select mode at startup, never through caller arguments.
 - External feedback starts as `raw_untrusted`, isolated from knowledge, model context, training and evaluation. Cleaning and owner review are required before promotion. Successful submission only proves receipt.
-- Keep private records in ignored `data/`. Never commit credentials or sensitive user records; errors and logs must not expose upstream bodies, request headers or private knowledge.
+- Keep private records in ignored `data/`. Never commit credentials or sensitive user records; errors and logs must not expose upstream bodies, request headers or user-added private knowledge. Opening the framework does not change account, administrative-write or personal-data access boundaries.
 
 ## Setup and checks
 
