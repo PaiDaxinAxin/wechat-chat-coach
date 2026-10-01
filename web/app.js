@@ -581,10 +581,47 @@ function closeFieldCoach({ restoreFocus = false } = {}) {
 }
 function renderFieldCoach(classification) {
   const coach = classification?.fieldCoach;
-  $('field-coach-topic').textContent = coach?.currentTopic || '当前话题待判断';
+  const heat = classification ? state.detail?.heat : null;
+  const paused = heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
+  const insufficient = !classification || classification.status === 'needs_context' || !heat || heat.status === 'insufficient_evidence' || !Number.isFinite(heat.score);
+  // The server's existing five-dimension index stays authoritative. A rounded
+  // display does not create a new score, and uncertainty/refusal hides the number.
+  $('field-coach-temperature').textContent = paused ? '先停推进' : insufficient ? '待判断' : `约${Math.round(heat.score / 5) * 5}°`;
+  $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；未知维度不按零分计算。';
+  $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : insufficient ? '信息不足' : heatNames[heat.status] || '结合当前互动判断';
+  const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
+  $('field-coach-heat-basis').textContent = heat ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度` : '记录对方的新消息后再判断。';
+
+  const obstacle = classification?.obstacle?.type;
+  let action = coach?.initiative || '本轮主导建议待判断。';
+  let pitfall = coach?.pitfall || (coach ? '通用提醒：别连续追问，别同一话题反复升温。' : '本轮雷点待判断。');
+  if (paused) {
+    action = '停止这类推进，尊重她的边界。';
+    pitfall = '别继续这类升级，也别劝她接受。';
+  } else if (heat?.status === 'too_low') {
+    action = '先收住投入，等真实互动变化。';
+    pitfall = '别连发催促，别用更强暗示硬推进。';
+  } else if (obstacle === 'ambiguous') {
+    action = '先弄清她的意思，轻松接住疑虑。';
+    pitfall = '别把疑虑当调侃，也别继续加码。';
+  } else if (!classification) {
+    action = classificationUnavailable() ? '可以直接生成一句回复。' : '先记录对方的新消息。';
+  }
+  // Keep historical advice intact, including later conditions and negations.
+  // CSS bounds the preview; the full advice remains readable in the disclosure.
+  $('field-coach-initiative').textContent = action;
+  $('field-coach-pitfall').textContent = pitfall;
+  const options = (classification?.options || []).filter((option) => Number.isFinite(option.weight));
+  const highest = options.length ? Math.max(...options.map(({ weight }) => weight)) : null;
+  const recommended = options.filter(({ weight }) => weight === highest);
+  $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
+    : !recommended.length ? '本轮方向待分析。'
+      : `${recommended.length > 1 ? '并列可选' : '推荐'}${recommended.map(({ topicMove }) => directionNames[topicMove]?.split(' · ')[0] || '待判断').join(' / ')} · ${obstacle === 'ambiguous' ? '先澄清她的意思，暂不升级。' : recommended[0].reason}`;
+
+  $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '待判断'}`;
   $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}` : '记录对方的新话后，结合完整对话判断。';
-  $('field-coach-initiative').textContent = coach?.initiative || '结合完整话题，给出下一步主导建议。';
-  $('field-coach-next').textContent = coach ? `${coach.nextAction}${coach.reason ? ` · ${coach.reason}` : ''}` : '';
+  $('field-coach-full-guidance').replaceChildren(...(coach ? [['主导建议', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
+  for (const option of options) $('field-coach-full-guidance').append(el('p', {}, `${directionNames[option.topicMove]?.split(' · ')[0] || '方向'}：${option.reason}`));
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
   const evidence = (coach?.topicMessageIds || []).map((id) => messages.get(id)).filter(Boolean);
   $('field-coach-evidence').textContent = evidence.length ? `依据 ${evidence.length} 条话题记录：${evidence.slice(-3).map((message) => `${message.speaker === 'self' ? '我' : '对方'}：${message.text}`).join(' / ')}` : '';
@@ -603,10 +640,14 @@ function renderFieldCoachPlan() {
   if (!result) return;
   if (result.error) { $('field-coach-plan-result').textContent = result.error; return; }
   const assessment = result.planAssessment;
-  $('field-coach-plan-result').append(el('p', {}, `${planVerdictNames[assessment.verdict] || '建议待判断'} · ${assessment.reason}`),
+  const details = el('details', { class: 'coach-details' }, el('summary', {}, '查看评估依据'),
+    el('p', {}, `判断：${assessment.reason}`),
     el('p', {}, `${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}：${assessment.timingSuggestion?.guidance || '还没有足够的时机依据。'}`));
-  if (assessment.adjustedPlan) $('field-coach-plan-result').append(el('p', {}, `可以改成：${assessment.adjustedPlan}`));
-  $('field-coach-plan-result').append(el('p', {}, `下一步：${assessment.nextAction}`));
+  if (assessment.adjustedPlan) details.append(el('p', {}, `可以改成：${assessment.adjustedPlan}`));
+  details.append(el('p', {}, `完整下一步：${assessment.nextAction}`));
+  $('field-coach-plan-result').append(el('p', { class: 'coach-plan-verdict' }, planVerdictNames[assessment.verdict] || '建议待判断'),
+    el('p', { class: 'coach-plan-next' }, `下一步：${assessment.nextAction}`),
+    el('p', { class: 'helper' }, `时机：${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}`), details);
 }
 function chooseDirection(direction) {
   state.selectedDirection = direction;

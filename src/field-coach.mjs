@@ -12,6 +12,7 @@ export const FIELD_COACH_SCHEMA = z.strictObject({
   topicMessageIds: evidenceIds,
   initiative: shortText(200),
   nextAction: shortText(200),
+  pitfall: shortText(80).optional(),
   warmingLayer: z.enum(['A', 'B', 'C', 'none']),
   reason: shortText(200),
 });
@@ -34,7 +35,7 @@ const FIELD_PLAN_TASK = `你是本轮的场外教练，评估用户提出的计�
 升温层级与上切/下切/平移话题方向独立。A是浅而具体的评价或定义，例如你好看、你不错、你是什么样的人，可主动轻度尝试，不必先等积极信号。B是男对女的两性身份或约会意味框架，不等于单纯邀约。C是明显私密暗示，例如来我家床上坐或猫后空翻的私密邀请；舒适度未知、证据有限或阻力含糊时不建议C，不把高热度、用户自己的草稿或过去了几轮当作舒适证据。
 默认一个完整话题内一次升温尝试，避免同轮叠加强度；出现良性阻力，结合上下文化解再发展下一轮。不能把明确抗拒或拒绝解释为测试；停止相同升级。针对C必须有已建立相互舒适、对方接受私密框架的具体依据，否则调整为A、普通交流或澄清，不新增人工确认步骤。
 timingSuggestion 用 now/after_response/after_topic/wait/unknown 表达当下、回应后、话题结束后、等待或未知，guidance 简短说明。只引用实际 context.messages 的 id；unknown 不带 evidenceIds，也不编造精确等待时长或钟点。信息不足时指出缺失条件，但不要把主动A统一推迟到积极信号之后。
-verdict=adjust 必须给 adjustedPlan，其他 verdict 不给 adjustedPlan。只给当轮必要短理由与下一步，不引用私有知识原文、目录或理论摘录。通过唯一 submit_coaching_result 一次提交符合工具schema的结果。`;
+verdict=adjust 必须给 adjustedPlan，其他 verdict 不给 adjustedPlan。结论 reason、时机 guidance、修改 adjustedPlan（需要时）与下一步 nextAction 各用一句短句，建议各40字以内；只保留当前优先动作，不列多步计划，不堆叠原理或回复示例。只给当轮必要短理由与下一步，不引用私有知识原文、目录或理论摘录。通过唯一 submit_coaching_result 一次提交符合工具schema的结果。`;
 
 const EXACT_TIME = /(?:\d+(?:\.\d+)?|[一二三四五六七八九十两半]+)\s*(?:秒钟?|分钟|个?小时|天后|周后|点钟)|(?:上午|下午|晚上|早上|凌晨|傍晚)\s*(?:\d+|[一二三四五六七八九十两]+)点|\d{1,2}:\d{2}/u;
 

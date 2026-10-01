@@ -130,9 +130,13 @@
     </section>
     <aside id="field-coach" class="field-coach" aria-labelledby="field-coach-title">
       <div class="section-heading"><h2 id="field-coach-title">场外教练</h2><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
-      <p class="helper">看整段对话，把握主导与节奏。</p>
-      <section class="field-coach-section"><span class="eyebrow">当前话题</span><p id="field-coach-topic">有对话后再判断</p><p id="field-coach-state" class="helper" role="status">等待新的对话</p></section>
-      <section class="field-coach-section"><span class="eyebrow">怎样主导</span><p id="field-coach-initiative">记录对方的话后，结合完整话题给建议。</p><p id="field-coach-next" class="helper"></p><p id="field-coach-evidence" class="helper"></p></section>
+      <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>热度</span><strong id="field-coach-temperature">待判断</strong></div><p id="field-coach-heat-status" role="status">信息不足</p><p id="field-coach-heat-basis" class="helper">记录对方的新消息后再判断。</p></section>
+      <ol class="coach-actions" aria-label="本轮行动指引">
+        <li><span class="coach-action-label">现在做</span><p id="field-coach-initiative">先记录对方的新消息。</p></li>
+        <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">本轮雷点待判断。</p></li>
+        <li><span class="coach-action-label">往哪聊</span><p id="field-coach-next">分析后给出推荐方向。</p></li>
+      </ol>
+      <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
       <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div></form>
       <details class="field-coach-section style-entry"><summary>我的表达偏好</summary><p class="helper">这句像不像你？可以保留改写，明确选择今后使用的规则。</p><button id="open-style-preferences" class="quiet-button" type="button">调整我的表达偏好</button></details>
     </aside>

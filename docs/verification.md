@@ -1,5 +1,11 @@
 # Verification — 2026-10-01
 
+## Concise field-coach guidance
+
+The default coach now presents the existing five-dimensional interaction index, followed by the current priority, a pitfall and the recommended conversation direction. Temperature is a rounded provisional index, not a success probability. Insufficient evidence or missing classifications suppress the number; explicit negative resistance suppresses both the number and conflicting warming/invitation guidance. Long historical conditions remain intact, with full topic/evidence and plan explanations in disclosures. New inference instructions request one short actionable sentence per field; the optional pitfall keeps historical records compatible.
+
+Local acceptance passed **155/155 Node tests**, the three-asset public build and four isolated Chromium journeys (HTTP, HTTPS proxy, direct demo and personal style), with zero actual provider/email calls. Direct-demo checks cover a 100 index from one message, a 100 index with explicit negative resistance, unknown temperature, tied recommendations, optional historical pitfalls, retained conditions, collapsed details and metadata-triggered invalidation. An independent non-author source and browser review checked the same display boundaries, focus/drafts and day/night layouts at 320/437/1280 px. It identified and resolved a list-class spacing collision and a metadata caption below the existing 12 px floor. Candidate and merged-main CI remain separate delivery gates; external hosting is not established by these local checks.
+
 ## Service-lock test cleanup correction
 
 [PR #8](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/8) delivered the private personal-expression implementation at `375ba93`; its [candidate CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36759070254) passed. The initial [merged-main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36759371326) failed in the existing two-process dead-receipt test during cleanup. The test had already asserted exactly one started server and one expected lock rejection, then wrote a stop message to both children. The rejected child could already have exited, producing `EPIPE`. This failure is retained as evidence and is not overwritten by the earlier candidate success.
