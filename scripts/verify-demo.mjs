@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 import { createBetaServer } from '../src/beta-api.mjs';
 import { DEFAULT_KNOWLEDGE_PATH } from '../src/knowledge.mjs';
@@ -447,20 +448,22 @@ try {
   await response(`/api/counterparts/${secondId}/messages`, 'POST', () => page.locator('#save-message').click());
   await page.locator('.message-bubble').filter({ hasText: manualB }).waitFor();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Manual self text supersedes the old AI pending bubble');
-  assert.equal(await page.locator('#suggestion-history').isVisible(), true, 'A single historical suggestion stays reachable');
-  async function viewHistoricalA() {
-    const history = page.locator(`[data-suggestion-id="${suggestedA.id}"]`);
-    if (!await history.isVisible()) await page.locator('#suggestion-history > summary').click();
-    await history.click();
-    await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
-  }
-  await viewHistoricalA();
-  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Archived replies have no browsing or copy UI');
+  const archivedCopyMe = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+  const oldCopy = await context.request.post(`${origin}/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, {
+    headers: { origin, 'x-csrf-token': archivedCopyMe.csrfToken }, data: { requestId: randomUUID(), copiedText: suggestedA.reply },
+  });
+  assert.equal(oldCopy.status(), 200, 'The existing account-owned receipt API remains compatible');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'A newer old-context copy receipt cannot revive archived advice');
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   const counterpartC = '这是对我实际 B 的后续 C。';
   await page.locator('#message-speaker').selectOption('other'); await page.locator('#message-text').fill(counterpartC);
   const cRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${secondId}/followup`) && r.method() === 'POST');
   const cResult = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal((await cRequest).postDataJSON().previousSuggestionId, undefined, 'Browsing old A does not select its feedback source');
+  assert.equal((await cRequest).postDataJSON().previousSuggestionId, undefined, 'An archived A copy cannot select the current feedback source');
   assert.equal(cResult.previousMessage, null); assert.equal(cResult.feedback, null);
   assert.equal(cResult.timing.fromSource, 'unknown');
   await page.locator('.message-bubble').filter({ hasText: counterpartC }).waitFor();
@@ -474,39 +477,33 @@ try {
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Reload never restores superseded A as pending');
   const newAfterB = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
   assert.equal(newAfterB.pendingEligible, true, 'A new reply after B remains eligible');
-  await viewHistoricalA();
-  const copiedHistoricalText = '旧建议重新使用时，这个修改版本只按复制记录推定。';
-  await page.locator('#suggestion-text').fill(copiedHistoricalText);
+  await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
+  const copiedCurrentText = '本轮建议的修改版本，只按复制记录推定。';
+  await page.locator('#suggestion-text').fill(copiedCurrentText);
   await page.locator('#message-text').fill('复制失败也不能擦掉的草稿');
   await page.route('**/suggestions/*/copied', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SYNTHETIC_COPY_FAILURE', message: '合成复制记录故障。' } }) }));
   await page.locator('#copy-reply').click();
   await page.locator('#notice').filter({ hasText: '复制时间未保存' }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '复制失败也不能擦掉的草稿');
-  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  assert.equal(await page.locator('#suggestion-editor').isVisible(), true, 'Failed copy acknowledgment retains the current editable advice');
   await page.unroute('**/suggestions/*/copied');
-  const firstRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
+  const currentCopy = await response(`/api/counterparts/${secondId}/suggestions/${newAfterB.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
   await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
-  assert.equal(await page.locator('#suggestion-text').inputValue(), copiedHistoricalText, 'Reload restores the eligible edited copy');
-  await page.locator('#message-text').fill('历史建议新复制后的回应一。');
+  assert.equal(await page.locator('#suggestion-text').inputValue(), copiedCurrentText, 'Reload restores the eligible edited copy');
+  await page.locator('#message-text').fill('本轮建议复制后的回应。');
   const recopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal(recopyFollowup.previousMessage.suggestionId, suggestedA.id);
-  assert.equal(recopyFollowup.previousMessage.text, copiedHistoricalText);
+  assert.equal(recopyFollowup.previousMessage.suggestionId, newAfterB.id);
+  assert.equal(recopyFollowup.previousMessage.text, copiedCurrentText);
   assert.equal(recopyFollowup.timing.fromSource, 'clipboard_copied');
-  await page.locator('.message-bubble').filter({ hasText: '历史建议新复制后的回应一。' }).waitFor();
+  await page.locator('.message-bubble').filter({ hasText: '本轮建议复制后的回应。' }).waitFor();
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
-  await viewHistoricalA();
-  const secondRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
-  assert.notEqual(secondRecopy.copyReceipt.id, firstRecopy.copyReceipt.id);
-  await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
-  await page.locator('#message-text').fill('同一历史建议另一次新复制后的回应二。');
-  const secondRecopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal(secondRecopyFollowup.previousMessage.suggestionId, suggestedA.id);
-  assert.notEqual(secondRecopyFollowup.feedback.id, recopyFollowup.feedback.id, 'A different fresh copy can support another unverified followup');
-  await page.locator('.message-bubble').filter({ hasText: '同一历史建议另一次新复制后的回应二。' }).waitFor();
-  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  const archived = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data.suggestions;
+  assert.ok(archived.some(({ id }) => id === suggestedA.id) && archived.some(({ id }) => id === newAfterB.id), 'Superseded and consumed suggestions remain account-owned backend records');
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Consumed current advice does not become an archived copy surface');
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   // Direction feedback uses held HTTP fixtures after the existing durable journey.
   // These extra reply requests never reach even the synthetic provider or a real account.
   const beforeDirectionChecks = { classifications, replies, plans };
@@ -566,9 +563,7 @@ try {
     assert.equal(await page.locator('#suggestion-editor').isVisible(), false, 'The previous draft is hidden during generation');
     assert.equal(await page.locator('#suggestion-meta').isVisible(), false);
     assert.equal(await page.locator('#copy-reply').isDisabled(), true);
-    const historicalButtons = await page.locator('#suggestion-list button').all();
-    assert.ok(historicalButtons.length > 0);
-    for (const button of historicalButtons) assert.equal(await button.isDisabled(), true, 'History cannot replace a busy reply');
+    assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Generation has no archive selection that could replace the current reply');
     await assertSelectedDirection(direction);
   }
   async function beginDirection(direction, { resultDirection = direction, reply = sameReply, cached = false, status = 200, fromServer = false } = {}) {
@@ -605,7 +600,7 @@ try {
   async function assertStaticDirection(direction) {
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
     assert.ok((await page.locator('#suggestion-direction').textContent()).includes(directionLabels[direction]));
-    assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'Reading history or reloading has no fresh-switch announcement');
+    assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'Reloading the current advice has no fresh-switch announcement');
     assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
     await assertSelectedDirection(direction);
   }
@@ -634,12 +629,8 @@ try {
   assert.ok(failedUpdate.includes('未取回') && failedUpdate.includes('新回复'), failedUpdate);
   assert.equal(await page.locator('#suggestion-update').isVisible(), true);
   assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
-  const historyFirst = page.locator(`[data-suggestion-id="${firstDirection.suggestion.id}"]`);
-  if (!await historyFirst.isVisible()) await page.locator('#suggestion-history > summary').click();
-  await historyFirst.click(); await assertStaticDirection('down');
-  await page.locator(`[data-suggestion-id="${returnedDirection.suggestion.id}"]`).click();
-  await assertStaticDirection('sideways');
-  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'History preserves edits to each suggestion');
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0);
+  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'Failed replacement keeps the current edited draft');
   staticDirectionFixtures = true;
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
@@ -747,7 +738,7 @@ try {
   assert.equal(delayedFollowup.previousMessage, null); assert.equal(delayedFollowup.feedback, null);
   const savedDuringHold = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
   assert.equal(savedDuringHold.messages.at(-1).text, delayedMessageText, 'New message is durably saved while its UI readback is held');
-  assert.ok(savedDuringHold.suggestions.some((item) => item.id === delayedStoredReply.suggestion.id), 'The completed old reply remains available as history');
+  assert.ok(savedDuringHold.suggestions.some((item) => item.id === delayedStoredReply.suggestion.id), 'The completed old reply remains a backend record');
   const delayedDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
   await delayedStoredReply.complete(); await delayedDirectoryRefresh;
   delayedReadback.release.resolve();
@@ -974,9 +965,19 @@ try {
   assert.equal(await page.locator('#notice').isVisible(), false, 'A delayed failure cannot report against a different conversation');
   await page.unroute(failedConversationPath);
   await selectConversation(secondId);
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0);
   if (!await page.locator('#copy-reply').isVisible()) {
-    if (!await page.locator('#suggestion-history').getAttribute('open')) await page.locator('#suggestion-history > summary').click();
-    await page.locator('#suggestion-list .history-button').first().click();
+    // Obtain a fresh injected-model result for this context. The removed archive
+    // entry must never be used merely to make the copy-feedback check runnable.
+    const copyFeedbackMe = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+    const fresh = await context.request.post(`${origin}/api/counterparts/${secondId}/reply`, {
+      headers: { origin, 'x-csrf-token': copyFeedbackMe.csrfToken }, data: { requestId: randomUUID(), direction: 'down', topicChangeRequested: true },
+    });
+    assert.equal(fresh.status(), 200, JSON.stringify(await fresh.json()));
+    await page.reload();
+    await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+    await selectConversation(secondId);
+    await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   }
   await page.locator('#copy-reply').click();
   await page.locator('#notice').filter({ hasText: '已复制' }).waitFor();
@@ -1017,8 +1018,8 @@ try {
   const readA = (await (await context.request.get(`${origin}/api/counterparts/${savedA.id}`)).json()).data.counterpart;
   assert.equal(readA.alias, '异步保存对象 A');
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy and history', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'history and reload use static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
-  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/history, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'backend archive retention without stale-copy UI restoration', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'current advice reload uses static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
+  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/current reload, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }

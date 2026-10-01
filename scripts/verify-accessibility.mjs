@@ -153,9 +153,9 @@ try {
       await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
       await page.unroute(`**/api/counterparts/${id}/reply`);
       await scan('reply-ready');
-      await page.locator('#suggestion-history > summary').click();
+      assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Current advice has no archive entry');
       await page.locator('.suggestion-details > summary').click();
-      await scan('reply-history-and-reason');
+      await scan('reply-reason');
       await openCoach();
       if (width === 320) {
         assert.equal(await page.evaluate(() => document.activeElement.id), 'field-coach-title');
