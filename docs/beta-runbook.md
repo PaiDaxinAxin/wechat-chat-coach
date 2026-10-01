@@ -49,3 +49,8 @@ Stop the service cleanly before a filesystem backup. Preserve the SQLite databas
 For new `INVALID_MODEL_OUTPUT` failures, private `model_job_failed` audit entries preserve only allowlisted fixed diagnostic categories and bounded schema-field paths. They exclude error messages, invalid values, model/provider bodies and arbitrary path strings, and are not returned in ordinary API/MCP results. Inspect this private evidence before authorizing another bounded manual attempt. Older failures without diagnostics cannot be reconstructed; do not add automatic retries to obtain evidence.
 
 Delete a counterpart through its authenticated UI to remove associated messages, jobs, suggestions, feedback and copy/followup receipts. Archived source knowledge contains no conversation/profile data and has a separate owner-managed lifecycle, as does any approved anonymized supplement already promoted. No private profile/chat records belong in GitHub or global organization memory.
+
+
+## Personal hosted owner preview
+
+The selected Leon Vercel / personal Supabase deployment uses PostgreSQL and a platform-protected owner entry, separate from this local SQLite runbook. Follow [personal-cloud-hosting.md](personal-cloud-hosting.md), including the explicit preview target, unique Host guard, private schema, TLS verification and no public shared-account access. Local data and owner stdio remain on the owner machine; a cloud publication does not silently migrate local conversations.

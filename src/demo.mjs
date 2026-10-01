@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
-import { BetaError } from './beta-store.mjs';
+import { BetaError } from './store-contract.mjs';
 import { QUESTIONNAIRES, validateProfile, CounterpartInputSchema } from './domain.mjs';
 
 const seeds = new WeakMap();

@@ -23,4 +23,35 @@ jobs:
       - run: npm run test:demo
       - run: npm run test:style
       - run: npm run test:a11y
+      - run: node scripts/verify-reply-guidance.mjs
+      - run: node tests/verify-image-input.mjs
       - run: git diff --check
+
+  postgres:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        suite: [postgres-store, postgres-knowledge, postgres-store-api]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: coach_test
+          POSTGRES_PASSWORD: synthetic-ci-only
+          POSTGRES_DB: coach_ci
+        ports: [5432:5432]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CHAT_COACH_TEST_DATABASE_URL: postgresql://coach_test:synthetic-ci-only@127.0.0.1:5432/coach_ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node --test tests/${{ matrix.suite }}.test.mjs tests/cloud.test.mjs

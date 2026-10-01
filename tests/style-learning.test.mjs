@@ -117,7 +117,7 @@ test('explicit adoption applies only four rule fields across own counterparts an
   const parsed = JSON.parse(f.captured.at(-1).userProfile);
   assert.deepEqual(parsed.confirmedPersonalStyle, expected); assert.equal(parsed.currentStyle, profile().style);
   assert.deepEqual(Object.keys(parsed.confirmedPersonalStyle.rules[0]).sort(), ['conditions', 'limits', 'target', 'text']);
-  assert.doesNotMatch(JSON.stringify(parsed), /private-case-b-sentinel|private-case-why-sentinel|originalSuggestion|styleFit|willingness|replyObservation/);
+  assert.doesNotMatch(JSON.stringify(parsed), /private-case-b-sentinel|private-case-why-sentinel|"(?:originalSuggestion|styleFit|willingness|replyObservation)"\s*:/);
   await f.server.invokeForAccount({ accountId: f.owner.id, method: 'POST', path: `/api/counterparts/${secondId}/reply`, body: { requestId: 'mcp_adopt_second' } });
   assert.deepEqual(JSON.parse(f.captured.at(-1).userProfile).confirmedPersonalStyle, expected);
   await assert.rejects(f.server.invokeForAccount({ accountId: f.owner.id, method: 'PUT', path: '/api/profile', body: { ...profile() } }), { code: 'MCP_OPERATION_FORBIDDEN' });

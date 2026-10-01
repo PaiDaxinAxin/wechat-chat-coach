@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+data
+runs
+profiles
+coverage
+knowledge
+tests
+docs
+.env*
+*.pem
+*.key
+*.log
+AGENTS.md
+README.md

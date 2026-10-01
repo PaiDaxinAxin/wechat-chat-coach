@@ -39,6 +39,11 @@ test('plan uses the shared native provider path, exact full knowledge and comple
     assert.match(body.messages[2].content, /不是发给对方的微信回复/);
     assert.match(body.messages[2].content, /结论 reason、时机 guidance、修改 adjustedPlan（需要时）与下一步 nextAction 各用一句短句，建议各40字以内/);
     assert.match(body.messages[2].content, /只保留当前优先动作，不列多步计划，不堆叠原理或回复示例/);
+    assert.match(body.messages[2].content, /连续3次隔几小时只回哈哈\/emoji/);
+    assert.match(body.messages[2].content, /此前热度>65.*她资料或原话提过的真实话题/);
+    assert.match(body.messages[2].content, /原本投入低.*先留白.*用户提供具体朋友圈动态/);
+    assert.match(body.messages[2].content, /过去有双向暧昧.*忙作为一种可能.*晚些或晚上换话题/);
+    for (const bound of ['不是成功概率或机械阈值', '不补造旧分数', '忙或无聊不是已知事实', '不访问或抓取朋友圈', '晚些不是固定等几小时', '历史暧昧不覆盖明确拒绝']) assert.ok(body.messages[2].content.includes(bound), bound);
     assert.equal(body.tools.length, 1);
     assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
     assert.equal(body.parallel_tool_calls, false);

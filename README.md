@@ -20,7 +20,7 @@ The owner issues individual free or paid-beta invitations in the management view
 
 Free users have three lifetime successful classifications. Persisted context replays and direction changes do not reclassify; failed classifications do not consume those trials. After exhaustion, the user can generate a reply directly with the complete knowledge and without fabricated classifier weights. Provider attempts have separate bounded daily budgets, including failed calls.
 
-Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent storage, recovery and controlled external access. A localhost address is usable only on the owner's machine. Personal cloud hosting remains unselected; an invite-only external beta still requires a verified HTTPS entry. Never give testers the private repository, server image or knowledge file.
+Use [the beta runbook](docs/beta-runbook.md) for startup, private persistent storage, recovery and controlled external access. A localhost address is usable only on the owner's machine. Personal hosting uses the Leon Vercel workspace and the existing personal Supabase project. The owner preview is protected by Vercel Authentication; public signup and external access remain deferred. See [personal hosting](docs/personal-cloud-hosting.md) for the exact targets and access boundary. Never give testers the private repository, server image or knowledge file.
 
 ## Project records
 
@@ -61,6 +61,14 @@ Non-local listening requires explicit `CHAT_COACH_HOST`, `CHAT_COACH_ALLOWED_HOS
 
 This single-token development entry is retained for transport tests and local experimentation. Use the account-scoped beta server for invited testers.
 
+## Reply guidance and images
+
+Every newly generated reply includes a topic direction and a separate relationship action, with a short guide for replying in the user's own words. Waiting and pausing show reasons and reentry conditions without creating a sent-message draft. Stored older suggestions keep an explicit missing-guidance label.
+
+Paste or select one PNG, JPEG or WebP image up to 1 MB in the composer, optionally explain its meaning, then interpret it into an editable description. Original images are processed transiently rather than saved by this application. AI descriptions and user interpretations retain their separate source labels. Screenshots that may contain both speakers do not automatically imply that a previous reply draft was sent. Emoji also works as ordinary text.
+
+Assessment uses both complete recorded profiles and every supplied saved message, not a last-N window. Missing history remains unknown. Sparse evidence produces no numerical heat score. See [full-context assessment](docs/heat-context.md) for the evidence, timing and trend limits.
+
 ## Classification and feedback
 
 Topic moves are `up` (上切), `down` (下切) and `sideways` (平移), distinct from relational actions and A/B/C warming intensity. One round means a complete topic. Three weights sum to one and are uncalibrated recommendations, not success probabilities. Heat dimensions preserve unknowns and message evidence references. [examples/chat.json](examples/chat.json) is synthetic.
@@ -71,7 +79,7 @@ All submitted feedback starts as raw, untrusted observations in private storage.
 
 ## Checks
 
-Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, `npm run test:demo`, `npm run test:style`, and `npm run test:a11y`. The accessibility journey runs all default axe-core rules over desktop and narrow day/night states, and records incomplete results for manual review. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; `scripts/verify-style-live.mjs` requires explicit opt-in and attempts one fictional reply using an adopted expression preference. Neither is part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
+Run `npm test`, `npm run build`, `npx playwright install chromium`, `npm run test:browser`, `npm run test:browser -- --https-proxy`, `npm run test:demo`, `npm run test:style`, and `npm run test:a11y`, `node scripts/verify-reply-guidance.mjs`, and `node tests/verify-image-input.mjs`. The accessibility journey runs all default axe-core rules over desktop and narrow day/night states, and records incomplete results for manual review. CI uses synthetic records and makes no paid model calls. `scripts/verify-live.mjs` is a deliberate, bounded two-call Agnes integration check using a temporary database and the full knowledge; `scripts/verify-style-live.mjs` requires explicit opt-in and attempts one fictional reply using an adopted expression preference. Neither is part of automatic CI. See the acceptance matrix for the distinction between verified local behavior, external delivery and real-chat validation.
 
 ## Knowledge write recovery
 

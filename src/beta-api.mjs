@@ -5,21 +5,21 @@ import { unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import packageMetadata from '../package.json' with { type: 'json' };
-import { createBetaStore, BetaError, seedOwner } from './beta-store.mjs';
+import { BetaError } from './store-contract.mjs';
 import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './knowledge.mjs';
-import { ensureLocalDemoSeed, assertLocalDemoRequest } from './demo.mjs';
-import { archiveKnowledgeVersion } from './case-snapshot.mjs';
 import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs';
 import { StyleLearningInputSchema } from './style-learning.mjs';
 import { generateFieldCoachPlan } from './field-coach.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
+import { interpretChatImage, validateChatImage, guardImageBytes, validateImageInterpretation, IMAGE_BODY_LIMIT, IMAGE_INPUT_VERSION } from './image-input.mjs';
 import {
   QUESTIONNAIRES, validateProfile, buildChatContext, computeHeat, rankTopThree,
   ProfileInputSchema, CounterpartInputSchema, MeetingInputSchema, FeedbackInputSchema, ReviewInputSchema,
   cleanFeedback, reviewFeedback, buildFeedbackKnowledgeSupplement,
 } from './domain.mjs';
 
-export { BetaError, seedOwner };
+export { BetaError };
+export async function seedOwner(store, options) { return await store.seedOwner(options); }
 const digest = (value) => createHash('sha256').update(value).digest('hex');
 const AUTH_COOKIE = 'chat_coach_session';
 const BODY_LIMIT = 256_000;
@@ -28,6 +28,7 @@ const RegisterSchema = z.strictObject({ invite: z.string().min(1).max(200), user
 const LoginSchema = z.strictObject({ username: z.string(), password: z.string() });
 const RequestId = z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const ClassifySchema = z.strictObject({ requestId: RequestId });
+const ImageReadSchema = z.strictObject({ requestId: RequestId, image: z.string(), explanation: z.string().trim().max(2_000).default('') });
 const ReplySchema = z.strictObject({ requestId: RequestId, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().max(2_000).optional() });
 const PlanInputSchema = z.strictObject({ requestId: RequestId, plan: z.string().trim().min(1).max(2_000) });
 const MessageSchema = z.strictObject({ speaker: z.enum(['self', 'other']), text: z.string().trim().min(1).max(20_000) });
@@ -49,6 +50,8 @@ const MESSAGES = {
   LOGIN_FAILED: '账号或密码不匹配。', INVITE_INVALID: '邀请码无效、已使用或已过期。', PASSWORD_INVALID: '密码需为10至128字符，并包含字母和数字。',
   USERNAME_INVALID: '用户名需为2至40字符，可用中文、字母、数字、下划线、点或连字符。',
   RATE_LIMITED: '操作过于频繁，请稍后再试。', REQUEST_TOO_LARGE: '提交内容过长。',
+  IMAGE_TOO_LARGE: '图片需小于1MB，请先裁剪或压缩。', IMAGE_INVALID: '请选择有效的JPEG、PNG或WebP图片。',
+  IMAGE_BYTES_BLOCKED: '解释或识读结果含有原图编码，未保存；请改用文字描述。',
   MODEL_OPERATION_FAILED: '模型请求未完成，请查看记录并重试。',
   INVALID_MODEL_OUTPUT: '模型结果未通过格式或证据校验，请手动重试。',
   CONTEXT_REQUIRED: '请先保存至少一句对方说的话，再请求聊天建议。',
@@ -57,6 +60,7 @@ const MESSAGES = {
   FOLLOWUP_SOURCE_ALREADY_LINKED: '上一轮草稿已关联过后续消息，请直接录入新的一句或选择本轮回复。',
   COPY_REQUEST_CONFLICT: '复制记录编号已用于其他内容，请重新复制。',
   MESSAGE_TIME_INVALID: '请填写有效的过去时间；录入时间会保留。',
+  SUGGESTION_NOT_SENDABLE: '这是一条等待或暂停建议，没有需要发送的回复。',
   INVALID_STYLE_LEARNING: '表达偏好未保存，请检查本次自述或规则内容。',
   INVALID_STYLE_RULE: '请填写有效的表达偏好。',
   STYLE_REVISION_CONFLICT: '画像或表达偏好已更新，请重新载入后保存。',
@@ -96,7 +100,7 @@ const DIAGNOSTIC_CODES = new Set([
 const DIAGNOSTIC_FIELDS = new Set([
   'status', 'confidence', 'phase', 'obstacle', 'type', 'evidenceIds', 'reason', 'heat', 'activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough', 'level',
   'options', 'topicMove', 'relationAction', 'weight', 'uncertainties', 'recommendationKind', 'fieldCoach', 'currentTopic', 'topicStatus', 'topicMessageIds', 'initiative', 'nextAction', 'pitfall', 'warmingLayer',
-  'reply', 'action', 'styleNote', 'verdict', 'timingSuggestion', 'guidance', 'adjustedPlan',
+  'reply', 'action', 'styleNote', 'verdict', 'timingSuggestion', 'guidance', 'adjustedPlan', 'relationMove', 'ownWordsGuide', 'reentryWhen', 'description', 'kind', 'uncertainty',
 ]);
 function safeModelDiagnostics(error) {
   if (error?.code !== 'invalid_model_output' || !Array.isArray(error.diagnostics)) return [];
@@ -130,11 +134,11 @@ function cookieToken(req) {
 function setSessionCookie(res, session, secure) {
   res.setHeader('set-cookie', `${AUTH_COOKIE}=${session.token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800${secure ? '; Secure' : ''}`);
 }
-function body(req) {
+function body(req, limit = BODY_LIMIT) {
   return new Promise((resolve_, reject) => {
     const chunks = []; let length = 0; let settled = false;
     const fail = (error) => { if (settled) return; settled = true; req.removeListener('data', onData); req.resume(); reject(error); };
-    const onData = (chunk) => { length += chunk.length; if (length > BODY_LIMIT) return fail(new BetaError('REQUEST_TOO_LARGE', 413)); chunks.push(chunk); };
+    const onData = (chunk) => { length += chunk.length; if (length > limit) return fail(new BetaError('REQUEST_TOO_LARGE', 413)); chunks.push(chunk); };
     req.on('data', onData);
     req.once('end', () => { if (settled) return; settled = true; try { resolve_(length === 0 ? {} : parse(JsonObject, JSON.parse(Buffer.concat(chunks).toString('utf8')))); } catch { reject(new BetaError('INPUT_INVALID')); } });
     req.once('aborted', () => fail(new BetaError('INPUT_INVALID')));
@@ -173,14 +177,20 @@ async function serviceLock(dataDir) {
 }
 
 export async function createBetaServer({
-  dataDir, knowledgePath, webDir = join(PROJECT_ROOT, 'dist/public'), publicOrigin,
-  classifyFn = classifyChat, replyFn = generateReply, planFn = generateFieldCoachPlan, storeKnowledge,
-  localDemoMode = false,
+  store: providedStore, ownsStore = providedStore === undefined, workerId, archiveKnowledge,
+  dataDir, knowledgePath, webDir = providedStore === undefined ? join(PROJECT_ROOT, 'dist/public') : null, publicOrigin,
+  classifyFn = classifyChat, replyFn = generateReply, planFn = generateFieldCoachPlan, imageFn = interpretChatImage, storeKnowledge,
+  localDemoMode = false, hostedPreviewOwnerId,
   providerEnv = process.env,
   freeProviderDailyLimit = 10, paidProviderDailyLimit = 10, globalProviderDailyLimit = 100,
   now = Date.now,
 } = {}) {
   if (typeof localDemoMode !== 'boolean') throw new BetaError('DEMO_CONFIGURATION_INVALID');
+  const externalStore = providedStore !== undefined;
+  if (typeof ownsStore !== 'boolean' || (externalStore && (!providedStore || !storeKnowledge || typeof archiveKnowledge !== 'function'))) throw new BetaError('STORE_CONFIGURATION_INVALID', 500);
+  if (localDemoMode && externalStore) throw new BetaError('DEMO_LOCAL_STORE_REQUIRED', 400);
+  if (hostedPreviewOwnerId !== undefined && (!externalStore || localDemoMode || !publicOrigin || typeof hostedPreviewOwnerId !== 'string' || !hostedPreviewOwnerId)) throw new BetaError('HOSTED_PREVIEW_CONFIGURATION_INVALID', 500);
+  const { ensureLocalDemoSeed, assertLocalDemoRequest } = localDemoMode ? await import('./demo.mjs') : {};
   let canonicalOrigin;
   if (publicOrigin !== undefined) {
     try {
@@ -202,64 +212,81 @@ export async function createBetaServer({
       }
     } catch { throw new BetaError('PUBLIC_BUILD_REQUIRED', 500); }
   }
-  const directory = resolve(dataDir ?? join(PROJECT_ROOT, 'data/beta'));
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  // Claim service ownership before SQLite initialization, so a losing server never races PRAGMA/schema setup.
-  const lock = await serviceLock(directory);
-  let store;
-  try {
-    store = createBetaStore({ dataDir: directory, freeProviderDailyLimit, paidProviderDailyLimit, globalProviderDailyLimit, now });
-    store.recoverAbandonedJobs();
-  } catch (error) { store?.close(); lock.release(); throw error; }
+  let directory, lock, store = providedStore;
+  if (!externalStore) {
+    directory = resolve(dataDir ?? join(PROJECT_ROOT, 'data/beta'));
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    // Claim service ownership before SQLite initialization, so a losing server never races PRAGMA/schema setup.
+    lock = await serviceLock(directory);
+    try {
+      const { createBetaStore } = await import('./beta-store.mjs');
+      store = createBetaStore({ dataDir: directory, freeProviderDailyLimit, paidProviderDailyLimit, globalProviderDailyLimit, now });
+      await store.recoverAbandonedJobs();
+    } catch (error) { try { await store?.close(); } finally { lock.release(); } throw error; }
+  }
+  const serviceWorkerId = workerId ?? lock?.workerId ?? randomUUID();
   const knowledge = storeKnowledge ?? createKnowledgeStore({ knowledgePath });
+  const archive = archiveKnowledge ?? (async (snapshot) => {
+    const { archiveKnowledgeVersion } = await import('./case-snapshot.mjs');
+    return await archiveKnowledgeVersion(directory, snapshot);
+  });
   const inFlight = new Map();
   const reviewInFlight = new Map();
   let mcpHandler;
   const authWindows = new Map();
   const secure = canonicalOrigin?.protocol === 'https:';
+  const withSnapshot = async (callback) => typeof store.withSnapshot === 'function' ? await store.withSnapshot(callback) : await callback();
+  const withTransaction = async (callback) => typeof store.withTransaction === 'function' ? await store.withTransaction(callback) : await callback();
 
-  function visibleProfile(user) {
-    const profile = store.getProfile(user.id);
+  async function visibleProfile(user) {
+    const profile = await store.getProfile(user.id);
     if (user.plan === 'free' && profile?.questionnaire.kind === 'full') {
       return { background: profile.background, style: profile.style, growthGoals: profile.growthGoals, relationshipGoal: profile.relationshipGoal, questionnaire: { kind: 'short', answers: {} }, requiresQuestionnaireUpdate: true };
     }
     return profile;
   }
-  function chatSnapshot(userId, counterpartId, { intent } = {}) {
-    const account = store.getUser(userId), profile = store.getProfile(userId), counterpart = store.getCounterpart(userId, counterpartId);
-    if (!profile) throw new BetaError('PROFILE_REQUIRED');
-    if (account.plan === 'free' && profile.questionnaire.kind === 'full') throw new BetaError('FULL_PROFILE_REQUIRES_UPDATE', 403);
-    const { updatedAt: _profileUpdatedAt, ...businessProfile } = profile;
-    const { revision: _revision, ...businessCounterpart } = counterpart;
-    const messages = store.listMessages(userId, counterpartId);
-    if (!messages.some((message) => message.speaker === 'other')) throw new BetaError('CONTEXT_REQUIRED');
-    return buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: store.getMeeting(userId, counterpartId), personalStyle: store.getAppliedPersonalStyle(userId) });
+  async function capturedChatSnapshot(userId, counterpartId, { intent, allowEmpty = false } = {}) {
+    return await withSnapshot(async () => {
+      const account = await store.getUser(userId), profile = await store.getProfile(userId), counterpart = await store.getCounterpart(userId, counterpartId);
+      if (!profile) throw new BetaError('PROFILE_REQUIRED');
+      if (account.plan === 'free' && profile.questionnaire.kind === 'full') throw new BetaError('FULL_PROFILE_REQUIRES_UPDATE', 403);
+      const { updatedAt: profileUpdatedAt, ...businessProfile } = profile;
+      const { revision: counterpartRevision, ...businessCounterpart } = counterpart;
+      const messages = await store.listMessages(userId, counterpartId);
+      if (!allowEmpty && !messages.some((message) => message.speaker === 'other')) throw new BetaError('CONTEXT_REQUIRED');
+      const context = buildChatContext(businessProfile, businessCounterpart, messages, { intent, meeting: await store.getMeeting(userId, counterpartId), personalStyle: await store.getAppliedPersonalStyle(userId) });
+      return { context, profileUpdatedAt, counterpartRevision };
+    });
+  }
+  async function chatSnapshot(userId, counterpartId, options) {
+    return (await capturedChatSnapshot(userId, counterpartId, options)).context;
   }
   function contextHash(context, knowledgeHash, operation, options = {}) {
     const providerModel = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
-    return digest(JSON.stringify({ context, knowledgeHash, operation, direction: options.direction ?? null, ...(options.plan === undefined ? {} : { plan: options.plan }), contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION, providerModel }));
+    return digest(JSON.stringify({ context, knowledgeHash, operation, direction: options.direction ?? null, ...(options.plan === undefined ? {} : { plan: options.plan }), ...(options.image ? { image: { hash: options.image.hash, mime: options.image.mime, bytes: options.image.bytes, explanation: options.explanation, version: IMAGE_INPUT_VERSION } } : {}), contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION, providerModel }));
   }
   async function currentClassification(userId, counterpartId, knowledgeSnapshot) {
     try {
-      const context = chatSnapshot(userId, counterpartId);
+      const context = await chatSnapshot(userId, counterpartId);
       const hash = contextHash(context, knowledgeSnapshot.hash, 'classify');
-      const job = store.latestSuccessful(userId, counterpartId, 'classify', hash);
+      const job = await store.latestSuccessful(userId, counterpartId, 'classify', hash);
       return job?.result ?? { classification: null, heat: computeHeat(null) };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { classification: null, heat: computeHeat(null) };
       throw error;
     }
   }
-  function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
+  async function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
     try {
-      const context = chatSnapshot(userId, counterpartId);
+      const context = await chatSnapshot(userId, counterpartId);
       const classificationHash = contextHash(context, knowledgeSnapshot.hash, 'classify');
       const directHash = contextHash(context, knowledgeSnapshot.hash, 'reply');
-      const directJob = store.latestSuccessful(userId, counterpartId, 'reply', directHash);
+      const directJob = await store.latestSuccessful(userId, counterpartId, 'reply', directHash);
       const conversationHash = contextHash(context, knowledgeSnapshot.hash, 'conversation');
       // Return IDs only: full immutable inputs and knowledge stay server-side.
-      const currentSuggestionIds = suggestions.filter((suggestion) => store.getSuggestionCase(userId, counterpartId, suggestion.id).snapshot?.baseContextHash === conversationHash).map(({ id }) => id);
-      return { currentSuggestionIds, directReply: directJob?.result?.suggestion ? store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, conversationHash), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
+      const cases = await Promise.all(suggestions.map(async (suggestion) => await store.getSuggestionCase(userId, counterpartId, suggestion.id)));
+      const currentSuggestionIds = suggestions.filter((_, index) => cases[index].snapshot?.baseContextHash === conversationHash).map(({ id }) => id);
+      return { currentSuggestionIds, directReply: directJob?.result?.suggestion ? await store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: await store.latestCoachPlan(userId, counterpartId, conversationHash), modelContext: { classificationAttempted: await store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: await store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
     } catch (error) {
       if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { currentSuggestionIds: [], directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
       throw error;
@@ -267,62 +294,71 @@ export async function createBetaServer({
   }
 
   async function runModel(userId, counterpartId, operation, input) {
-    const currentResult = (result) => result.suggestion ? { ...result, suggestion: store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
+    const currentResult = async (result) => {
+      if (operation === 'image_read') guardImageBytes(result.imageInterpretation, input.image);
+      return result.suggestion ? { ...result, suggestion: await store.getSuggestion(userId, counterpartId, result.suggestion.id) } : result;
+    };
     const knowledgeSnapshot = await knowledge.read();
-    const context = chatSnapshot(userId, counterpartId, { intent: operation === 'reply' ? input.intent : undefined });
+    const snapshotOptions = { intent: operation === 'reply' ? input.intent : undefined, allowEmpty: operation === 'image_read' };
+    const { context, profileUpdatedAt, counterpartRevision } = await capturedChatSnapshot(userId, counterpartId, snapshotOptions);
     const hash = contextHash(context, knowledgeSnapshot.hash, operation, input);
     const model = typeof providerEnv.AGNES_MODEL === 'string' ? providerEnv.AGNES_MODEL.trim() : providerEnv.AGNES_MODEL ?? 'agnes-3.0-flash';
-    const profileUpdatedAt = store.getProfile(userId).updatedAt;
-    const counterpartRevision = store.getCounterpart(userId, counterpartId).revision;
     const classificationContext = { ...context }; delete classificationContext.intent;
-    const classified = operation === 'reply' ? store.latestSuccessful(userId, counterpartId, 'classify', contextHash(classificationContext, knowledgeSnapshot.hash, 'classify')) : null;
+    const classified = operation === 'reply' ? await store.latestSuccessful(userId, counterpartId, 'classify', contextHash(classificationContext, knowledgeSnapshot.hash, 'classify')) : null;
     const capturedAt = new Date(now()).toISOString();
-    const archived = await archiveKnowledgeVersion(directory, knowledgeSnapshot);
+    const archived = await archive(knowledgeSnapshot);
     const contextSnapshot = { schemaVersion: 'coach-case-1', capturedAt, modelInput: context, profileUpdatedAt, counterpartRevision, baseContextHash: contextHash(classificationContext, knowledgeSnapshot.hash, 'conversation'), ...(input.plan === undefined ? {} : { request: { plan: input.plan } }),
+      ...(input.image ? { image: { hash: input.image.hash, mime: input.image.mime, bytes: input.image.bytes, version: IMAGE_INPUT_VERSION, explanation: { source: 'user_interpretation', text: input.explanation } } } : {}),
       knowledge: archived, model: { name: model, contextVersion: COACH_CONTEXT_VERSION, protocolVersion: COACH_PROTOCOL_VERSION },
-      choice: { requestedDirection: input.direction ?? null, source: operation === 'classify' ? 'classification' : operation === 'coach_plan' ? 'user_plan' : input.direction ? 'user_choice' : 'direct_reply', classificationJobId: classified?.id ?? null, classificationResult: classified?.result ?? null } };
-    const reserved = store.reserveJob({ userId, counterpartId, operation, requestId: input.requestId, contextHash: hash, knowledgeHash: knowledgeSnapshot.hash, workerId: lock.workerId, providerModel: model, contextSnapshot });
+      choice: { requestedDirection: input.direction ?? null, source: operation === 'image_read' ? 'image_read' : operation === 'classify' ? 'classification' : operation === 'coach_plan' ? 'user_plan' : input.direction ? 'user_choice' : 'direct_reply', classificationJobId: classified?.id ?? null, classificationResult: classified?.result ?? null } };
+    if (typeof store.recoverExpiredJobs === 'function') await store.recoverExpiredJobs();
+    const reserved = await store.reserveJob({ userId, counterpartId, operation, requestId: input.requestId, contextHash: hash, knowledgeHash: knowledgeSnapshot.hash, workerId: serviceWorkerId, providerModel: model, contextSnapshot });
     if (!reserved.fresh) {
-      if (reserved.job.state === 'succeeded') return { ...currentResult(reserved.job.result), cached: true, quota: store.quota(userId) };
+      if (reserved.job.state === 'succeeded') return { ...await currentResult(reserved.job.result), cached: true, quota: await store.quota(userId) };
       if (reserved.job.state === 'failed') throw new BetaError(reserved.job.errorCode ?? 'JOB_INTERRUPTED', 409);
       const running = inFlight.get(reserved.job.id);
       if (!running) throw new BetaError('JOB_IN_PROGRESS', 409);
       const result = await running;
-      return { ...currentResult(result), cached: true, quota: store.quota(userId) };
+      return { ...await currentResult(result), cached: true, quota: await store.quota(userId) };
     }
     const job = reserved.job;
     const pending = (async () => {
       try {
-        store.markJobRunning(job.id);
+        await store.markJobRunning(job.id);
         const options = { knowledgeText: knowledgeSnapshot.text, env: providerEnv };
-        const output = operation === 'classify'
+        let output = operation === 'classify'
           ? await classifyFn(context, options)
+          : operation === 'image_read' ? await imageFn({ context, image: input.image, explanation: input.explanation }, options)
           : operation === 'coach_plan' ? await planFn({ context, plan: input.plan }, options)
           : await replyFn({ context, ...(input.direction === undefined ? {} : { direction: input.direction }) }, options);
         guardRestrictedOutput(output, knowledgeSnapshot.text);
-        const currentKnowledge = await knowledge.read();
-        const currentContext = chatSnapshot(userId, counterpartId, { intent: operation === 'reply' ? input.intent : undefined });
-        if (contextHash(currentContext, currentKnowledge.hash, operation, input) !== hash) throw new BetaError('CONTEXT_CHANGED', 409);
-        let result, suggestion;
-        if (operation === 'classify') {
-          const previous = store.previousClassification(userId, counterpartId);
-          const classification = { ...output, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
-          result = { classification, heat: computeHeat(output, { history: previous ? [previous.result.heat] : [], observedAt: new Date(now()).toISOString() }) };
-        } else if (operation === 'reply') {
-          suggestion = { ...output, id: randomUUID(), direction: input.direction ?? null, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
-          result = { suggestion };
-        } else result = { planAssessment: output };
-        store.completeJob(job.id, result, suggestion);
-        return result;
+        if (operation === 'image_read') output = validateImageInterpretation(output, input.image);
+        return await withTransaction(async () => {
+          const currentKnowledge = await knowledge.read();
+          const currentContext = await chatSnapshot(userId, counterpartId, snapshotOptions);
+          if (contextHash(currentContext, currentKnowledge.hash, operation, input) !== hash) throw new BetaError('CONTEXT_CHANGED', 409);
+          let result, suggestion;
+          if (operation === 'classify') {
+            const previous = await store.previousClassification(userId, counterpartId);
+            const classification = { ...output, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
+            result = { classification, heat: computeHeat(output, { history: previous ? [previous.result.heat] : [], observedAt: new Date(now()).toISOString() }) };
+          } else if (operation === 'reply') {
+            suggestion = { ...output, id: randomUUID(), direction: input.direction ?? null, knowledgeHash: knowledgeSnapshot.hash, contextHash: hash };
+            result = { suggestion };
+          } else if (operation === 'image_read') result = { imageInterpretation: { ...output, source: 'ai_image_description', userExplanation: { source: 'user_interpretation', text: input.explanation }, image: { hash: input.image.hash, mime: input.image.mime, bytes: input.image.bytes } } };
+          else result = { planAssessment: output };
+          await store.completeJob(job.id, result, suggestion);
+          return result;
+        });
       } catch (error) {
         const diagnostics = safeModelDiagnostics(error);
         const safe = normalizedError(error);
-        store.failJob(job.id, safe.code, diagnostics.length ? { diagnostics } : undefined);
+        await store.failJob(job.id, safe.code, diagnostics.length ? { diagnostics } : undefined);
         throw safe;
       }
     })();
     inFlight.set(job.id, pending);
-    try { return { ...currentResult(await pending), cached: false, quota: store.quota(userId) }; }
+    try { return { ...await currentResult(await pending), cached: false, quota: await store.quota(userId) }; }
     finally { if (inFlight.get(job.id) === pending) inFlight.delete(job.id); }
   }
 
@@ -333,28 +369,28 @@ export async function createBetaServer({
       if (feedback.review.reviewHash !== reviewHash) throw new BetaError('REVIEW_CONFLICT', 409);
       return feedback;
     }
-    const pendingApproval = store.getKnowledgeApproval(ownerId, feedback.id);
+    const pendingApproval = await store.getKnowledgeApproval(ownerId, feedback.id);
     if (pendingApproval) {
       if (pendingApproval.review_hash !== reviewHash) throw new BetaError('REVIEW_CONFLICT', 409);
       const current = await knowledge.read();
-      if (current.text.includes(pendingApproval.marker)) return store.finishKnowledgeApproval(ownerId, feedback.id, current.hash);
+      if (current.text.includes(pendingApproval.marker)) return await store.finishKnowledgeApproval(ownerId, feedback.id, current.hash);
     }
     if (receipt.stage === 'approved_candidate') {
       const source = feedback.raw.payload;
-      const sent = store.findSentMessage(feedback.user.id, feedback.counterpartId, source.suggestionId, source.actualSentText);
+      const sent = await store.findSentMessage(feedback.user.id, feedback.counterpartId, source.suggestionId, source.actualSentText);
       if (!sent || sent.id !== feedback.cleaning.provenance.actualSentMessageId) throw new BetaError('FEEDBACK_SOURCE_CHANGED', 409);
     }
-    if (receipt.stage !== 'approved_candidate' || receipt.purpose !== 'knowledge') return store.saveReview(ownerId, feedback.id, { ...receipt, reviewHash });
-    const counterpart = store.getCounterpart(feedback.user.id, feedback.counterpartId);
+    if (receipt.stage !== 'approved_candidate' || receipt.purpose !== 'knowledge') return await store.saveReview(ownerId, feedback.id, { ...receipt, reviewHash });
+    const counterpart = await store.getCounterpart(feedback.user.id, feedback.counterpartId);
     const supplement = buildFeedbackKnowledgeSupplement(receipt, { identifiers: [feedback.user.username, counterpart.alias] });
     if (supplement.length > 31_000) throw new BetaError('SUPPLEMENT_TOO_LARGE');
-    const approval = store.beginKnowledgeApproval(ownerId, feedback.id, reviewHash, { ...receipt, reviewHash }, supplement);
+    const approval = await store.beginKnowledgeApproval(ownerId, feedback.id, reviewHash, { ...receipt, reviewHash }, supplement);
     for (let attempt = 0; attempt < 4; attempt++) {
       const current = await knowledge.read();
-      if (current.text.includes(approval.marker)) return store.finishKnowledgeApproval(ownerId, feedback.id, current.hash);
+      if (current.text.includes(approval.marker)) return await store.finishKnowledgeApproval(ownerId, feedback.id, current.hash);
       try {
         const appended = await knowledge.append({ expectedHash: current.hash, content: `${approval.marker}\n${approval.supplement}` });
-        return store.finishKnowledgeApproval(ownerId, feedback.id, appended.hash);
+        return await store.finishKnowledgeApproval(ownerId, feedback.id, appended.hash);
       } catch (error) {
         if (error.code !== 'KNOWLEDGE_VERSION_CONFLICT' || attempt === 3) throw error;
       }
@@ -364,82 +400,88 @@ export async function createBetaServer({
 
   async function dispatch(user, method, path, input = {}) {
     const userId = user.id;
-    if (path === '/api/me' && method === 'GET') return { user, profile: visibleProfile(user), quota: store.quota(userId) };
+    if (path === '/api/me' && method === 'GET') return { user, profile: await visibleProfile(user), quota: await store.quota(userId) };
     if (path === '/api/profile' && method === 'PUT') {
       const { styleLearning, ...profile } = parse(ProfileSaveSchema, input, input.styleLearning === undefined ? 'INVALID_PROFILE' : 'INVALID_STYLE_LEARNING');
-      return store.saveProfileAndStyle(userId, validateProfile(profile, user.plan), styleLearning);
+      return await store.saveProfileAndStyle(userId, validateProfile(profile, user.plan), styleLearning);
     }
-    if (path === '/api/style-learning' && method === 'GET') return store.getStyleLearning(userId);
+    if (path === '/api/style-learning' && method === 'GET') return await store.getStyleLearning(userId);
     if (path === '/api/counterparts' && method === 'GET') {
       const knowledgeSnapshot = await knowledge.read();
-      const counterparts = await Promise.all(store.listCounterparts(userId).map(async (counterpart) => ({ ...counterpart, heat: (await currentClassification(userId, counterpart.id, knowledgeSnapshot)).heat })));
+      const counterparts = await Promise.all((await store.listCounterparts(userId)).map(async (counterpart) => ({ ...counterpart, heat: (await currentClassification(userId, counterpart.id, knowledgeSnapshot)).heat })));
       return { counterparts, topThree: rankTopThree(counterparts) };
     }
-    if (path === '/api/counterparts' && method === 'POST') return { counterpart: store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART')) };
+    if (path === '/api/counterparts' && method === 'POST') return { counterpart: await store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART')) };
     const counterpartRoute = /^\/api\/counterparts\/([^/]+)(?:\/(.*))?$/.exec(path);
     if (counterpartRoute) {
       const [, id, action] = counterpartRoute;
-      const counterpart = store.getCounterpart(userId, id);
+      const counterpart = await store.getCounterpart(userId, id);
       if (!action && method === 'GET') {
         const knowledgeSnapshot = await knowledge.read();
         const observed = await currentClassification(userId, id, knowledgeSnapshot);
-        const jobs = store.listJobs(userId, id).map(({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cacheOf }) => ({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cached: Boolean(cacheOf) }));
-        const suggestions = store.listSuggestions(userId, id);
-        return { counterpart, messages: store.listMessages(userId, id), suggestions, ...observed, ...currentModelContext(userId, id, knowledgeSnapshot, suggestions), meeting: store.getMeeting(userId, id), jobs };
+        const jobs = (await store.listJobs(userId, id)).map(({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cacheOf }) => ({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cached: Boolean(cacheOf) }));
+        const suggestions = await store.listSuggestions(userId, id);
+        return { counterpart, messages: await store.listMessages(userId, id), suggestions, ...observed, ...await currentModelContext(userId, id, knowledgeSnapshot, suggestions), meeting: await store.getMeeting(userId, id), jobs };
       }
-      if (!action && method === 'PUT') return { counterpart: store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART'), id) };
-      if (!action && method === 'DELETE') { store.deleteCounterpart(userId, id); return { deleted: true }; }
-      if (action === 'messages' && method === 'POST') return { message: store.putMessage(userId, id, parse(MessageSchema, input)) };
-      if (action === 'followup' && method === 'POST') return store.recordFollowup(userId, id, parse(FollowupSchema, input));
+      if (!action && method === 'PUT') return { counterpart: await store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART'), id) };
+      if (!action && method === 'DELETE') { await store.deleteCounterpart(userId, id); return { deleted: true }; }
+      if (action === 'messages' && method === 'POST') return { message: await store.putMessage(userId, id, parse(MessageSchema, input)) };
+      if (action === 'followup' && method === 'POST') return await store.recordFollowup(userId, id, parse(FollowupSchema, input));
       const copied = /^suggestions\/([^/]+)\/copied$/.exec(action ?? '');
-      if (copied && method === 'POST') return store.recordReplyCopy(userId, id, copied[1], parse(CopySchema, input));
+      if (copied && method === 'POST') return await store.recordReplyCopy(userId, id, copied[1], parse(CopySchema, input));
       const messageTime = /^messages\/([^/]+)\/timing$/.exec(action ?? '');
-      if (messageTime && method === 'PATCH') return { message: store.putMessageTime(userId, id, messageTime[1], parse(MessageTimeSchema, input).actualWechatAt) };
+      if (messageTime && method === 'PATCH') return { message: await store.putMessageTime(userId, id, messageTime[1], parse(MessageTimeSchema, input).actualWechatAt) };
       const message = /^messages\/([^/]+)$/.exec(action ?? '');
-      if (message && method === 'PUT') return { message: store.putMessage(userId, id, parse(MessageSchema, input), message[1]) };
-      if (message && method === 'DELETE') { store.deleteMessage(userId, id, message[1]); return { deleted: true }; }
+      if (message && method === 'PUT') return { message: await store.putMessage(userId, id, parse(MessageSchema, input), message[1]) };
+      if (message && method === 'DELETE') { await store.deleteMessage(userId, id, message[1]); return { deleted: true }; }
       if (action === 'classify' && method === 'POST') return runModel(userId, id, 'classify', parse(ClassifySchema, input));
       if (action === 'reply' && method === 'POST') return runModel(userId, id, 'reply', parse(ReplySchema, input));
+      if (action === 'image-read' && method === 'POST') {
+        const request = parse(ImageReadSchema, input);
+        const image = validateChatImage(request.image);
+        guardImageBytes(request.explanation, image);
+        return runModel(userId, id, 'image_read', { ...request, image });
+      }
       if (action === 'coach-plan' && method === 'POST') return runModel(userId, id, 'coach_plan', parse(PlanInputSchema, input));
       if (action === 'sent' && method === 'POST') {
         const sent = parse(SentSchema, input);
-        store.getSuggestion(userId, id, sent.suggestionId);
-        return { message: store.putMessage(userId, id, { speaker: 'self', text: sent.actualSentText, suggestionId: sent.suggestionId }) };
+        await store.getSuggestion(userId, id, sent.suggestionId);
+        return { message: await store.putMessage(userId, id, { speaker: 'self', text: sent.actualSentText, suggestionId: sent.suggestionId }) };
       }
-      if (action === 'meeting' && method === 'PUT') return { meeting: store.putMeeting(userId, id, parse(MeetingInputSchema, input, 'INVALID_MEETING')) };
+      if (action === 'meeting' && method === 'PUT') return { meeting: await store.putMeeting(userId, id, parse(MeetingInputSchema, input, 'INVALID_MEETING')) };
       if (action === 'feedback' && method === 'POST') {
         const feedback = parse(FeedbackInputSchema, input, 'INVALID_FEEDBACK');
-        store.getSuggestion(userId, id, feedback.suggestionId);
-        return store.addFeedback(userId, id, feedback);
+        await store.getSuggestion(userId, id, feedback.suggestionId);
+        return await store.addFeedback(userId, id, feedback);
       }
     }
     if (path.startsWith('/api/admin/')) {
       if (user.role !== 'owner') throw new BetaError('OWNER_REQUIRED', 403);
-      if (path === '/api/admin/invites' && method === 'POST') return store.createInvite({ ownerId: userId, ...parse(PlanSchema, input) });
-      if (path === '/api/admin/users' && method === 'GET') return { users: store.listUsers(userId) };
+      if (path === '/api/admin/invites' && method === 'POST') return await store.createInvite({ ownerId: userId, ...parse(PlanSchema, input) });
+      if (path === '/api/admin/users' && method === 'GET') return { users: await store.listUsers(userId) };
       const plan = /^\/api\/admin\/users\/([^/]+)\/plan$/.exec(path);
-      if (plan && method === 'PUT') return { user: store.updatePlan({ ownerId: userId, userId: plan[1], ...parse(PlanSchema, input) }) };
+      if (plan && method === 'PUT') return { user: await store.updatePlan({ ownerId: userId, userId: plan[1], ...parse(PlanSchema, input) }) };
       const mcpToken = /^\/api\/admin\/users\/([^/]+)\/mcp-token$/.exec(path);
-      if (mcpToken && method === 'POST') { parse(z.strictObject({}), input); return store.createMcpToken({ ownerId: userId, userId: mcpToken[1] }); }
-      if (path === '/api/admin/feedback' && method === 'GET') return { feedback: store.listFeedback(userId) };
+      if (mcpToken && method === 'POST') { parse(z.strictObject({}), input); return await store.createMcpToken({ ownerId: userId, userId: mcpToken[1] }); }
+      if (path === '/api/admin/feedback' && method === 'GET') return { feedback: await store.listFeedback(userId) };
       const feedbackAction = /^\/api\/admin\/feedback\/([^/]+)\/(clean|review)$/.exec(path);
       if (feedbackAction && method === 'POST') {
-        const feedback = store.getFeedback(userId, feedbackAction[1]);
+        const feedback = await store.getFeedback(userId, feedbackAction[1]);
         if (feedbackAction[2] === 'clean') {
           parse(z.strictObject({}), input);
           const payload = feedback.raw.payload;
           const inferred = feedback.raw.sourceMode === 'beta_followup';
-          const suggestion = payload.suggestionId ? store.getSuggestion(feedback.user.id, feedback.counterpartId, payload.suggestionId) : undefined;
-          const sent = inferred ? feedback.raw.caseEvidence?.previousMessage : store.findSentMessage(feedback.user.id, feedback.counterpartId, payload.suggestionId, payload.actualSentText);
-          const counterpart = store.getCounterpart(feedback.user.id, feedback.counterpartId);
+          const suggestion = payload.suggestionId ? await store.getSuggestion(feedback.user.id, feedback.counterpartId, payload.suggestionId) : undefined;
+          const sent = inferred ? feedback.raw.caseEvidence?.previousMessage : await store.findSentMessage(feedback.user.id, feedback.counterpartId, payload.suggestionId, payload.actualSentText);
+          const counterpart = await store.getCounterpart(feedback.user.id, feedback.counterpartId);
           let candidate = cleanFeedback(payload, { suggestion, actualSentMessage: sent, sourceId: feedback.id, identifiers: [feedback.user.username, counterpart.alias] });
           if (inferred) candidate = { ...candidate, stage: 'quarantined', consent: false, allowedPurposes: [], flags: [...new Set([...(candidate.flags ?? []), 'inferred_followup', 'sending_unverified', 'no_training_consent'])] };
-          return { feedback: store.saveCleaning(userId, feedback.id, candidate) };
+          return { feedback: await store.saveCleaning(userId, feedback.id, candidate) };
         }
         const reviewInput = parse(ReviewInputSchema, input, 'INVALID_FEEDBACK_REVIEW');
         if (!feedback.cleaning) throw new BetaError('FEEDBACK_NOT_CLEANED');
         const running = reviewInFlight.get(feedback.id);
-        if (running) { await running; return { feedback: await approveKnowledge(userId, store.getFeedback(userId, feedback.id), reviewInput) }; }
+        if (running) { await running; return { feedback: await approveKnowledge(userId, await store.getFeedback(userId, feedback.id), reviewInput) }; }
         const pending = approveKnowledge(userId, feedback, reviewInput);
         reviewInFlight.set(feedback.id, pending);
         try { return { feedback: await pending }; }
@@ -461,8 +503,13 @@ export async function createBetaServer({
     if (!['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) || parsed.username || parsed.password) throw new BetaError('HOST_FORBIDDEN', 403);
     return parsed.origin;
   }
-  function authRate(req) {
+  async function authRate(req) {
     const key = req.socket.remoteAddress ?? 'unknown', timestamp = now();
+    if (typeof store.takeRateLimit === 'function') {
+      const result = await store.takeRateLimit({ key: `auth:${key}`, limit: 20, windowMs: 60_000 });
+      if (!result.allowed) throw new BetaError('RATE_LIMITED', 429);
+      return;
+    }
     let window = authWindows.get(key);
     if (!window || timestamp - window.start >= 60_000) { window = { start: timestamp, count: 0 }; authWindows.set(key, window); }
     if (++window.count > 20) throw new BetaError('RATE_LIMITED', 429);
@@ -486,31 +533,42 @@ export async function createBetaServer({
       res.setHeader('referrer-policy', 'no-referrer');
       res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
       if ((path === '/health' || path === '/api/health') && req.method === 'GET') return send(res, 200, { data: { service: 'wechat-chat-coach', version: packageMetadata.version } });
-      if (path === '/api/meta' && req.method === 'GET') return send(res, 200, { data: { name: '聊天训练助手 · 内测', questionnaires: QUESTIONNAIRES, localDemo: { enabled: localDemoMode, synthetic: localDemoMode }, privacy: '聊天与画像按账户隔离；手动记录发送，不自动联系微信。反馈先隔离、清理和owner审阅；建议权重不是成功概率。' } });
+      if (path === '/api/meta' && req.method === 'GET') return send(res, 200, { data: { name: '聊天训练助手 · 内测', questionnaires: QUESTIONNAIRES, localDemo: { enabled: localDemoMode, synthetic: localDemoMode }, hostedPreview: { enabled: Boolean(hostedPreviewOwnerId) }, privacy: '聊天与画像按账户隔离；手动记录发送，不自动联系微信。反馈先隔离、清理和owner审阅；建议权重不是成功概率。' } });
+      if (path === '/api/preview/session') {
+        if (!hostedPreviewOwnerId || req.method !== 'POST') throw new BetaError('NOT_FOUND', 404);
+        parse(z.strictObject({}), await body(req));
+        await authRate(req);
+        const previewOwner = await store.getUser(hostedPreviewOwnerId);
+        if (previewOwner.role !== 'owner') throw new BetaError('OWNER_REQUIRED', 403);
+        const session = await store.createSession(previewOwner.id);
+        setSessionCookie(res, session, secure);
+        return send(res, 200, { data: { user: previewOwner, csrfToken: session.csrfToken } });
+      }
       if (path === '/api/demo/session') {
         if (!localDemoMode || req.method !== 'POST') throw new BetaError('NOT_FOUND', 404);
         parse(z.strictObject({}), await body(req));
         const seed = await ensureLocalDemoSeed(store);
-        const session = store.createSession(seed.user.id); setSessionCookie(res, session, secure);
+        const session = await store.createSession(seed.user.id); setSessionCookie(res, session, secure);
         return send(res, 200, { data: { ...seed, csrfToken: session.csrfToken } });
       }
       if (localDemoMode && (path === '/api/register' || path === '/api/login' || path.startsWith('/api/admin/'))) throw new BetaError('NOT_FOUND', 404);
       if (['/api/register', '/api/login'].includes(path) && req.method === 'POST') {
-        authRate(req);
+        await authRate(req);
         const input = await body(req);
         const user = path === '/api/register' ? await store.register(parse(RegisterSchema, input)) : await store.authenticate(parse(LoginSchema, input));
-        const session = store.createSession(user.id); setSessionCookie(res, session, secure);
+        const session = await store.createSession(user.id); setSessionCookie(res, session, secure);
         return send(res, 200, { data: { user, csrfToken: session.csrfToken } });
       }
       if (path.startsWith('/api/')) {
-        const rawToken = cookieToken(req), session = store.lookupSession(rawToken);
+        const rawToken = cookieToken(req), session = await store.lookupSession(rawToken);
         if (!session) throw new BetaError('UNAUTHORIZED', 401);
         if (mutation && !csrfMatches(req.headers['x-csrf-token'], session.csrfToken)) throw new BetaError('CSRF_INVALID', 403);
         if (path === '/api/logout' && req.method === 'POST') {
-          store.removeSession(rawToken); res.setHeader('set-cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`);
+          await store.removeSession(rawToken); res.setHeader('set-cookie', `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure ? '; Secure' : ''}`);
           return send(res, 200, { data: { loggedOut: true } });
         }
-        const result = await dispatch(session.user, req.method, path, mutation ? await body(req) : {});
+        const imageEntry = req.method === 'POST' && /^\/api\/counterparts\/[^/]+\/image-read$/.test(path);
+        const result = await dispatch(session.user, req.method, path, mutation ? await body(req, imageEntry ? IMAGE_BODY_LIMIT : BODY_LIMIT) : {});
         if (path === '/api/me') result.csrfToken = session.csrfToken;
         return send(res, 200, { data: result });
       }
@@ -528,9 +586,14 @@ export async function createBetaServer({
     const allowed = method === 'GET' && (path === '/api/counterparts' || /^\/api\/counterparts\/[^/]+$/.test(path))
       || method === 'POST' && /^\/api\/counterparts\/[^/]+\/(classify|reply|feedback)$/.test(path);
     if (!allowed) throw new BetaError('MCP_OPERATION_FORBIDDEN', 403);
-    try { return { data: await dispatch(store.getUser(accountId), method, path, input) }; }
+    try { return { data: await dispatch(await store.getUser(accountId), method, path, input) }; }
     catch (error) { throw normalizedError(error); }
   };
-  server.once('close', () => { store.close(); lock.release(); });
+  server.storeClosed = Promise.resolve();
+  server.once('close', () => {
+    server.storeClosed = (async () => { try { if (ownsStore) await store.close(); } finally { lock?.release(); } })();
+    // Expose cleanup completion without an unhandled rejection from an EventEmitter listener.
+    server.storeClosed.catch(() => {});
+  });
   return server;
 }

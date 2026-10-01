@@ -502,3 +502,33 @@ test('legacy same-ID edits use update time conservatively and a later matching c
   const after = f.server.betaStore.getSuggestionCase(f.owner.id, id, suggestion.id);
   assert.equal(after.status, 'legacy_incomplete'); assert.equal(after.snapshot, null); assert.equal(f.calls, 0);
 });
+
+test('wait and pause cannot be copied or inferred by a stale client, including legacy suggestions without guidance', async (t) => {
+  const f = await fixture(t);
+  for (const action of ['wait', 'pause']) for (const legacy of [false, true]) {
+    const id = await f.addContext(), suffix = `${action}_${legacy ? 'legacy' : 'guided'}`;
+    const job = f.server.betaStore.reserveJob({ userId: f.owner.id, counterpartId: id, operation: 'reply', requestId: `pacing_${suffix}`, contextHash: suffix, knowledgeHash: 'synthetic', workerId: 'fixture', providerModel: 'fixture' });
+    f.server.betaStore.markJobRunning(job.job.id);
+    const suggestion = { id: `pacing_${suffix}`, reply: legacy ? '旧版可能存有一句收尾文本。' : '', action, reason: '先不发送。', styleNote: '留白。', ...(!legacy ? { guidance: { topicMove: null, relationMove: action, ownWordsGuide: '先不发送。', reentryWhen: '有新的实际条件后再判断。' } } : {}) };
+    f.server.betaStore.completeJob(job.job.id, { suggestion }, suggestion);
+    const copy = await f.call('POST', `/api/counterparts/${id}/suggestions/${suggestion.id}/copied`, { requestId: `copy_${suffix}`, copiedText: '旧客户端编辑出的草稿。' }, f.session);
+    assert.equal(copy.status, 409); assert.equal(copy.error.code, 'SUGGESTION_NOT_SENDABLE');
+    const detail = (await f.call('GET', `/api/counterparts/${id}`, undefined, f.session)).data;
+    assert.equal(detail.suggestions[0].pendingEligible, false);
+    assert.equal(detail.suggestions[0].pendingCopyReceiptId, null);
+    const body = { requestId: `followup_${suffix}`, text: `真实后续_${suffix}`, previousSuggestionId: suggestion.id, previousReplyText: '旧客户端编辑出的草稿。', previousCopyReceiptId: `obsolete_copy_${suffix}` };
+    const result = await f.call('POST', `/api/counterparts/${id}/followup`, body, f.session);
+    assert.equal(result.status, 200);
+    assert.equal(result.data.message.text, body.text);
+    assert.equal(result.data.previousMessage, null); assert.equal(result.data.feedback, null);
+    assert.equal(result.data.timing.fromAt, null); assert.equal(result.data.timing.reliability, 'unknown');
+    assert.deepEqual(f.server.betaStore.listMessages(f.owner.id, id).map(({ speaker }) => speaker), ['other', 'other']);
+    assert.equal((await f.call('POST', `/api/counterparts/${id}/followup`, body, f.session)).data.cached, true);
+    assert.equal(f.server.betaStore.listMessages(f.owner.id, id).length, 2);
+    await f.call('POST', `/api/counterparts/${id}/messages`, { speaker: 'self', text: '用户主动记录的真实原话仍保留。' }, f.session);
+    const next = await f.call('POST', `/api/counterparts/${id}/followup`, { ...body, requestId: `next_${suffix}`, text: '又一条实际后续。' }, f.session);
+    assert.equal(next.data.previousMessage, null);
+    assert.deepEqual(f.server.betaStore.listMessages(f.owner.id, id).map(({ speaker }) => speaker), ['other', 'other', 'self', 'other']);
+  }
+  assert.equal(f.calls, 0);
+});

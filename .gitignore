@@ -11,3 +11,4 @@ coverage/
 dist/
 knowledge/*.lock
 knowledge/.knowledge-*.tmp
+.vercel

@@ -12,11 +12,8 @@ const token = () => randomBytes(32).toString('base64url');
 const json = (value) => JSON.stringify(value);
 const parse = (value) => value ? JSON.parse(value) : null;
 
-export class BetaError extends Error {
-  constructor(code, status = 400) { super(code); this.name = 'BetaError'; this.code = code; this.status = status; }
-}
-
-export function safeUser(row) { return row ? { id: row.id, username: row.username, plan: row.plan, role: row.role } : null; }
+import { BetaError, safeUser } from './store-contract.mjs';
+export { BetaError, safeUser };
 
 function credentials(username, password) {
   if (typeof username !== 'string' || typeof password !== 'string') throw new BetaError('CREDENTIALS_INVALID');
@@ -218,6 +215,8 @@ export function createBetaStore({
     ? get('SELECT * FROM followup_receipts WHERE user_id=? AND counterpart_id=? AND previous_suggestion_id=? AND previous_reply_hash=? AND (copy_receipt_id=? OR (copy_receipt_id IS NULL AND created_at>=?)) ORDER BY created_at LIMIT 1', userId, counterpartId, suggestionId, digest(text), copy.id, copy.copied_at)
     : get('SELECT * FROM followup_receipts WHERE user_id=? AND counterpart_id=? AND previous_suggestion_id=? AND previous_reply_hash=? AND copy_receipt_id IS NULL ORDER BY created_at LIMIT 1', userId, counterpartId, suggestionId, digest(text));
   const pendingState = (row, source, { replyText, copy } = {}) => {
+    if (['wait', 'pause'].includes(source.suggestion.action)) return { eligible: false, superseded: false, manualSuperseded: false, copy: null, consumed: null,
+      metadata: { pendingEligible: false, pendingCopyReceiptId: null, pendingCopiedAt: null, pendingReplyText: null } };
     const baseline = source.snapshot?.modelInput?.messages;
     const baselineMessages = Array.isArray(baseline) ? new Map(baseline.map((message) => [message.id, message])) : null;
     const laterSelf = all("SELECT * FROM messages WHERE user_id=? AND counterpart_id=? AND speaker='self' ORDER BY seq", row.user_id, row.counterpart_id)
@@ -513,6 +512,7 @@ export function createBetaStore({
       counterpartRow(userId, counterpartId);
       return transaction(() => {
         const source = this.getSuggestionCase(userId, counterpartId, suggestionId);
+        if (['wait', 'pause'].includes(source.suggestion.action)) throw new BetaError('SUGGESTION_NOT_SENDABLE', 409);
         const text = copiedText ?? source.suggestion.reply;
         const payloadHash = digest(json({ counterpartId, suggestionId, text }));
         const existing = get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND request_id=?', userId, requestId);
@@ -536,13 +536,17 @@ export function createBetaStore({
           return { ...parse(prior.result_json), cached: true };
         }
         let source = previousSuggestionId ? this.getSuggestionCase(userId, counterpartId, previousSuggestionId) : null;
+        // Older clients may attach their editable text to a pacing suggestion.
+        // Preserve the incoming message without inventing a preceding self turn.
+        const noReply = ['wait', 'pause'].includes(source?.suggestion.action);
+        let associatedSuggestionId = noReply ? undefined : previousSuggestionId, associatedReplyText = noReply ? undefined : previousReplyText;
+        if (noReply) source = null;
         let copy;
-        if (previousCopyReceiptId) {
+        if (!noReply && previousCopyReceiptId) {
           copy = get('SELECT * FROM reply_copy_receipts WHERE id=? AND user_id=? AND counterpart_id=?', previousCopyReceiptId, userId, counterpartId);
           if (!copy || copy.suggestion_id !== previousSuggestionId) throw new BetaError('COPY_RECEIPT_NOT_FOUND', 404);
           if (copy.copied_text !== previousReplyText) copy = null;
         } else if (source && previousReplyText) copy = get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText);
-        let associatedSuggestionId = previousSuggestionId, associatedReplyText = previousReplyText;
         if (source) {
           const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', previousSuggestionId, userId, counterpartId);
           const state = pendingState(row, source, { replyText: previousReplyText, copy });

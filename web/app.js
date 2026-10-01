@@ -5,12 +5,14 @@ const state = {
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
   messageDrafts: new Map(), messageCalls: new Set(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
+  composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
   activeInlineCard: null, inlineTrigger: null, bootLoading: false,
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
+const relationMoveNames = { continue: '普通交流', male_to_female: '男对女', light_approach: '轻度靠近', give_space: '拉开一点', receive: '承接', close_topic: '结束话题', clarify: '澄清', invite: '协商邀约', wait: '暂时不回', pause: '停止当前推进' };
 const dimensionNames = { activeInteraction: '主动互动', responseEngagement: '回复参与', personalInterest: '对我的兴趣', reciprocalFlirting: '双向暧昧', actionFollowThrough: '行动兑现' };
 const levelNames = { unknown: '未知', negative: '有负向信号', passive: '被动回应', positive: '积极参与', repeated_positive: '持续积极' };
 const heatNames = { pause: '建议暂停', insufficient_evidence: '信息不足', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
@@ -135,7 +137,7 @@ function scrollToLatest() {
 function rememberComposer({ changed = false } = {}) {
   const id = state.selectedId;
   if (!id || state.detail?.counterpart.id !== id) return null;
-  const draft = { text: $('message-text').value, speaker: $('message-speaker').value, editingId: state.editingMessageId, beforeEdit: state.composerBeforeEdit };
+  const draft = { text: $('message-text').value, speaker: $('message-speaker').value, editingId: state.editingMessageId, beforeEdit: state.composerBeforeEdit, image: state.composerImage, meaning: $('message-meaning').value };
   const previous = state.messageDrafts.get(id);
   if (!changed && previous && Object.keys(draft).every((key) => previous[key] === draft[key])) return previous;
   state.messageDrafts.set(id, draft);
@@ -147,6 +149,8 @@ function restoreComposer(id) {
   state.composerBeforeEdit = draft?.beforeEdit || null;
   $('message-text').value = draft?.text || '';
   $('message-speaker').value = draft?.speaker || 'other';
+  state.composerImage = draft?.image || null;
+  $('message-meaning').value = draft?.meaning || '';
   $('editing-message').textContent = state.editingMessageId ? '正在编辑已有消息' : '';
   $('cancel-message-edit').hidden = !state.editingMessageId;
   const error = $('message-form').querySelector('.form-error');
@@ -162,14 +166,75 @@ function finishComposerSubmission(id, submitted) {
 }
 function updateComposer() {
   const ready = Boolean(state.selectedId && state.detail);
-  const saving = state.messageCalls.has(JSON.stringify([state.me?.user.id, state.selectedId]));
+  const callKey = JSON.stringify([state.me?.user.id, state.selectedId]);
+  const reading = state.imageCalls.has(callKey);
+  const saving = state.messageCalls.has(callKey);
+  const needsImageRead = Boolean(state.composerImage && !state.composerImage.interpretation);
   $('message-text').disabled = !ready;
-  $('message-speaker').disabled = !ready;
-  $('save-message').disabled = !ready || saving;
-  $('save-message').dataset.locked = String(!ready || saving);
-  $('save-message').textContent = saving ? '保存消息…' : state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
+  $('message-speaker').disabled = !ready || Boolean(state.composerImage);
+  $('message-text').required = !needsImageRead;
+  $('save-message').disabled = !ready || saving || reading;
+  $('save-message').dataset.locked = String(!ready || saving || reading);
+  $('save-message').textContent = reading ? '识读图片…' : saving ? '保存消息…' : needsImageRead ? '识读图片' : state.editingMessageId ? '保存修改' : $('message-speaker').value === 'self' ? '记录已发送' : '记录消息';
   $('message-text').placeholder = $('message-speaker').value === 'self' ? '填写你已经发出的原话…' : '粘贴对方刚说的话…';
+  const canAttach = ready && !state.editingMessageId && $('message-speaker').value === 'other';
+  $('add-message-image').disabled = !canAttach;
+  $('message-image-file').disabled = !canAttach;
+  $('message-meaning').disabled = !ready || $('message-speaker').value !== 'other' || Boolean(state.editingMessageId);
+  $('message-meaning-details').hidden = $('message-speaker').value !== 'other' || Boolean(state.editingMessageId);
+  $('message-image-preview').hidden = !state.composerImage;
+  $('message-image-privacy').hidden = !state.composerImage;
+  if (state.composerImage) $('message-image-thumbnail').src = state.composerImage.dataUrl;
+  else $('message-image-thumbnail').removeAttribute('src');
+  $('message-image-status').textContent = `${reading ? '正在识读，文字与补充意思仍可修改。' : state.composerImage?.interpretation ? '描述已放入草稿，可修改后记录。' : '图片已准备好，可先补充大概意思，再识读。'}本应用不长期保存原图，刷新会清除。`;
+  $('message-image-result').hidden = !state.composerImage?.interpretation;
+  $('message-image-description').textContent = state.composerImage?.interpretation?.description || '';
+  $('message-image-uncertainty').textContent = state.composerImage?.interpretation?.uncertainty || '';
   for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
+}
+async function attachMessageImage(file) {
+  if (!file || $('add-message-image').disabled) return;
+  const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
+  const serial = ++state.imageSelectionSerial;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 1_000_000 || !file.size) { announce('请选择小于1MB的JPEG、PNG或WebP图片。', 'error'); return; }
+  try {
+    const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('图片未读入，请重新选择。')); reader.readAsDataURL(file); });
+    if (serial !== state.imageSelectionSerial || state.me?.user.id !== scope.userId || state.selectedId !== scope.counterpartId || state.editingMessageId || $('message-speaker').value !== 'other') return;
+    state.composerImage = { id: crypto.randomUUID(), dataUrl, interpretation: null };
+    rememberComposer({ changed: true }); updateComposer();
+    $('message-meaning-details').open = true;
+    $('message-meaning').focus({ preventScroll: true });
+  } catch (error) { if (state.me?.user.id === scope.userId && state.selectedId === scope.counterpartId) announce(error.message, 'error'); }
+}
+async function readComposerImage(scope) {
+  const id = scope.counterpartId, image = state.composerImage, submitted = rememberComposer();
+  if (!image || image.interpretation) return;
+  const callKey = JSON.stringify([scope.userId, id]);
+  if (state.imageCalls.has(callKey)) return;
+  const key = JSON.stringify(['image-read', scope.userId, id, image.id, submitted.meaning.trim()]);
+  if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
+  const call = { imageId: image.id }; state.imageCalls.set(callKey, call); updateComposer();
+  try {
+    const data = await post(`${counterpartPath(id)}/image-read`, { requestId: state.requestIds.get(key), image: image.dataUrl, explanation: submitted.meaning.trim() });
+    state.requestIds.delete(key);
+    if (state.me?.user.id !== scope.userId) return;
+    updateQuota(data.quota);
+    const current = state.messageDrafts.get(id);
+    if (current?.image !== image || current.editingId || current.speaker !== 'other') return;
+    const text = current.text === submitted.text ? [current.text.trim(), data.imageInterpretation.description].filter(Boolean).join('\n') : current.text;
+    state.messageDrafts.set(id, { ...current, text, image: { ...image, interpretation: data.imageInterpretation } });
+    if (state.selectedId === id) { const focusDraft = document.activeElement === $('save-message') || document.activeElement === document.body; restoreComposer(id); updateComposer(); if (focusDraft) $('message-text').focus({ preventScroll: true }); }
+  } catch (error) { if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(key); throw error; }
+  finally { if (state.imageCalls.get(callKey) === call) state.imageCalls.delete(callKey); if (state.me?.user.id === scope.userId) updateComposer(); }
+}
+function composerRecordText(draft) {
+  const kind = draft.image?.interpretation?.kind;
+  const parts = [draft.image ? `【图片记录·AI识读后可修改，不是准确原文${['screenshot', 'unknown'].includes(kind) ? '，可能包含双方内容' : ''}】\n${draft.text.trim()}` : draft.text.trim()];
+  const ai = draft.image?.interpretation;
+  if (ai && draft.text.trim() !== ai.description) parts.push(`【AI初次描述·可能有误】\n${ai.description}`);
+  if (ai?.uncertainty) parts.push(`【识读不确定】\n${ai.uncertainty}`);
+  if (draft.speaker === 'other' && !draft.editingId && draft.meaning.trim()) parts.push(`【用户补充意思·非对方原文】\n${draft.meaning.trim()}`);
+  return parts.join('\n\n');
 }
 function initializeTheme() {
   const system = window.matchMedia('(prefers-color-scheme: dark)');
@@ -477,7 +542,16 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   renderJobs(detail.jobs || []);
   const currentId = state.suggestion?.id;
   const suggestions = detail.suggestions || [];
-  state.suggestion = suggestions.find((item) => item.id === currentId && isPendingSuggestion(item)) || suggestions.findLast((item) => isPendingSuggestion(item) && item.pendingCopyReceiptId) || suggestions.findLast(isPendingSuggestion) || null;
+  const currentNoReply = (item) => isNoReplySuggestion(item) && (detail.currentSuggestionIds?.includes(item.id) || detail.directReply?.id === item.id);
+  let restored = suggestions.find((item) => item.id === currentId && (isPendingSuggestion(item) || currentNoReply(item))) || suggestions.findLast((item) => isPendingSuggestion(item) && item.pendingCopyReceiptId) || suggestions.findLast((item) => isPendingSuggestion(item) || currentNoReply(item)) || null;
+  const latestCurrent = suggestions.findLast((item) => detail.currentSuggestionIds?.includes(item.id) || detail.directReply?.id === item.id);
+  if (isNoReplySuggestion(latestCurrent) && restored && suggestions.indexOf(restored) < suggestions.indexOf(latestCurrent)) {
+    // An old clipboard receipt must not undo a later decision to wait. Only
+    // explicitly copying that history again after the decision restores use.
+    const copiedAfterDecision = isPendingSuggestion(restored) && restored.pendingCopyReceiptId && Date.parse(restored.pendingCopiedAt) > Date.parse(latestCurrent.createdAt);
+    if (!copiedAfterDecision) restored = latestCurrent;
+  }
+  state.suggestion = restored;
   state.selectedDirection = state.modelCalls.get(currentContextKey())?.direction || state.suggestion?.direction || null;
   renderSuggestion();
   fillMeeting(detail.meeting);
@@ -498,7 +572,7 @@ function renderJobs(jobs) {
   const states = { reserved: '等待处理', running: '正在处理', linked: '关联已有操作', succeeded: '已完成', failed: '已失败' };
   const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '方向试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
   const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
-  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
+  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估', image_read: '图片识读' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
 async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
@@ -584,6 +658,7 @@ function renderTiming() {
 function editMessage(message) {
   if (!state.editingMessageId) state.composerBeforeEdit = rememberComposer();
   state.editingMessageId = message.id;
+  state.composerImage = null; $('message-meaning').value = '';
   $('message-speaker').value = message.speaker;
   $('message-text').value = message.text;
   $('editing-message').textContent = '正在编辑已有消息';
@@ -881,28 +956,42 @@ function renderSuggestion() {
   }
   $('suggestion-loading').hidden = !generating;
   $('suggestion-loading').textContent = generating ? `正在生成${busy.direction ? `「${directionNames[busy.direction].split(' · ')[0]}」` : ''}回复…` : '';
-  $('suggestion-editor').hidden = generating || !suggestion;
+  const noReply = isNoReplySuggestion(suggestion);
+  $('suggestion-editor').hidden = generating || !suggestion || noReply;
   $('suggestion-meta').hidden = generating || !suggestion;
-  $('suggestion-text').disabled = generating;
-  const copyBusy = state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId]));
-  $('copy-reply').disabled = generating || copyBusy;
-  $('copy-reply').dataset.locked = String(generating || copyBusy);
-  const direction = generating ? busy.direction : suggestion?.direction;
+  $('suggestion-text').disabled = generating || noReply;
+  $('reply-guidance').hidden = generating || !suggestion;
+  const direction = generating ? busy.direction : suggestion?.guidance ? suggestion.guidance.topicMove : suggestion?.direction;
   $('suggestion-direction').hidden = !direction;
   $('suggestion-direction').textContent = directionNames[direction]?.split(' · ')[0] || '';
+  $('suggestion-direction').setAttribute('aria-label', `话题方向：${directionNames[direction]?.split(' · ')[0] || '暂不延伸'}`);
   $('suggestion-update').hidden = generating || !feedback;
   $('suggestion-update').textContent = feedback?.text || '';
   $('suggestion-update').classList.toggle('error', Boolean(feedback?.error));
-  if (generating) { $('suggestion-title').textContent = '我 · AI 正在准备回复'; updateComposer(); return; }
-  if (!suggestion) { $('suggestion-title').textContent = '我 · AI 建议'; $('suggestion-text').value = ''; updateComposer(); return; }
+  if (generating) { $('suggestion-title').textContent = '我 · AI 正在准备回复'; updateReplyCopyState(); updateComposer(); return; }
+  if (!suggestion) { $('suggestion-title').textContent = '我 · AI 建议'; $('suggestion-text').value = ''; updateReplyCopyState(); updateComposer(); return; }
   const relatedMessage = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'self' && message.suggestionId === suggestion.id);
   $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? suggestion.pendingReplyText ?? relatedMessage?.text ?? suggestion.reply ?? '';
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
   $('suggestion-reason').textContent = suggestion.reason || '';
   $('suggestion-style').textContent = suggestion.styleNote || '';
+  $('reply-relation').textContent = suggestion.action === 'pause' ? relationMoveNames.pause : relationMoveNames[suggestion.guidance?.relationMove] || (noReply ? relationMoveNames[suggestion.action] : '这条旧建议未保存关系动作');
+  $('reply-own-words').textContent = suggestion.guidance?.ownWordsGuide || (noReply ? '本轮先不发送，不必硬续一句。' : '这条旧建议未保存表达指引，可保留原意，用你的说法改写。');
+  $('reply-reentry').textContent = suggestion.guidance?.reentryWhen || '这条旧建议未保存具体条件，不必按固定时长等待。';
+  $('reply-wait-reason').hidden = !noReply;
+  $('reply-wait-reason').textContent = noReply ? `现在不回的依据：${suggestion.reason || '这条旧建议未保存具体依据。'}` : '';
+  updateReplyCopyState();
   updateSentState(); updateComposer();
 }
+function isNoReplySuggestion(suggestion) { return ['wait', 'pause'].includes(suggestion?.action); }
+function updateReplyCopyState() {
+  const generating = state.modelCalls.get(currentContextKey())?.type === 'reply';
+  const disabled = generating || state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])) || !state.suggestion || isNoReplySuggestion(state.suggestion) || !$('suggestion-text').value.trim();
+  $('copy-reply').disabled = disabled;
+  $('copy-reply').dataset.locked = String(disabled);
+}
 function isPendingSuggestion(suggestion) {
+  if (isNoReplySuggestion(suggestion)) return false;
   if (suggestion?.pendingEligible !== true) return false;
   if (!Array.isArray(state.detail?.currentSuggestionIds) || state.detail.currentSuggestionIds.includes(suggestion.id)) return true;
   const incoming = state.detail.messages.findLast(({ speaker }) => speaker === 'other');
@@ -914,6 +1003,12 @@ function isPendingSuggestion(suggestion) {
 }
 function updateSentState() {
   if (!state.suggestion) return;
+  if (isNoReplySuggestion(state.suggestion)) {
+    const current = state.detail?.currentSuggestionIds?.includes(state.suggestion.id) || state.detail?.directReply?.id === state.suggestion.id;
+    $('suggestion-title').textContent = current ? state.suggestion.action === 'pause' ? 'AI 建议 · 先停止当前推进' : 'AI 建议 · 暂时不回' : '历史节奏建议 · 仅供查看';
+    $('sent-state').textContent = current ? '这是节奏建议，不是待发消息；出现上述接话条件后再判断。' : '这条节奏建议属于过去的背景，当前情况需要重新判断。';
+    return;
+  }
   const eligible = isPendingSuggestion(state.suggestion);
   $('suggestion-title').textContent = eligible ? '我 · AI 建议' : '历史 AI 建议 · 仅供查看';
   $('sent-state').textContent = eligible ? '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。' : '这条历史建议不会默认关联续聊。若重新复制使用，复制记录仍不等于已确认发送。';
@@ -1053,6 +1148,7 @@ function clearSessionUI() {
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.messageDrafts.clear(); state.messageCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
+  state.composerImage = null; state.imageCalls.clear(); state.imageSelectionSerial++;
   state.intakeDrafts.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.copyCalls.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
@@ -1211,6 +1307,11 @@ $('delete-counterpart').addEventListener('click', () => void perform($('delete-c
   await loadCounterparts(); announce('对象及其关联记录已删除。');
 }));
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);
+$('add-message-image').addEventListener('click', () => $('message-image-file').click());
+$('message-image-file').addEventListener('change', (event) => { void attachMessageImage(event.target.files?.[0]); event.target.value = ''; });
+$('remove-message-image').addEventListener('click', () => { state.composerImage = null; state.imageSelectionSerial++; rememberComposer({ changed: true }); updateComposer(); $('message-text').focus({ preventScroll: true }); });
+$('message-meaning').addEventListener('input', () => rememberComposer({ changed: true }));
+$('message-text').addEventListener('paste', (event) => { const file = [...(event.clipboardData?.items || [])].find((item) => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile(); if (file && !$('add-message-image').disabled) { event.preventDefault(); void attachMessageImage(file); } });
 $('message-speaker').addEventListener('change', () => { rememberComposer({ changed: true }); updateComposer(); });
 $('message-text').addEventListener('input', () => rememberComposer({ changed: true }));
 $('message-text').addEventListener('keydown', (event) => {
@@ -1222,19 +1323,24 @@ $('message-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
   const callKey = JSON.stringify([scope.userId, scope.counterpartId]);
-  if (state.messageCalls.has(callKey)) return;
+  if (state.messageCalls.has(callKey) || state.imageCalls.has(callKey)) return;
   void perform(event.submitter, '保存消息…', async () => {
     const id = state.selectedId, userId = state.me?.user.id;
     if (!id || !state.detail) throw new Error('先添加或选择一位聊天对象。');
+    if (state.composerImage && !state.composerImage.interpretation) { await readComposerImage(scope); return; }
     const submitted = rememberComposer();
-    const body = { speaker: $('message-speaker').value, text: $('message-text').value.trim() };
+    const body = { speaker: $('message-speaker').value, text: composerRecordText(submitted) };
+    if (body.text.length > 20_000) throw new Error('消息、识读描述与补充意思合计需在20000字以内，请缩短后记录；当前草稿仍保留。');
     const editing = state.editingMessageId;
     state.messageCalls.add(callKey);
     try {
       if (editing) await put(`${counterpartPath(id)}/messages/${encodeURIComponent(editing)}`, body);
       else if (body.speaker === 'other') {
         // A hidden previous draft must not be inferred as the reply used during generation.
-        const previousReplyText = state.modelCalls.get(currentContextKey())?.type !== 'reply' && isPendingSuggestion(state.suggestion) ? $('suggestion-text').value.trim() : '';
+        // A screenshot may already contain both sides. It cannot establish that
+        // the currently prepared reply was used before the described image.
+        const imageHasUnknownTurns = submitted.image && ['screenshot', 'unknown'].includes(submitted.image.interpretation?.kind);
+        const previousReplyText = !imageHasUnknownTurns && state.modelCalls.get(currentContextKey())?.type !== 'reply' && isPendingSuggestion(state.suggestion) ? $('suggestion-text').value.trim() : '';
         const copyReceipt = previousReplyText && (state.suggestion.pendingCopyReceiptId || state.copyReceipts.get(JSON.stringify([userId, id, state.suggestion.id, previousReplyText])));
         const followup = { text: body.text, ...(previousReplyText ? { previousSuggestionId: state.suggestion.id, previousReplyText, ...(copyReceipt ? { previousCopyReceiptId: copyReceipt } : {}) } : {}) };
         const key = JSON.stringify(['followup', userId, id, followup]);
@@ -1254,10 +1360,10 @@ $('message-form').addEventListener('submit', (event) => {
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
 $('direct-reply').addEventListener('click', () => void coachCall('reply', $('direct-reply')));
-$('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateSentState(); });
+$('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
 $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '复制中…', async () => {
   const id = state.selectedId, userId = state.me?.user.id, suggestionId = state.suggestion?.id, copiedText = $('suggestion-text').value;
-  if (!id || !suggestionId || !copiedText.trim()) return;
+  if (!id || !suggestionId || !copiedText.trim() || isNoReplySuggestion(state.suggestion)) return;
   const copyCall = JSON.stringify([userId, id]);
   state.copyCalls.add(copyCall);
   try {
@@ -1333,6 +1439,14 @@ async function boot() {
       state.csrf = session.csrfToken;
       await enterWorkspace();
       if (typeof session.counterpartId === 'string' && state.counterparts.some(({ id }) => id === session.counterpartId) && state.selectedId !== session.counterpartId) await loadCounterpart(session.counterpartId);
+      showStartup('', { restoreFocus: retryHadFocus });
+      announce('');
+      return;
+    }
+    if (state.meta.hostedPreview?.enabled === true) {
+      const session = await post('/api/preview/session', {});
+      state.csrf = session.csrfToken;
+      await enterWorkspace();
       showStartup('', { restoreFocus: retryHadFocus });
       announce('');
       return;

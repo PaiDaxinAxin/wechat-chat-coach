@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile, readFile, link, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { BetaError } from './beta-store.mjs';
+import { BetaError } from './store-contract.mjs';
 
 // Content-addressed, complete knowledge versions stay inside the private data
 // directory. No HTTP or MCP route reads these files.
