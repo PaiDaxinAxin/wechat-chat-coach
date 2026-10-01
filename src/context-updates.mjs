@@ -75,7 +75,7 @@ function resolveEvidence(evidence, records, path) {
 const selfArrangement = /(?:就这么定|就这样定|就这么说定|约好了|约好|一言为定|不见不散|到时见|到时候见|准时见|见面|碰面|见吧|见啦|见哦|见你|再见面|我会(?:去|到|来)|我(?:过去|过来|会到)|按你说的|按这个安排|没有问题|没问题|确认|see you|confirmed|it'?s a date|let'?s meet|i(?:'ll| will) (?:come|be there))/iu;
 const otherCommitment = /(?:就这么定|就这样定|就这么说定|约好了|约好|一言为定|不见不散|到时见|到时候见|准时见|按你说的|按这个安排|see you|it'?s a date)/iu;
 const unresolvedArrangement = /(?:不(?:去|见|约|来)|别(?:约|见)|不方便|不想|没空|没时间|没有(?:确认|答应|同意|约好)|没(?:确认|答应|同意|约好)|不是(?:确认|约好|说好)|未确认|还没(?:确认|答应|定)|到时再说|再看|待定|也许|可能|好像|不确定|不一定|取消|not sure|maybe|cannot|can't|cancel|did not agree|haven't confirmed)/iu;
-const shortAffirmation = /^(?:好(?:的|呀|啊|吧)?|可以|行(?:啊|呀)?|没问题|ok(?:ay)?|yes|sure)[\s。.!！~～]*$/iu;
+const shortAffirmation = /^(?:好(?:的|呀|啊|吧)?|可以|行(?:啊|呀)?|没问题|我会(?:去|来|到场|到)|ok(?:ay)?|yes|sure)[\s。.!！~～]*$/iu;
 function arrangementUnresolved(entry) { return unresolvedArrangement.test(entry.sourceText.replace(/不见不散/gu, '约定见面')); }
 function concreteInvitation(text, meeting) {
   return text.includes(meeting.time) && text.includes(meeting.place)

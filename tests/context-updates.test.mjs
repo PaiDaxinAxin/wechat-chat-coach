@@ -62,7 +62,7 @@ test('confirmed meeting uses both recorded parties with verbatim time/place, wit
   for (const speaker of ['self', 'other']) { const value = confirmed(); value.meeting.evidence = value.meeting.evidence.filter((ev) => ev.messageId === speaker); invalid(value); }
 });
 test('adjacent short affirmative answers can accept a concrete evidenced invitation, while unrelated good/availability/laugh/emoji cannot', () => {
-  for (const answer of ['好呀', '好的', '可以', '没问题', 'OK']) {
+  for (const answer of ['好呀', '好的', '可以', '没问题', '我会去。', '我会来', '我会到场', 'OK']) {
     const input = { ...context, messages: [context.messages[0], { id: 'other', speaker: 'other', text: answer }] };
     const value = confirmed(); value.meeting.evidence[1] = evidence('other', answer);
     assert.equal(validateContextUpdates(value, input).meeting.status, 'confirmed');
@@ -71,8 +71,10 @@ test('adjacent short affirmative answers can accept a concrete evidenced invitat
     const input = { ...context, messages: [context.messages[0], { id: 'other', speaker: 'other', text: answer }] };
     const value = confirmed(); value.meeting.evidence[1] = evidence('other', answer); invalid(value, input);
   }
-  const input = { ...context, messages: [context.messages[0], { id: 'unrelated', speaker: 'self', text: '我买了本书。' }, { id: 'other', speaker: 'other', text: '好呀' }] };
-  const value = confirmed(); value.meeting.evidence[1] = evidence('other', '好呀'); invalid(value, input);
+  for (const answer of ['好呀', '我会去。']) {
+    const input = { ...context, messages: [context.messages[0], { id: 'unrelated', speaker: 'self', text: '我买了本书。' }, { id: 'other', speaker: 'other', text: answer }] };
+    const value = confirmed(); value.meeting.evidence[1] = evidence('other', answer); invalid(value, input);
+  }
 });
 test('quote slicing cannot conceal negation or uncertainty in the surrounding recorded clause', () => {
   for (const answer of ['我没有确认见面', '我还没确认周六 19:00 湖畔咖啡见', '我可能到时见', '我不是确认见面']) {
