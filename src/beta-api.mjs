@@ -250,15 +250,18 @@ export async function createBetaServer({
       throw error;
     }
   }
-  function currentModelContext(userId, counterpartId, knowledgeSnapshot) {
+  function currentModelContext(userId, counterpartId, knowledgeSnapshot, suggestions) {
     try {
       const context = chatSnapshot(userId, counterpartId);
       const classificationHash = contextHash(context, knowledgeSnapshot.hash, 'classify');
       const directHash = contextHash(context, knowledgeSnapshot.hash, 'reply');
       const directJob = store.latestSuccessful(userId, counterpartId, 'reply', directHash);
-      return { directReply: directJob?.result?.suggestion ? store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, contextHash(context, knowledgeSnapshot.hash, 'conversation')), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
+      const conversationHash = contextHash(context, knowledgeSnapshot.hash, 'conversation');
+      // Return IDs only: full immutable inputs and knowledge stay server-side.
+      const currentSuggestionIds = suggestions.filter((suggestion) => store.getSuggestionCase(userId, counterpartId, suggestion.id).snapshot?.baseContextHash === conversationHash).map(({ id }) => id);
+      return { currentSuggestionIds, directReply: directJob?.result?.suggestion ? store.getSuggestion(userId, counterpartId, directJob.result.suggestion.id) : null, latestCoachPlan: store.latestCoachPlan(userId, counterpartId, conversationHash), modelContext: { classificationAttempted: store.hasModelAttempt(userId, counterpartId, 'classify', classificationHash), directReplyAttempted: store.hasModelAttempt(userId, counterpartId, 'reply', directHash) } };
     } catch (error) {
-      if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
+      if (['PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code)) return { currentSuggestionIds: [], directReply: null, latestCoachPlan: null, modelContext: { classificationAttempted: false, directReplyAttempted: false } };
       throw error;
     }
   }
@@ -381,7 +384,8 @@ export async function createBetaServer({
         const knowledgeSnapshot = await knowledge.read();
         const observed = await currentClassification(userId, id, knowledgeSnapshot);
         const jobs = store.listJobs(userId, id).map(({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cacheOf }) => ({ id: jobId, operation, state, errorCode, createdAt, updatedAt, knowledgeHash, cached: Boolean(cacheOf) }));
-        return { counterpart, messages: store.listMessages(userId, id), suggestions: store.listSuggestions(userId, id), ...observed, ...currentModelContext(userId, id, knowledgeSnapshot), meeting: store.getMeeting(userId, id), jobs };
+        const suggestions = store.listSuggestions(userId, id);
+        return { counterpart, messages: store.listMessages(userId, id), suggestions, ...observed, ...currentModelContext(userId, id, knowledgeSnapshot, suggestions), meeting: store.getMeeting(userId, id), jobs };
       }
       if (!action && method === 'PUT') return { counterpart: store.putCounterpart(userId, parse(CounterpartInputSchema, input, 'INVALID_COUNTERPART'), id) };
       if (!action && method === 'DELETE') { store.deleteCounterpart(userId, id); return { deleted: true }; }

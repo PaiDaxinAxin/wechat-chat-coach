@@ -173,6 +173,9 @@ try {
   assert.equal(classifications, 2); assert.equal(replies, 1);
   await page.screenshot({ path: join(evidenceDir, 'night.png'), fullPage: true });
   await response(`/api/counterparts/${id}/suggestions/${(await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data.suggestions.at(-1).id}/copied`, 'POST', () => page.locator('#copy-reply').click());
+  await page.waitForFunction(() => !document.getElementById('copy-reply').disabled);
+  assert.equal(await page.locator('[data-direction=down]').getAttribute('aria-pressed'), 'true', 'Copy refresh preserves the actual displayed direction');
+  assert.equal(await page.locator('#suggestion-direction').textContent(), '下切');
   const followupText = '这个项目主要做品牌升级。';
   await page.locator('#message-text').fill(followupText);
   const followup = await response(`/api/counterparts/${id}/followup`, 'POST', () => page.locator('#save-message').click());
@@ -400,9 +403,350 @@ try {
   assert.notEqual(secondRecopyFollowup.feedback.id, recopyFollowup.feedback.id, 'A different fresh copy can support another unverified followup');
   await page.locator('.message-bubble').filter({ hasText: '同一历史建议另一次新复制后的回应二。' }).waitFor();
   await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  // Direction feedback uses held HTTP fixtures after the existing durable journey.
+  // These extra reply requests never reach even the synthetic provider or a real account.
+  const beforeDirectionChecks = { classifications, replies, plans };
+  const directionLabels = { up: '上切', down: '下切', sideways: '平移' };
+  const sameReply = '我也遇到过类似的项目。你当时是怎么处理的？';
+  const directionRequests = [], replyQueue = [], directionFixtures = [];
+  let staticDirectionFixtures = false, heldDirectionDetail = null, serverDirectionReplies = 0;
+  function deferred() {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  await page.route('**/api/counterparts/*/reply', async (route) => {
+    const queued = replyQueue.shift();
+    assert.ok(queued, 'Each direction request has an isolated response fixture');
+    directionRequests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    if (queued.fromServer) {
+      const received = await route.fetch(); assert.equal(received.status(), 200);
+      queued.body = await received.json(); queued.suggestion = queued.body.data.suggestion;
+      serverDirectionReplies++;
+    }
+    queued.arrived.resolve();
+    await queued.release.promise;
+    await route.fulfill({ status: queued.status, contentType: 'application/json', body: JSON.stringify(queued.body) });
+  });
+  await page.route(`**/api/counterparts/${secondId}`, async (route) => {
+    if (route.request().method() !== 'GET' || !staticDirectionFixtures && !heldDirectionDetail) return route.continue();
+    const received = await route.fetch(); const body = await received.json();
+    if (staticDirectionFixtures) {
+      body.data.suggestions.push(...directionFixtures);
+      body.data.currentSuggestionIds = [...(body.data.currentSuggestionIds || []), ...directionFixtures.map(({ id }) => id)];
+    }
+    if (heldDirectionDetail) {
+      const held = heldDirectionDetail; heldDirectionDetail = null;
+      held.arrived.resolve(); await held.release.promise;
+    }
+    await route.fulfill({ response: received, json: body });
+  });
+  async function assertSelectedDirection(direction) {
+    assert.equal(await page.locator('#direction-options [aria-pressed=true]').count(), 1);
+    const selected = page.locator(`[data-direction=${direction}]`);
+    assert.equal(await selected.getAttribute('aria-pressed'), 'true');
+    assert.equal(await selected.evaluate((button) => button.classList.contains('selected')), true);
+    assert.equal(await selected.locator('.direction-check').isVisible(), true, 'The selected direction has a visible check');
+    const colors = await selected.evaluate((button) => {
+      const sample = document.createElement('span'); sample.style.backgroundColor = 'var(--color-accent)'; button.append(sample);
+      const result = { selected: getComputedStyle(button).backgroundColor, accent: getComputedStyle(sample).backgroundColor };
+      sample.remove(); return result;
+    });
+    assert.equal(colors.selected, colors.accent, 'Selection uses a solid accent fill in either theme');
+  }
+  async function assertDirectionLoading(direction) {
+    await page.locator('#suggestion-panel[aria-busy=true]').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#suggestion-loading').isVisible(), true);
+    const text = await page.locator('#suggestion-loading').textContent();
+    assert.ok(text.includes('正在生成') && text.includes(directionLabels[direction]) && text.includes('回复'), text);
+    assert.equal(await page.locator('#suggestion-editor').isVisible(), false, 'The previous draft is hidden during generation');
+    assert.equal(await page.locator('#suggestion-meta').isVisible(), false);
+    assert.equal(await page.locator('#copy-reply').isDisabled(), true);
+    const historicalButtons = await page.locator('#suggestion-list button').all();
+    assert.ok(historicalButtons.length > 0);
+    for (const button of historicalButtons) assert.equal(await button.isDisabled(), true, 'History cannot replace a busy reply');
+    await assertSelectedDirection(direction);
+  }
+  async function beginDirection(direction, { resultDirection = direction, reply = sameReply, cached = false, status = 200, fromServer = false } = {}) {
+    const arrived = deferred(), release = deferred();
+    const suggestion = { ...newAfterB, id: `synthetic-direction-${directionRequests.length + 1}`, direction: resultDirection,
+      reply, createdAt: new Date().toISOString(), pendingReplyText: null, pendingCopyReceiptId: null, pendingEligible: true };
+    const body = status === 200 ? { data: { suggestion, cached } } : { error: { code: 'SYNTHETIC_REPLY_FAILURE', message: '合成方向生成故障。' } };
+    const queued = { arrived, release, status, body, suggestion, fromServer };
+    replyQueue.push(queued);
+    const received = page.waitForResponse((r) => r.url().endsWith(`/api/counterparts/${secondId}/reply`) && r.request().method() === 'POST');
+    received.catch(() => {}); // Keep an earlier assertion failure visible if cleanup closes this held request.
+    await page.locator(`[data-direction=${direction}]`).click();
+    await arrived.promise;
+    await assertDirectionLoading(direction);
+    return { suggestion: queued.suggestion, complete: async () => { release.resolve(); assert.equal((await received).status(), status); } };
+  }
+  async function assertDirectionResult(direction, { cached = false, reply = sameReply, copying = false } = {}) {
+    await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#suggestion-loading').isVisible(), false);
+    assert.equal(await page.locator('#suggestion-editor').isVisible(), true);
+    assert.equal(await page.locator('#suggestion-meta').isVisible(), true);
+    assert.equal(await page.locator('#copy-reply').isDisabled(), copying);
+    assert.equal(await page.locator('#suggestion-text').inputValue(), reply);
+    assert.ok((await page.locator('#suggestion-direction').textContent()).includes(directionLabels[direction]), 'The marker uses the returned suggestion direction');
+    assert.equal(await page.locator('#suggestion-update').getAttribute('role'), 'status');
+    assert.equal(await page.locator('#suggestion-update').isVisible(), true);
+    const update = await page.locator('#suggestion-update').textContent();
+    assert.ok(update.includes('已切换到') && update.includes(directionLabels[direction]), update);
+    if (cached) assert.ok(update.includes('已保存结果'), update);
+    assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), true);
+    await assertSelectedDirection(direction);
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  }
+  async function assertStaticDirection(direction) {
+    await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
+    assert.ok((await page.locator('#suggestion-direction').textContent()).includes(directionLabels[direction]));
+    assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'Reading history or reloading has no fresh-switch announcement');
+    assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
+    await assertSelectedDirection(direction);
+  }
+  await page.setViewportSize({ width: 1280, height: 950 });
+  const firstDirection = await beginDirection('down');
+  await page.screenshot({ path: join(evidenceDir, 'direction-loading-desktop.png'), fullPage: true });
+  await firstDirection.complete(); await assertDirectionResult('down');
+  directionFixtures.push(firstDirection.suggestion);
+  await page.screenshot({ path: join(evidenceDir, 'direction-updated-desktop.png'), fullPage: true });
+  await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
+  assert.equal(await page.locator('#suggestion-update').isVisible(), true, 'The status remains readable after the short highlight ends');
+  // Identical text still announces the switch. Returned direction is authoritative.
+  const returnedDirection = await beginDirection('up', { resultDirection: 'sideways', cached: true });
+  await returnedDirection.complete(); await assertDirectionResult('sideways', { cached: true });
+  directionFixtures.push(returnedDirection.suggestion);
+  const retainedReplyDraft = '切换失败后必须保留的私有编辑草稿。';
+  await page.locator('#suggestion-text').fill(retainedReplyDraft);
+  const failedDirection = await beginDirection('up', { status: 503 });
+  await failedDirection.complete();
+  await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#suggestion-editor').isVisible(), true);
+  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft);
+  assert.equal(await page.locator('#copy-reply').isDisabled(), false);
+  await assertSelectedDirection('sideways');
+  const failedUpdate = await page.locator('#suggestion-update').textContent();
+  assert.ok(failedUpdate.includes('未取回') && failedUpdate.includes('新回复'), failedUpdate);
+  assert.equal(await page.locator('#suggestion-update').isVisible(), true);
+  assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
+  const historyFirst = page.locator(`[data-suggestion-id="${firstDirection.suggestion.id}"]`);
+  if (!await historyFirst.isVisible()) await page.locator('#suggestion-history > summary').click();
+  await historyFirst.click(); await assertStaticDirection('down');
+  await page.locator(`[data-suggestion-id="${returnedDirection.suggestion.id}"]`).click();
+  await assertStaticDirection('sideways');
+  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'History preserves edits to each suggestion');
+  staticDirectionFixtures = true;
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await assertStaticDirection('sideways');
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  // A previous copy refresh cannot replace a newly accepted reply with its stale GET.
+  const copyRefresh = { arrived: deferred(), release: deferred() };
+  heldDirectionDetail = copyRefresh;
+  await page.route(`**/api/counterparts/${secondId}/suggestions/*/copied`, (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ data: { copyReceipt: { id: 'synthetic-held-copy' } } }),
+  }));
+  await page.locator('#copy-reply').click(); await copyRefresh.arrived.promise;
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true, 'Copy remains locked during its refresh');
+  const afterOldCopyText = '新方向建议不能被旧复制的读取结果覆盖。';
+  const duringCopyReply = await beginDirection('down', { reply: afterOldCopyText });
+  await duringCopyReply.complete(); await assertDirectionResult('down', { reply: afterOldCopyText, copying: true });
+  directionFixtures.push(duringCopyReply.suggestion);
+  copyRefresh.release.resolve();
+  await page.waitForFunction(() => !document.getElementById('copy-reply').disabled);
+  assert.equal(await page.locator('#suggestion-text').inputValue(), afterOldCopyText);
+  assert.equal(await page.locator('#suggestion-direction').textContent(), '下切');
+  await assertSelectedDirection('down');
+  assert.equal(await page.locator('#suggestion-update').isVisible(), true, 'Stale copy refresh preserves the new direction feedback');
+  await page.unroute(`**/api/counterparts/${secondId}/suggestions/*/copied`);
+  // Small screens retain the explicit labels/check and support reduced motion.
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedMotionReply = await beginDirection('down', { cached: true });
+  assert.equal(await page.locator('#suggestion-loading').evaluate((node) => getComputedStyle(node, '::before').animationName), 'none');
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await assertDirectionLoading('down');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Direction loading fits 320px ${theme}`);
+    await page.screenshot({ path: join(evidenceDir, `direction-loading-320-${theme}.png`), fullPage: true });
+  }
+  await reducedMotionReply.complete(); await assertDirectionResult('down', { cached: true });
+  assert.equal(await page.locator('#suggestion-panel .suggestion-bubble').evaluate((node) => getComputedStyle(node).animationName), 'none');
+  directionFixtures.push(reducedMotionReply.suggestion);
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await assertSelectedDirection('down');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Direction result fits 320px ${theme}`);
+    const composer = await page.locator('#message-form').boundingBox();
+    assert.ok(composer.y >= 0 && composer.y + composer.height <= 845, `Direction reply keeps the composer visible in ${theme}`);
+    await page.screenshot({ path: join(evidenceDir, `direction-updated-320-${theme}.png`), fullPage: true });
+    await page.locator('#coach-panel').screenshot({ path: join(evidenceDir, `direction-controls-320-${theme}.png`) });
+  }
+  await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
+  assert.equal(await page.locator('#suggestion-update').isVisible(), true, 'Reduced motion also clears the short highlight while keeping the status');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  // A held B reply cannot update A, erase A's draft or show a fresh-switch status there.
+  const crossObjectReply = await beginDirection('up', { reply: 'B 的晚回建议绝不能显示在 A。' });
+  await page.locator('#counterpart-select').selectOption(id);
+  await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id);
+  await page.locator('#message-text').fill('方向生成期间 A 的新草稿。');
+  const otherDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
+  await crossObjectReply.complete(); await otherDirectoryRefresh;
+  assert.equal(await page.locator('#message-text').inputValue(), '方向生成期间 A 的新草稿。');
+  assert.notEqual(await page.locator('#suggestion-text').inputValue(), crossObjectReply.suggestion.reply);
+  assert.equal(await page.locator('#suggestion-loading').isVisible(), false);
+  assert.equal(await page.locator('#suggestion-update').isVisible(), false);
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await assertStaticDirection('down');
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  // A hidden draft is not evidence of having used a reply when a new other message arrives.
+  const hiddenDraft = '尚未发送的隐藏旧草稿，不能被推定使用。';
+  await page.locator('#suggestion-text').fill(hiddenDraft);
+  const staleContextReply = await beginDirection('up', { reply: '旧消息上下文的晚回建议。' });
+  staticDirectionFixtures = false;
+  const feedbackBeforeBusyFollowup = server.betaStore.listFeedback(me.user.id).length;
+  await page.locator('#message-speaker').selectOption('other');
+  const busyFollowupText = '方向还在生成时收到的全新对方原话。';
+  await page.locator('#message-text').fill(busyFollowupText);
+  const busyFollowupRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${secondId}/followup`) && r.method() === 'POST');
+  const busyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
+  const busyFollowupBody = (await busyFollowupRequest).postDataJSON();
+  for (const key of ['previousSuggestionId', 'previousReplyText', 'previousCopyReceiptId']) assert.equal(busyFollowupBody[key], undefined, `Busy followup omits ${key}`);
+  assert.equal(busyFollowup.previousMessage, null); assert.equal(busyFollowup.feedback, null);
+  assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
+  await page.locator('.message-bubble').filter({ hasText: busyFollowupText }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.locator('#message-text').fill('新上下文中的未提交草稿。');
+  const sameObjectDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
+  await staleContextReply.complete(); await sameObjectDirectoryRefresh;
+  assert.equal(await page.locator('#message-text').inputValue(), '新上下文中的未提交草稿。');
+  assert.notEqual(await page.locator('#suggestion-text').inputValue(), staleContextReply.suggestion.reply);
+  assert.equal(await page.locator('#suggestion-loading').isVisible(), false);
+  assert.equal(await page.locator('#suggestion-update').isVisible(), false);
+  assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
+  // The reverse race also needs a readback: a new-message GET was already in flight
+  // when the old-context reply POST finally returned. Keep the new message visible.
+  const beforeDelayedPost = await beginDirection('down');
+  await beforeDelayedPost.complete(); await assertDirectionResult('down');
+  await page.locator('#suggestion-text').fill('真实隔离回复返回前的隐藏草稿，不表示发送。');
+  const delayedStoredReply = await beginDirection('down', { fromServer: true });
+  const delayedReadback = { arrived: deferred(), release: deferred() };
+  heldDirectionDetail = delayedReadback;
+  const delayedMessageText = '已保存但读取仍在路上的全新对方消息。';
+  await page.locator('#message-text').fill(delayedMessageText);
+  const delayedFollowupRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${secondId}/followup`) && r.method() === 'POST');
+  const delayedFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
+  await delayedReadback.arrived.promise;
+  const delayedFollowupBody = (await delayedFollowupRequest).postDataJSON();
+  for (const key of ['previousSuggestionId', 'previousReplyText', 'previousCopyReceiptId']) assert.equal(delayedFollowupBody[key], undefined, `Held-readback followup omits ${key}`);
+  assert.equal(delayedFollowup.previousMessage, null); assert.equal(delayedFollowup.feedback, null);
+  const savedDuringHold = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
+  assert.equal(savedDuringHold.messages.at(-1).text, delayedMessageText, 'New message is durably saved while its UI readback is held');
+  assert.ok(savedDuringHold.suggestions.some((item) => item.id === delayedStoredReply.suggestion.id), 'The completed old reply remains available as history');
+  const delayedDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
+  await delayedStoredReply.complete(); await delayedDirectoryRefresh;
+  delayedReadback.release.resolve();
+  await page.locator('.message-bubble').filter({ hasText: delayedMessageText }).waitFor();
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.screenshot({ path: join(evidenceDir, 'direction-held-readback-result.png'), fullPage: true });
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Old prepared reply never returns as pending after the new message readback');
+  assert.equal(await page.locator('#suggestion-update').isVisible(), false);
+  assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
+  await page.locator('#message-text').fill('术语开关验证保留的未提交聊天草稿。');
+  const finalDirectionReply = await beginDirection('down');
+  await finalDirectionReply.complete(); await assertDirectionResult('down');
+  await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
+  async function assertReplyPaletteAndAlignment(theme) {
+    const layout = await page.evaluate(() => {
+      const coach = document.getElementById('coach-panel');
+      const reply = document.querySelector('#suggestion-panel .suggestion-bubble');
+      const self = document.querySelector('.message.self .message-bubble');
+      const other = document.querySelector('.message.other .message-bubble');
+      const colors = {};
+      for (const name of ['coach', 'self', 'surface']) {
+        const sample = document.createElement('span'); sample.style.backgroundColor = `var(--color-${name})`; document.body.append(sample);
+        colors[name] = getComputedStyle(sample).backgroundColor; sample.remove();
+      }
+      const coachBox = coach.getBoundingClientRect(), replyBox = reply.getBoundingClientRect();
+      return { coachWidth: coachBox.width, replyWidth: replyBox.width, coachRight: coachBox.right, replyRight: replyBox.right,
+        coachColor: getComputedStyle(coach).backgroundColor, replyColor: getComputedStyle(reply).backgroundColor,
+        selfColor: getComputedStyle(self).backgroundColor, otherColor: getComputedStyle(other).backgroundColor, colors };
+    });
+    assert.ok(Math.abs(layout.coachWidth - layout.replyWidth) < 1 && Math.abs(layout.coachRight - layout.replyRight) < 1, `${theme} AI card shares the reply width and right edge`);
+    assert.equal(layout.coachColor, layout.colors.coach); assert.equal(layout.replyColor, layout.colors.self);
+    assert.equal(layout.selfColor, layout.colors.self); assert.equal(layout.otherColor, layout.colors.surface);
+    assert.notEqual(layout.coachColor, layout.replyColor, 'The AI card has a lighter, distinct green surface');
+  }
+  await page.setViewportSize({ width: 1280, height: 950 });
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await assertReplyPaletteAndAlignment(theme);
+    await page.screenshot({ path: join(evidenceDir, `direction-final-desktop-${theme}.png`), fullPage: true });
+  }
+  // Coach terms explain only on demand. Toggling them preserves both local drafts.
+  const glossary = page.locator('#coach-glossary-toggle');
+  assert.equal(await glossary.isChecked(), true, 'Term explanations default to enabled');
+  assert.equal(await glossary.getAttribute('aria-controls'), 'coach-glossary-terms');
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 7);
+  for (const term of await page.locator('#coach-glossary-terms > details').all()) {
+    assert.equal(await term.getAttribute('open'), null, 'Terms default to collapsed explanations');
+    assert.equal(await term.locator('p').first().isVisible(), false);
+  }
+  const strongCoachText = await page.evaluate(() => {
+    const selectors = ['.coach-temperature-top > span', '#field-coach-temperature', '.coach-action-label'];
+    return selectors.map((selector) => { const style = getComputedStyle(document.querySelector(selector)); return { size: parseFloat(style.fontSize), weight: Number(style.fontWeight) }; });
+  });
+  assert.ok(strongCoachText[0].size >= 16 && strongCoachText[1].size >= 28 && strongCoachText[2].size >= 16);
+  assert.ok(strongCoachText.every(({ weight }) => weight >= 600), 'Heat and action headings have clear visual emphasis');
+  const glossaryPlan = '术语操作不得擦掉的场外计划。';
+  await page.locator('#field-coach-plan').fill(glossaryPlan);
+  const glossaryComposer = await page.locator('#message-text').inputValue();
+  const beforeGlossary = { classifications, replies, plans, directionRequests: directionRequests.length };
+  await page.setViewportSize({ width: 320, height: 844 });
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    await assertReplyPaletteAndAlignment(theme);
+    if (!await page.locator('#field-coach').isVisible()) await page.locator('#toggle-field-coach').click();
+    await glossary.focus(); await page.keyboard.press('Space');
+    assert.equal(await glossary.isChecked(), false); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false);
+    await page.keyboard.press('Space');
+    assert.equal(await glossary.isChecked(), true); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), true);
+    const upSummary = page.locator('[data-coach-term=up] > summary');
+    await upSummary.focus(); await page.keyboard.press('Enter');
+    assert.equal(await page.locator('[data-coach-term=up] p').isVisible(), true, 'Keyboard Enter opens a term explanation');
+    await glossary.uncheck(); await glossary.check();
+    assert.equal(await page.locator('[data-coach-term=up]').getAttribute('open'), '', 'Disabling explanations preserves expanded terms');
+    await upSummary.click();
+    for (const name of ['up', 'down', 'sideways', 'relationship', 'warming']) {
+      const term = page.locator(`[data-coach-term=${name}]`);
+      const summary = term.locator(':scope > summary');
+      assert.ok((await summary.boundingBox()).height >= 44, 'Term summaries preserve touch targets');
+      await summary.click(); assert.equal(await term.locator('p').first().isVisible(), true);
+      await summary.click(); assert.equal(await term.locator('p').first().isVisible(), false);
+    }
+    assert.ok((await page.locator('.coach-glossary-toggle').boundingBox()).height >= 44);
+    assert.equal(await page.locator('#message-text').inputValue(), glossaryComposer);
+    assert.equal(await page.locator('#field-coach-plan').inputValue(), glossaryPlan);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Coach glossary fits 320px ${theme}`);
+    await page.locator('.coach-glossary').screenshot({ path: join(evidenceDir, `coach-glossary-320-${theme}.png`) });
+    await page.locator('[data-coach-term=warming] > summary').click();
+    assert.equal(await page.locator('.coach-glossary').evaluate((node) => node.scrollWidth > node.clientWidth + 1), false, `Expanded glossary wraps in ${theme}`);
+    await page.locator('[data-coach-term=warming]').screenshot({ path: join(evidenceDir, `coach-warming-320-${theme}.png`) });
+    await page.locator('[data-coach-term=warming] > summary').click();
+    await page.locator('#close-field-coach').click();
+  }
+  assert.deepEqual({ classifications, replies, plans, directionRequests: directionRequests.length }, beforeGlossary, 'Term explanations never call a model');
+  assert.equal(replyQueue.length, 0);
+  assert.equal(serverDirectionReplies, 1);
+  assert.equal(replies, beforeDirectionChecks.replies + serverDirectionReplies, 'Only the held durable mock reply reaches the isolated provider');
+  assert.equal(plans, beforeDirectionChecks.plans);
+  assert.equal(classifications, beforeDirectionChecks.classifications + 2, 'Only the two isolated followups analyze their new contexts');
+  await page.unroute('**/api/counterparts/*/reply');
+  await page.unroute(`**/api/counterparts/${secondId}`);
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, checks: ['direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse'], pageErrors }, null, 2) + '\n');
-  console.log('Direct single-chat demo journey passed: compact coach heat/actions/pitfalls, refusal and uncertainty overrides, day/night, inferred followup, retained drafts, mobile and reload. Zero paid calls.');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy and history', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'history and reload use static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
+  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/history, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }
