@@ -98,8 +98,22 @@ test('unknown heat remains null score/zero coverage and is not a failure', () =>
 test('multiple dimensions and independent observations are needed, rather than one reply', () => {
   const value = classification({ activeInteraction: 'repeated_positive', responseEngagement: 'repeated_positive', personalInterest: 'repeated_positive', reciprocalFlirting: 'repeated_positive' }, { confidence: 'strong' });
   for (const item of Object.values(value.heat)) if (item.level !== 'unknown') item.evidenceIds = ['one-message'];
-  assert.equal(computeHeat(value).status, 'insufficient_evidence');
+  const sparse = computeHeat(value);
+  assert.equal(sparse.status, 'insufficient_evidence');
+  assert.equal(sparse.score, null);
+  assert.equal(sparse.trend.status, 'unknown');
   assert.equal(computeHeat(classification({ responseEngagement: 'positive', personalInterest: 'positive' })).status, 'potential');
+});
+
+test('a single ambiguous reply cannot manufacture a zero score or falling trend over established evidence', () => {
+  const established = computeHeat(classification({ activeInteraction: 'positive', responseEngagement: 'positive', personalInterest: 'positive', reciprocalFlirting: 'positive' }));
+  const isolated = classification({ activeInteraction: 'negative', responseEngagement: 'negative', personalInterest: 'negative' });
+  for (const item of Object.values(isolated.heat)) if (item.level !== 'unknown') item.evidenceIds = ['latest-laugh-or-emoji'];
+  const result = computeHeat(isolated, { history: [established] });
+  assert.equal(result.status, 'insufficient_evidence');
+  assert.equal(result.score, null);
+  assert.deepEqual(result.trend, { status: 'unknown', comparableDimensions: [], delta: null });
+  assert.equal(computeHeat({ ...isolated, obstacle: { type: 'negative' } }, { history: [established] }).status, 'pause', 'a stated boundary still stops related progression');
 });
 
 test('negative resistance pauses even with high observed heat', () => {
@@ -126,6 +140,9 @@ test('trend compares the same observed dimensions, not changes in missing covera
   assert.deepEqual(unchanged.trend.comparableDimensions, ['activeInteraction', 'responseEngagement']);
   const improved = computeHeat(classification({ activeInteraction: 'positive', responseEngagement: 'positive' }), { history: [previous] });
   assert.equal(improved.trend.status, 'rising');
+  const sparse = computeHeat(classification({ activeInteraction: 'negative' }));
+  const recovered = computeHeat(classification({ activeInteraction: 'positive', responseEngagement: 'positive' }), { history: [previous, sparse] });
+  assert.equal(recovered.trend.status, 'rising', 'an insufficient intermediate observation does not replace an evidenced baseline');
 });
 
 test('top-three ordering discounts low coverage/confidence and excludes unsupported records', () => {

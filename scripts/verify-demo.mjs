@@ -113,10 +113,10 @@ try {
     };
   }
   coachScenario = scenario('repeated_positive', [fixtureOther]);
-  assert.equal(computeHeat(coachScenario).score, 100);
+  assert.equal(computeHeat(coachScenario).score, null);
   assert.equal(computeHeat(coachScenario).status, 'insufficient_evidence');
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'A 100 index from one message cannot become a temperature');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'One message does not establish a numeric heat score');
   assert.ok((await page.locator('#field-coach-initiative').textContent()).includes('未知时不要推进'), 'Legacy conditions and negations remain intact');
   await page.locator('#field-coach-details > summary').click();
   assert.equal(await page.locator('#field-coach-full-guidance').isVisible(), true);

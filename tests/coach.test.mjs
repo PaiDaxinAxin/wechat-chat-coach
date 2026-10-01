@@ -137,7 +137,7 @@ test('weights, direction uniqueness, evidence IDs and observed heat are strictly
 });
 
 test('reply respects requested direction and allows an empty pause', async () => {
-  const value = { reply: '', reason: '对方已经明确表示不想继续。', action: 'pause', styleNote: '暂时停止追问。' };
+  const value = { reply: '', reason: '对方已经明确表示不想继续。', action: 'pause', styleNote: '暂时停止追问。', guidance: { topicMove: null, relationMove: 'pause', ownWordsGuide: '本轮先停止推进。', reentryWhen: '对方明确愿意恢复交流时再判断。' } };
   const fetchImpl = async (_url, request) => {
     const body = JSON.parse(request.body);
     assert.equal(body.messages[1].content, knowledgeText);
@@ -146,7 +146,8 @@ test('reply respects requested direction and allows an empty pause', async () =>
     assert.equal(body.tools.length, 1);
     assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'submit_coaching_result' } });
     assert.equal(parameters.additionalProperties, false);
-    assert.deepEqual(Object.keys(parameters.properties).sort(), ['action', 'reason', 'reply', 'styleNote']);
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ['action', 'guidance', 'reason', 'reply', 'styleNote']);
+    assert.equal(parameters.required.includes('guidance'), true, 'Every fresh native reply must include direction guidance');
     assert.equal(parameters.properties.reply.maxLength, 350);
     assert.deepEqual(parameters.properties.action.enum, ['reply', 'wait', 'clarify', 'invite', 'pause']);
     return mockResponse(value)();
@@ -155,12 +156,115 @@ test('reply respects requested direction and allows an empty pause', async () =>
 });
 
 test('reply length limits and required reply text are validated', async () => {
-  const base = { reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。' };
+  const base = { reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。', guidance: { topicMove: 'up', relationMove: 'continue', ownWordsGuide: '先了解她的大致工作方向。', reentryWhen: '她继续展开时接话。' } };
   const cases = [{ ...base, reply: '长'.repeat(351) }, { ...base, reason: '长'.repeat(201) }, { ...base, styleNote: '长'.repeat(201) }, { ...base, reply: '' }, { ...base, raw: knowledgeText }];
   for (const value of cases) {
     await assert.rejects(generateReply({ context: input }, { knowledgeText, env, fetchImpl: mockResponse(value) }), { code: 'invalid_model_output' });
   }
   assert.deepEqual(await generateReply({ context: input }, { knowledgeText, env, fetchImpl: mockResponse(base) }), base);
+});
+
+test('fresh native replies without guidance fail closed instead of being labeled as legacy records', async () => {
+  const legacy = { reply: '你主要忙哪一类工作？', reason: '了解工作的大类。', action: 'reply', styleNote: '保持简短自然。' };
+  let calls = 0;
+  await assert.rejects(generateReply({ context: input }, { knowledgeText, env, fetchImpl: async () => { calls++; return mockResponse(legacy)(); } }),
+    (error) => error.code === 'invalid_model_output' && JSON.stringify(error.diagnostics) === JSON.stringify([{ code: 'invalid_type', path: ['guidance'] }]));
+  assert.equal(calls, 1, 'Malformed output does not trigger another model call');
+});
+
+test('a single native reply call provides independent topic and relationship guidance for users to use their own words', async () => {
+  const value = { reply: '感觉你挺认真。最近哪个部分最有意思？', reason: '承接她的投入，再轻度表达欣赏。', action: 'reply', styleNote: '用自己的说法表达真实感受。',
+    guidance: { topicMove: 'down', relationMove: 'light_approach', ownWordsGuide: '先说出你真实欣赏的一点，再问一个细节。', reentryWhen: '她继续展开时顺着新内容接话。' } };
+  let calls = 0;
+  const fetchImpl = async (_url, request) => {
+    calls++;
+    const body = JSON.parse(request.body);
+    assert.equal(body.messages[1].content, knowledgeText);
+    assert.equal(body.tools.length, 1); assert.equal(body.parallel_tool_calls, false);
+    const guidance = body.tools[0].function.parameters.properties.guidance;
+    assert.equal(guidance.additionalProperties, false);
+    assert.deepEqual(guidance.required.sort(), ['ownWordsGuide', 'reentryWhen', 'relationMove', 'topicMove']);
+    assert.equal(guidance.properties.ownWordsGuide.maxLength, 200);
+    assert.match(body.messages[2].content, /本次提交同时提供 guidance/);
+    assert.match(body.messages[2].content, /relationMove 单独判断/);
+    assert.match(body.messages[2].content, /不要求用户照抄/);
+    assert.match(body.messages[0].content, /单独一句“哈哈”或表情不能直接判低热度/);
+    assert.match(body.messages[0].content, /当前话题是否自然结束/);
+    assert.match(body.messages[0].content, /完整双方画像、认识背景、全部已保存聊天与当前见面状态/);
+    assert.match(body.messages[0].content, /性吸引、信任、恋爱意愿分别看待/);
+    assert.match(body.messages[0].content, /待验证观点，不是已验证事实或承诺/);
+    assert.match(body.messages[0].content, /不凭线上热度推定线下亲密行为已获同意/);
+    return mockResponse(value)();
+  };
+  assert.deepEqual(await generateReply({ context: input, direction: 'down' }, { knowledgeText, env, fetchImpl }), value);
+  assert.equal(calls, 1);
+});
+
+test('waiting guidance can be visible without a sendable reply and names conditions rather than a fixed delay', async () => {
+  const context = { ...input, messages: [{ id: 'm1', speaker: 'other', text: '哈哈🙂' }] };
+  for (const action of ['wait', 'pause']) {
+    const value = { reply: '', reason: action === 'wait' ? '本话题已自然收住；单句表情不足以判低兴趣。' : '对方明确不愿继续这类推进，应尊重边界。', action, styleNote: '不需要为了保持聊天而硬续一句。',
+      guidance: { topicMove: null, relationMove: action, ownWordsGuide: '本轮先不发送，保留自然留白。', reentryWhen: action === 'wait' ? '她有新的内容，或你有真实新话题时再判断。' : '对方明确愿意恢复这类交流时再判断。' } };
+    const fetchImpl = async (_url, request) => {
+      const body = JSON.parse(request.body);
+      assert.match(body.messages[2].content, /不要硬定等几小时、几天/);
+      assert.match(body.messages[2].content, /不把拒绝当成需要突破的测试/);
+      assert.match(body.messages[2].content, /单一哈哈或emoji不等于低热度/);
+      return mockResponse(value)();
+    };
+    assert.deepEqual(await generateReply({ context }, { knowledgeText, env, fetchImpl }), value);
+  }
+});
+
+test('delayed laughter case keeps three conditional branches, alternative explanations and evidence boundaries in native prompts', async () => {
+  const context = { ...input, messages: [
+    { id: 'm1', speaker: 'other', text: '之前和你聊天挺开心的。' },
+    { id: 'm2', speaker: 'other', text: '哈哈', recordedAt: '2026-10-01T04:00:00.000Z' },
+    { id: 'm3', speaker: 'other', text: '🙂', recordedAt: '2026-10-01T07:00:00.000Z' },
+    { id: 'm4', speaker: 'other', text: '哈哈', recordedAt: '2026-10-01T10:00:00.000Z' },
+  ] };
+  const waiting = { reply: '', reason: '当前原因仍不确定，可先自然收尾。', action: 'wait', styleNote: '保持轻松，不逐字纠结。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先留一点空间。', reentryWhen: '有真实新话题或对方主动展开时再判断。' } };
+  let calls = 0;
+  const fetchImpl = async (_url, request) => {
+    const body = JSON.parse(request.body), system = body.messages[0].content, task = body.messages[2].content;
+    assert.match(system, /连续3次隔几小时只回哈哈或emoji/);
+    for (const alternative of ['对本人兴趣有限', '对当前话题没兴趣', '不知道怎么接']) assert.ok(system.includes(alternative));
+    assert.match(system, /此前热度>65.*资料或此前原话中真实提过的话题/);
+    assert.match(system, /原本投入不高.*先不回.*用户提供具体朋友圈动态/);
+    assert.match(system, /过去有双向暧昧.*可能在忙.*晚些或晚上聊别的/);
+    for (const bound of ['不是成功概率或机械阈值', '未提供旧分数不补造分数', '不能写成事实', '不编造她的兴趣或经历', '朋友圈仅用用户提供的内容，不访问或抓取', '不是固定等待小时数', '历史暧昧不覆盖明确拒绝', '保持轻松玩乐，不逐字逐句计较']) assert.ok(system.includes(bound), bound);
+    assert.ok(body.messages[1].content === knowledgeText);
+    const sent = JSON.parse(task.split('本轮输入数据：\n')[1]);
+    assert.deepEqual(sent.context ?? sent, context);
+    if (calls++ === 0) return mockResponse(validClassification())();
+    assert.match(task, /“换已知话题”“先留白等具体契机”“晚些再聊别的”/);
+    assert.match(task, /不机械叠加三步/);
+    assert.match(task, /不把历史暧昧当成突破拒绝的理由/);
+    return mockResponse(waiting)();
+  };
+  await classifyChat(context, { knowledgeText, env, fetchImpl });
+  assert.deepEqual(await generateReply({ context }, { knowledgeText, env, fetchImpl }), waiting);
+  assert.equal(calls, 2, 'Only the two requested operations run; this verifies prompts, not model interpretation');
+});
+
+test('guidance bounds, closed fields and selected direction are validated without raw output diagnostics', async () => {
+  const base = { reply: '再了解一个细节。', reason: '依据当前话题。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: 'down', relationMove: 'receive', ownWordsGuide: '先回应，再问一个细节。', reentryWhen: '有新的内容时继续。' } };
+  for (const value of [
+    { ...base, guidance: { ...base.guidance, ownWordsGuide: '长'.repeat(201) } },
+    { ...base, guidance: { ...base.guidance, reentryWhen: '' } },
+    { ...base, guidance: { ...base.guidance, relationMove: 'private-raw-untrusted-marker' } },
+    { ...base, guidance: { ...base.guidance, rawKnowledge: knowledgeText } },
+    { ...base, guidance: { ...base.guidance, topicMove: 'up' } },
+    { ...base, action: 'wait', guidance: { ...base.guidance, topicMove: null, relationMove: 'wait' } },
+    { ...base, reply: '', action: 'pause', guidance: { ...base.guidance, topicMove: null, relationMove: 'invite' } },
+    { ...base, reply: '', action: 'wait', guidance: { ...base.guidance, topicMove: null, relationMove: 'light_approach' } },
+  ]) {
+    await assert.rejects(generateReply({ context: input, direction: 'down' }, { knowledgeText, env, fetchImpl: mockResponse(value) }), (error) => {
+      assert.equal(error.code, 'invalid_model_output');
+      assert.doesNotMatch(JSON.stringify(error), /private-raw-untrusted-marker|原始知识第一行/);
+      return true;
+    });
+  }
 });
 
 test('provider failures reveal categories/status, never raw error bodies or keys', async () => {

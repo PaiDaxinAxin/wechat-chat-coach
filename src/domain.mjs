@@ -173,6 +173,7 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
     },
     questionnaireHypotheses: analyzeQuestionnaire(profile.questionnaire),
     interpretationRule: 'Keep real background, current expression and learning goals separate. Questionnaire summaries are self-report hypotheses; prefer actual conversation evidence. Do not fabricate identity or experiences. One round is one complete topic, not one message. By default proactively attempt one mild A warming per complete topic, then adapt to feedback; 10–20 messages is only a topic check-in reference. A is a shallow sincere evaluation or definition, B the male-to-female romantic frame, and C a clear private or intimate implication; comfort and positive interaction are prerequisites for C rather than its definition. Unknown does not justify C; respect explicit refusals.',
+    relationshipInterpretation: 'This coaching concerns voluntary intimacy between adults; the current product stage is online interaction toward a mutually agreed offline meeting. Sexual attraction, trust and willingness to pursue a romantic relationship are separate questions with separate evidence, not interchangeable scores. Heat, flirting, a meeting or past intimacy is not consent to another act, and sex does not guarantee a romantic relationship.',
   };
   if (personalStyle !== undefined) {
     personalContext.confirmedPersonalStyle = validateAppliedPersonalStyle(personalStyle);
@@ -180,13 +181,19 @@ export function buildChatContext(profileInput, counterpartInput, messageInput, {
   }
   return {
     userProfile: JSON.stringify(personalContext),
-    counterpartProfile: JSON.stringify({ alias: counterpart.alias, channel: counterpart.channel, appProfile: counterpart.appProfile, offlineScene: counterpart.offlineScene, background: counterpart.background, previousRounds: counterpart.rounds, ...(meeting === undefined ? {} : { meeting: parse(MeetingInputSchema, meeting, 'INVALID_MEETING') }), unknownsRule: 'Absent information is unknown, not zero interest or refusal. A recorded meeting is user reported; respect its current state and do not repeat a confirmed invitation.' }),
+    counterpartProfile: JSON.stringify({
+      alias: counterpart.alias, channel: counterpart.channel, appProfile: counterpart.appProfile, offlineScene: counterpart.offlineScene, background: counterpart.background, previousRounds: counterpart.rounds,
+      ...(meeting === undefined ? {} : { meeting: parse(MeetingInputSchema, meeting, 'INVALID_MEETING') }),
+      recordedContext: { scope: 'all_supplied_messages_in_recorded_order', messageCount: messages.length, firstMessageId: messages[0]?.id ?? null, lastMessageId: messages.at(-1)?.id ?? null, completeWechatHistoryVerified: false, missingBackground: counterpart.background ? [] : ['relationship_background'] },
+      interpretationRule: 'Assess both full profiles, how the pair met and all supplied messages together. Revisit earlier approaches, the counterpart response, subsequent handling, boundaries and later changes across complete topics. Distinguish an observed change from contradictory or missing evidence. Recent text does not erase earlier relevant evidence; a single laugh or emoji cannot establish a global decline. Do not assume that unsupplied messages or unrecorded warming attempts occurred. Timing sources remain estimates or user reports; compare the known pattern without treating a lone delay as the relationship state.',
+      unknownsRule: 'Absent information is unknown, not zero interest or refusal. A recorded meeting is user reported; respect its current state and do not repeat a confirmed invitation.',
+    }),
     messages,
     ...(intent === undefined || intent === '' ? {} : { intent: parse(requiredText(2_000), intent, 'INVALID_INTENT') }),
   };
 }
 
-export const HEAT_RULE_VERSION = 'provisional-five-dimensions-1';
+export const HEAT_RULE_VERSION = 'provisional-five-dimensions-2';
 const HEAT_DIMENSIONS = Object.freeze(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough']);
 const LEVEL_VALUE = Object.freeze({ negative: -1, passive: 0, positive: 1, repeated_positive: 2 });
 const DimensionSchema = z.strictObject({ level: z.enum(['unknown', ...Object.keys(LEVEL_VALUE)]), evidenceIds: z.array(requiredText(128)) });
@@ -203,7 +210,8 @@ function scoreDimensions(dimensions, names) {
 }
 
 function heatTrend(current, history) {
-  const previous = history.at(-1)?.heat ?? history.at(-1);
+  // A sparse latest observation cannot overwrite the last evidenced baseline.
+  const previous = history.map((entry) => entry?.heat ?? entry).findLast((entry) => entry?.dimensions && entry.status !== 'insufficient_evidence' && (!Array.isArray(entry.evidenceIds) || entry.evidenceIds.length >= 2));
   if (!previous?.dimensions) return { status: 'unknown', comparableDimensions: [], delta: null };
   const names = HEAT_DIMENSIONS.filter((name) => current[name].level !== 'unknown' && Object.hasOwn(LEVEL_VALUE, previous.dimensions[name]?.level));
   if (names.length < 2) return { status: 'unknown', comparableDimensions: names, delta: null };
@@ -224,7 +232,8 @@ export function computeHeat(classification, { history = [], observedAt } = {}) {
   const knownNames = HEAT_DIMENSIONS.filter((name) => dimensions[name].level !== 'unknown');
   const evidenceIds = [...new Set(knownNames.flatMap((name) => dimensions[name].evidenceIds))].sort();
   const coverage = knownNames.length / HEAT_DIMENSIONS.length;
-  const score = scoreDimensions(dimensions, knownNames);
+  const sufficientEvidence = coverage >= 0.4 && evidenceIds.length >= 2;
+  const score = sufficientEvidence ? scoreDimensions(dimensions, knownNames) : null;
   const positive = (name) => ['positive', 'repeated_positive'].includes(dimensions[name].level);
   const positiveCount = knownNames.filter(positive).length;
   const negativeCount = knownNames.filter((name) => dimensions[name].level === 'negative').length;
@@ -232,7 +241,7 @@ export function computeHeat(classification, { history = [], observedAt } = {}) {
   let explanation = '已有一些互动证据，适合结合当前状态继续建设；不要求每轮升温。';
   if (current.obstacle.type === 'negative') {
     status = 'pause'; explanation = '已观察到明确负面阻力，先停止相关推进；综合分数不能覆盖拒绝。';
-  } else if (coverage < 0.4 || evidenceIds.length < 2) {
+  } else if (!sufficientEvidence) {
     status = 'insufficient_evidence'; explanation = '证据不足，先补充背景与互动；未知维度保留未知，不按零分处理。';
   } else if (current.confidence !== 'limited' && coverage >= 0.6 && evidenceIds.length >= 3 && score >= 65 && positive('personalInterest') && (positive('reciprocalFlirting') || positive('actionFollowThrough')) && (positive('activeInteraction') || positive('responseEngagement')) && current.obstacle.type !== 'ambiguous') {
     status = 'high_invite'; explanation = '多个维度出现积极且有覆盖的证据，可以考虑一个可拒绝的具体邀约；仍需双方确认。';
@@ -242,7 +251,7 @@ export function computeHeat(classification, { history = [], observedAt } = {}) {
   return {
     ruleVersion: HEAT_RULE_VERSION,
     status, score, coverage, confidence: current.confidence, dimensions, evidenceIds,
-    trend: heatTrend(dimensions, history), provisional: true,
+    trend: sufficientEvidence ? heatTrend(dimensions, history) : { status: 'unknown', comparableDimensions: [], delta: null }, provisional: true,
     scoreMeaning: 'Ordinal observed-interaction index, not a success probability; unknown dimensions excluded.',
     explanation,
     ...(observedAt === undefined ? {} : { observedAt }),

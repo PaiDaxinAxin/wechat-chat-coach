@@ -20,4 +20,4 @@ export const ChatMessageSchema = z.strictObject({
 export const COACH_CONTEXT_VERSION = 'recorded-context-2';
 // Bump whenever output schemas or coaching policy change, so persisted results
 // from an older protocol cannot masquerade as the current classification.
-export const COACH_PROTOCOL_VERSION = 'native-coaching-3';
+export const COACH_PROTOCOL_VERSION = 'native-coaching-4';

@@ -85,14 +85,19 @@ export function createBetaMcpHandler(betaServer, { rateLimitPerMinute = 30, now 
   return async (req, res) => {
     const authorization = req.headers.authorization;
     if (req.headersDistinct?.authorization?.length > 1 || typeof authorization !== 'string' || !/^Bearer [A-Za-z0-9_-]{32,200}$/.test(authorization)) return reject(res, 401, 'UNAUTHORIZED');
-    const user = betaServer.betaStore.lookupMcpToken(authorization.slice(7));
+    const user = await betaServer.betaStore.lookupMcpToken(authorization.slice(7));
     if (!user) return reject(res, 401, 'UNAUTHORIZED');
     if (!['POST', 'GET', 'DELETE'].includes(req.method)) return reject(res, 405, 'METHOD_NOT_ALLOWED');
-    const timestamp = now();
-    for (const [id, entry] of windows) if (timestamp - entry.start >= 60_000) windows.delete(id);
-    const window = windows.get(user.id) ?? { start: timestamp, count: 0 };
-    if (++window.count > rateLimitPerMinute) return reject(res, 429, 'RATE_LIMITED');
-    windows.set(user.id, window);
+    if (typeof betaServer.betaStore.takeRateLimit === 'function') {
+      const rate = await betaServer.betaStore.takeRateLimit({ key: `mcp:${user.id}`, limit: rateLimitPerMinute, windowMs: 60_000 });
+      if (!rate.allowed) return reject(res, 429, 'RATE_LIMITED');
+    } else {
+      const timestamp = now();
+      for (const [id, entry] of windows) if (timestamp - entry.start >= 60_000) windows.delete(id);
+      const window = windows.get(user.id) ?? { start: timestamp, count: 0 };
+      if (++window.count > rateLimitPerMinute) return reject(res, 429, 'RATE_LIMITED');
+      windows.set(user.id, window);
+    }
     const server = createAccountMcpServer({ accountId: user.id, invoke: (operation) => betaServer.invokeForAccount(operation) });
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     try {
