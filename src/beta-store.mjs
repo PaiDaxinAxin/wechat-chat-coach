@@ -234,7 +234,7 @@ export function createBetaStore({
     const consumed = consumedSource(row.user_id, row.counterpart_id, row.id, text, matchingCopy);
     const eligible = !superseded && !consumed;
     return { eligible, superseded, manualSuperseded, copy: eligible ? activeCopy : null, consumed,
-      metadata: { pendingEligible: eligible, pendingCopyReceiptId: eligible ? activeCopy?.id ?? null : null, pendingReplyText: eligible ? activeCopy?.copied_text ?? null : null } };
+      metadata: { pendingEligible: eligible, pendingCopyReceiptId: eligible ? activeCopy?.id ?? null : null, pendingCopiedAt: eligible ? activeCopy?.copied_at ?? null : null, pendingReplyText: eligible ? activeCopy?.copied_text ?? null : null } };
   };
   const suggestionValue = (row) => {
     const source = suggestionSource(row);
