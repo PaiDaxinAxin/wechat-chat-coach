@@ -128,7 +128,7 @@ try {
   await page.locator('#message-text').fill('合成下一句：刚忙完。');
   const followed = await perform('/followup', () => page.locator('#save-message').click());
   assert.equal(followed.previousMessage, null); assert.equal(followed.feedback, null, 'No-reply suggestions cannot become inferred sent messages');
-  await page.getByText('合成下一句：刚忙完。', { exact: true }).waitFor({ state: 'visible' });
+  await page.locator('#transcript').getByText('合成下一句：刚忙完。', { exact: true }).waitFor({ state: 'visible' });
   await ready();
   const after = await detail();
   assert.equal(after.messages.length, before.messages.length + 1);
@@ -187,7 +187,7 @@ try {
   await page.locator('#message-text').fill('合成下一句：暂停后新的内容。');
   const pauseFollowup = await perform('/followup', () => page.locator('#save-message').click());
   assert.equal(pauseFollowup.previousMessage, null); assert.equal(pauseFollowup.feedback, null);
-  await page.getByText('合成下一句：暂停后新的内容。', { exact: true }).waitFor({ state: 'visible' });
+  await page.locator('#transcript').getByText('合成下一句：暂停后新的内容。', { exact: true }).waitFor({ state: 'visible' });
   const afterPause = await detail();
   assert.equal(afterPause.messages.length, beforePause.messages.length + 1);
   await page.setViewportSize({ width: 390, height: 844 });
