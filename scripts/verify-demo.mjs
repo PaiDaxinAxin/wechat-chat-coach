@@ -102,13 +102,17 @@ try {
   const originalDetail = (await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data;
   const fixtureOther = originalDetail.messages.find((message) => message.speaker === 'other').id;
   const fixtureLast = originalDetail.messages.at(-1).id;
-  let coachScenario = null, glossaryEvidence = null;
+  let coachScenario = null, replyScenario = null, glossaryEvidence = null;
   await page.route(`**/api/counterparts/${id}`, async (route) => {
-    if (route.request().method() !== 'GET' || !coachScenario) return route.continue();
+    if (route.request().method() !== 'GET' || (!coachScenario && !replyScenario)) return route.continue();
     const received = await route.fetch(); const body = await received.json();
-    body.data.classification = coachScenario;
+    body.data.classification = replyScenario ? null : coachScenario;
     if (glossaryEvidence) body.data.messages.at(-1).text = glossaryEvidence;
-    body.data.heat = computeHeat(coachScenario);
+    body.data.heat = computeHeat(body.data.classification);
+    if (replyScenario) {
+      body.data.suggestions = [replyScenario]; body.data.currentSuggestionIds = [replyScenario.id]; body.data.directReply = replyScenario;
+      body.data.modelContext = { classificationAttempted: true, directReplyAttempted: true };
+    }
     await route.fulfill({ response: received, json: body });
   });
   function scenario(level, evidenceIds, obstacle = 'none') {
@@ -142,7 +146,21 @@ try {
   assert.equal(await page.locator('#field-coach-pitfall').textContent(), '别跳过她的真实意愿。');
   coachScenario = scenario('unknown', []);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '线索较少');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步观察');
+  for (const action of ['wait', 'pause']) {
+    replyScenario = { id: randomUUID(), reply: '', action, reason: '合成已保存建议，不需要额外模型调用。', styleNote: '保留明确的留白或停止指引。',
+      workingFocus: { stage: 'unknown', reason: '没有额外阶段判断。', evidenceIds: [] },
+      guidance: { topicMove: null, relationMove: action, ownWordsGuide: '先自然留白，等她主动开启新内容。', reentryWhen: '她主动开启新内容时再自然接话。' } };
+    await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#field-coach-focus').textContent(), action === 'pause' ? '本轮重点：停止这类推进' : '本轮重点：自然留白', 'A saved non-reply action cannot fall back to generic information gathering');
+    assert.equal(await page.locator('#field-coach-initiative').textContent(), action === 'pause' ? '停止这类推进，尊重她的边界。' : replyScenario.guidance.ownWordsGuide);
+    assert.equal(await page.locator('#field-coach-temperature').textContent(), action === 'pause' ? '先停推进' : '初步观察');
+    assert.equal(await page.locator('#heat-status').textContent(), action === 'pause' ? '建议暂停' : '先留白', 'Inline status and field coach follow the same saved action');
+    assert.doesNotMatch(await page.locator('#field-coach-state').textContent(), /通用初步方向/u, 'An existing model instruction is not described as generic preliminary guidance');
+    assert.equal(classifications, 1); assert.equal(replies, 0);
+  }
+  replyScenario = null;
   // Footnotes read the displayed coach prose, never the transcript or plan draft.
   coachScenario = { ...scenario('positive', [fixtureOther, fixtureLast]), options: [], topicDecision: { mode: 'stay', reason: '继续当前话题。' },
     fieldCoach: { currentTopic: '上堆到工作类别', topicStatus: 'developing', topicMessageIds: [fixtureLast], warmingLayer: 'none',
@@ -297,10 +315,22 @@ try {
   assert.equal(classifications, beforeFailedClassification + 2, 'A transient provider failure has one bounded fresh attempt before showing retry');
   assert.equal(classificationFailuresRemaining, 0);
   assert.doesNotMatch(await page.locator('#coach-error').textContent(), /Synthetic|PROVIDER_TIMEOUT|不会自动重试/);
+  await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'A failed analysis keeps a usable preliminary direction without inventing a temperature');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息');
+  assert.match(await page.locator('#field-coach-initiative').textContent(), /初步方向.*尝试获得更多信息/u);
+  assert.match(await page.locator('#field-coach-heat-basis').textContent(), /通用初步方向/u);
+  assert.equal(await page.locator('#field-coach-update-badge').isVisible(), false, 'Failed analysis cannot claim that model instructions have updated');
+  const failedDetail = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
+  assert.equal(failedDetail.classification, null);
+  assert.equal(failedDetail.heat.score, null);
+  assert.equal(failedDetail.heat.preliminaryRange, null);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForTimeout(150);
   assert.equal(classifications, beforeFailedClassification + 2, 'Exhausted recovery for the current context does not restart after reload');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息', 'Reload retains the general direction without silently rerunning a failed model');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, beforeFailedClassification + 3, 'Explicit reanalysis is allowed');
   const recoveredClassificationCalls = classifications;
@@ -469,7 +499,7 @@ try {
   await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(classifications, recoveredClassificationCalls, 'Changing metadata does not silently call the model');
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '准备分析', 'Correcting time invalidates the previous displayed temperature');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'Correcting time invalidates the previous displayed temperature');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, recoveredClassificationCalls + 1);
   await page.locator('#cancel-message-edit').click();
@@ -967,6 +997,8 @@ try {
   assert.equal(await page.locator('#direct-reply').isDisabled(), true);
   assert.equal(await page.locator('#classify').isDisabled(), true);
   assert.equal(await page.locator('#field-coach-plan-submit').isDisabled(), true);
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '先录入一句');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：先录入一句');
   assert.ok((await page.locator('#classification-summary').textContent()).includes('先在下方粘贴对方的一条消息'));
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
   assert.deepEqual({ classifications, replies, plans }, beforeEmptyIntake, 'An empty conversation neither generates nor manufactures a failed attempt');

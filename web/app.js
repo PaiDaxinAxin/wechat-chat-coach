@@ -18,7 +18,8 @@ const relationMoveNames = { continue: '普通交流', deepen: '深入聊', push_
 const focusNames = { value_display: '价值展示', emotion: '情绪拉升', security: '安全需求', unknown: '待判断' };
 const dimensionNames = { activeInteraction: '主动互动', responseEngagement: '回复参与', personalInterest: '对我的兴趣', reciprocalFlirting: '双向暧昧', actionFollowThrough: '行动兑现' };
 const levelNames = { unknown: '未知', negative: '有负向信号', passive: '被动回应', positive: '积极参与', repeated_positive: '持续积极' };
-const heatNames = { pause: '建议暂停', insufficient_evidence: '信息不足', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
+const heatNames = { pause: '建议暂停', insufficient_evidence: '初步观察', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
+const initialInformationDirection = '初步方向：接住这句，围绕她愿意聊的细节尝试获得更多信息。';
 const confidenceNames = { limited: '证据有限', moderate: '证据中等', strong: '证据较充分' };
 const channelNames = { app: '交友软件认识', offline: '线下认识', other: '其他渠道' };
 const topicStatusNames = { developing: '话题正在展开', repetitive: '话题有重复迹象', closing: '可以自然收尾', unknown: '话题阶段待判断' };
@@ -719,9 +720,23 @@ async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
   if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze });
 }
+function renderHeatStatus(heat) {
+  const hasMessage = state.detail?.messages?.some(({ speaker }) => speaker === 'other');
+  const suggestion = currentSuggestion();
+  const analyzed = Boolean(state.detail?.classification || suggestion);
+  const paused = heat?.status === 'pause' || suggestion?.action === 'pause' || suggestion?.guidance?.relationMove === 'pause';
+  const quiet = suggestion && (isNoReplySuggestion(suggestion) || ['wait', 'close_topic', 'give_space'].includes(suggestion.guidance?.relationMove));
+  $('heat-status').textContent = paused ? '建议暂停' : quiet ? '先留白'
+    : heat?.status === 'insufficient_evidence' && heat.preliminaryRange ? heat.preliminaryRange.label
+    : heat?.status && heat.status !== 'insufficient_evidence' ? heatNames[heat.status] || '初步观察'
+      : !hasMessage ? '先录入一句' : analyzed ? '初步观察' : '初步方向';
+  $('heat-explanation').textContent = paused ? '停止这类推进，尊重对方边界。' : quiet ? '按当前建议留白，达到接话条件时再继续。'
+    : !analyzed && !Number.isFinite(heat?.score) && !heat?.preliminaryRange
+    ? hasMessage ? `${initialInformationDirection}这是通用指引，分析完成后会结合实际回应调整。` : '先录入对方的一句原话；少量内容也能开始，之后随新回应调整。'
+    : heat?.explanation || '先自然交流，结合认识背景和真实回应调整初步方向。';
+}
 function renderHeat(heat) {
-  $('heat-status').textContent = heat?.status === 'insufficient_evidence' && heat.preliminaryRange ? heat.preliminaryRange.label : heatNames[heat?.status] || '信息不足';
-  $('heat-explanation').textContent = heat?.explanation || '补充认识背景和真实对话后再判断。未观察到，不等于负向。';
+  renderHeatStatus(heat);
   const dimensions = heat?.dimensions || state.detail?.classification?.heat || {};
   const known = Object.values(dimensions).filter((item) => item?.level && item.level !== 'unknown').length;
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
@@ -932,8 +947,8 @@ function renderClassification(classification) {
   const available = classification?.topicDecision?.mode === 'change' && options.size === 3;
   const missing = coachPrerequisite();
   $('classification-summary').textContent = missing || (busy?.type === 'classify' ? '正在结合完整对话看当前局面…'
-    : changing ? classification?.topicDecision?.reason || '选择一个方向，换个话题。'
-      : classification?.topicDecision?.reason || '结合当前阶段与上下文给建议，也可以主动换个话题。');
+    : changing ? classification?.topicDecision?.reason || '选择一个她愿意聊的方向，尝试获得更多信息。'
+      : classification?.topicDecision?.reason || (classification || currentSuggestion() ? '按当前建议自然交流，随新回应调整。' : initialInformationDirection));
   $('direction-options').hidden = !changing || Boolean(missing);
   $('change-topic').setAttribute('aria-expanded', String(changing && !missing));
   $('direction-options').replaceChildren(...(changing ? ['up', 'down', 'sideways'] : []).map((direction) => {
@@ -1080,37 +1095,44 @@ function renderFieldCoach(classification) {
   renderCoachUpdate();
   const coach = classification?.fieldCoach;
   const heat = state.detail?.heat;
-  const paused = heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
+  renderHeatStatus(heat);
+  const suggestion = currentSuggestion();
+  const guidance = suggestion?.guidance;
+  const paused = suggestion?.action === 'pause' || guidance?.relationMove === 'pause' || heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
+  const quiet = Boolean(suggestion && (isNoReplySuggestion(suggestion) || ['wait', 'close_topic', 'give_space'].includes(guidance?.relationMove)));
   const range = heat?.preliminaryRange;
   const scored = Number.isFinite(heat?.score);
   const analyzing = state.modelCalls.has(currentContextKey());
   const hasMessage = state.detail?.messages?.some(({ speaker }) => speaker === 'other');
+  const analyzed = Boolean(classification || suggestion);
   // Only the server can derive a range from observed evidence. Loading is not a
   // heat judgment; a single new message never erases a prior observed baseline.
   $('field-coach-temperature').textContent = paused ? '先停推进' : scored ? `约${Math.round(heat.score / 5) * 5}°`
-    : range ? `${range.lower}–${range.upper}°` : analyzing ? '初步分析中' : classification ? '线索较少' : hasMessage ? '准备分析' : '先聊一句';
+    : range ? `${range.lower}–${range.upper}°` : analyzing ? '初步分析中' : !hasMessage ? '先录入一句' : analyzed ? '初步观察' : '初步方向';
   $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；首句范围会随背景与对话调整。';
-  $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : scored ? heatNames[heat.status] || '结合当前互动判断'
-    : range ? range.label : analyzing ? '正在结合背景和对话' : classification ? '先自然交流，随新回应调整' : hasMessage ? '点「给我建议」结合背景分析' : '从第一条消息开始';
+  $('field-coach-heat-status').textContent = paused ? '尊重边界，停止这类推进' : scored ? heatNames[heat.status] || '结合当前互动判断'
+    : range ? range.label : analyzing ? '正在结合背景和这句话' : !hasMessage ? '先录入对方的一句原话' : analyzed ? '先自然交流，随新回应调整' : '先接住这句，尝试获得更多信息';
   const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
   $('field-coach-heat-basis').textContent = scored ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度`
-    : range ? '初步范围，会随完整背景与后续互动调整。' : '消息内容、认识背景和回应方式一起考量。';
+    : range ? '初步范围，会随完整背景与后续互动调整。' : !hasMessage ? '一条对方原话就能开始，背景可以边聊边补。'
+      : analyzed ? '初步观察，会随认识背景和后续回应调整。' : '通用初步方向，分析完成后会结合真实回应调整。';
   const focus = workingFocus();
-  $('field-coach-focus').textContent = `本轮重点：${focus?.stage && focus.stage !== 'unknown' ? focusNames[focus.stage] : '先建立交流'}`;
+  $('field-coach-focus').textContent = `本轮重点：${paused ? '停止这类推进' : focus?.stage && focus.stage !== 'unknown' ? focusNames[focus.stage] : quiet ? '自然留白' : suggestion ? '按当前建议继续' : hasMessage ? '尝试获得更多信息' : '先录入一句'}`;
   $('field-coach-focus').title = focus?.reason || '';
   const low = heat?.status === 'too_low' || (scored ? heat.score < 40 : range?.upper <= 45);
   const high = scored && heat.score >= 65;
-  const defaultDirection = high ? '接住她主动展开的内容，分享一点自己的经历。' : '从她的资料或刚提到的内容，开一个轻松话题。';
+  const defaultDirection = high ? '接住她主动展开的内容，分享一点自己的经历。' : initialInformationDirection;
   const defaultPitfall = low ? '通用提醒：别连环追问、催回复，也别急着自证或升级。'
     : high ? '通用提醒：别连续加码、反复试探，也别忽略她的边界。'
       : '通用提醒：别连续追问、堆叠升温；先接住这句话。';
   const obstacle = classification?.obstacle?.type;
-  const guidance = currentSuggestion()?.guidance;
   let action = guidance?.ownWordsGuide || coach?.initiative || defaultDirection;
   let pitfall = coach?.pitfall || defaultPitfall;
   if (paused) {
     action = '停止这类推进，尊重她的边界。';
     pitfall = '别继续这类升级，也别劝她接受。';
+  } else if (quiet) {
+    action = guidance?.ownWordsGuide || '自然留白，按当前建议的接话条件再继续。';
   } else if (heat?.status === 'too_low') {
     action = '先收住投入，等真实互动变化。';
     pitfall = coach?.pitfall || '通用提醒：别连发催促，别用更强暗示硬推进。';
@@ -1118,7 +1140,8 @@ function renderFieldCoach(classification) {
     action = '先弄清她的意思，轻松接住疑虑。';
     pitfall = '别把疑虑当调侃，也别继续加码。';
   } else if (!hasMessage) {
-    action = '先从认识时的场景，开一个轻松话题。';
+    action = '先录入对方的一句原话；认识背景可以边聊边补。';
+    pitfall = '通用提醒：保留原话，猜测和补充背景分开记录。';
   }
   // Keep historical advice intact, including later conditions and negations.
   // CSS bounds the preview; the full advice remains readable in the disclosure.
@@ -1128,13 +1151,17 @@ function renderFieldCoach(classification) {
   const highest = options.length ? Math.max(...options.map(({ weight }) => weight)) : null;
   const recommended = options.filter(({ weight }) => weight === highest);
   $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
+    : !hasMessage ? '录入后点「给我建议」，少量内容也可以开始。'
     : guidance?.reentryWhen ? guidance.reentryWhen
-      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '接住她提到的一点，简短回应，再留一个好接的话口。'
+      : quiet ? '先自然留白，达到当前建议的接话条件再继续。'
+      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '分享一点相关内容，再留一个好接的小问题；别连环追问。'
     : !recommended.length ? '可以主动选择一个换题方向。'
       : `${recommended.length > 1 ? '并列可选' : '推荐'}${recommended.map(({ topicMove }) => directionNames[topicMove]?.split(' · ')[0] || '待判断').join(' / ')} · ${obstacle === 'ambiguous' ? '先澄清她的意思，暂不升级。' : recommended[0].reason}`;
 
   $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '从最近一句开始'}`;
-  $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}` : '记录对方的新话后，结合完整对话判断。';
+  $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}`
+    : paused ? '当前建议停止这类推进，尊重对方边界。' : quiet ? '按当前建议留白，达到接话条件时再继续。'
+      : suggestion ? '按当前回复建议继续，结合真实回应调整。' : hasMessage ? '当前显示通用初步方向，完整背景与后续回应会帮助调整。' : '先录入一句，就能开始结合认识背景给建议。';
   $('field-coach-full-guidance').replaceChildren(...(coach ? [['后续对话的方向', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
   for (const option of options) $('field-coach-full-guidance').append(el('p', {}, `${directionNames[option.topicMove]?.split(' · ')[0] || '方向'}：${option.reason}`));
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));

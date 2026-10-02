@@ -55,11 +55,11 @@
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <div id="chat-thread" class="chat-thread" role="region" tabindex="-1" aria-label="对话与辅助建议">
         <section id="counterpart-loading" class="conversation-status" role="status" hidden><p id="counterpart-loading-message"></p><button id="retry-counterpart" class="quiet-button" type="button" hidden>重新加载对话</button></section>
-        <div id="empty-state" class="empty-state"><h2>从一位对象开始</h2><p>填写相识背景，再粘贴对方的原话。</p><button id="empty-add" class="primary" type="button">添加聊天对象</button></div>
+        <div id="empty-state" class="empty-state"><h2>从一位对象开始</h2><p>填个名字，记录对方的一句原话；背景可以边聊边补。</p><button id="empty-add" class="primary" type="button">添加聊天对象</button></div>
         <div id="counterpart-workspace" hidden>
           <div id="transcript" class="transcript" role="group" aria-label="双方真实对话"></div>
           <section id="coach-panel" class="coach-card" aria-labelledby="coach-title">
-            <div class="coach-heading"><span class="coach-mark">AI 辅助</span><span id="heat-status" class="small muted">信息不足</span><span id="message-count" class="small muted"></span></div>
+            <div class="coach-heading"><span class="coach-mark">AI 辅助</span><span id="heat-status" class="small muted">先录入一句</span><span id="message-count" class="small muted"></span></div>
             <h2 id="coach-title">本轮建议</h2>
             <div id="classification-summary" class="helper" role="status"></div>
             <p id="timing-note" class="helper" hidden></p>
@@ -148,12 +148,12 @@
     <div id="field-coach-backdrop" class="field-coach-backdrop" hidden aria-hidden="true"></div>
     <div id="field-coach" class="field-coach" role="complementary" aria-labelledby="field-coach-title">
       <div class="section-heading"><h2 id="field-coach-title" tabindex="-1">场外教练</h2><span id="field-coach-update-badge" class="coach-update-badge" hidden></span><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
-      <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">先聊一句</strong></div><p id="field-coach-heat-status" role="status">从第一条消息开始</p><p id="field-coach-heat-basis" class="helper">记录对方的新消息后再判断。</p></section>
-      <p id="field-coach-focus" class="coach-focus">本轮重点：先建立交流</p>
+      <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">先录入一句</strong></div><p id="field-coach-heat-status" role="status">先录入对方的一句原话</p><p id="field-coach-heat-basis" class="helper">一条对方原话就能开始，背景可以边聊边补。</p></section>
+      <p id="field-coach-focus" class="coach-focus">本轮重点：先录入一句</p>
       <ol class="coach-actions" aria-label="本轮行动指引">
-        <li><span class="coach-action-label">后续对话的方向</span><p id="field-coach-initiative">先记录对方的新消息。</p></li>
-        <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">通用提醒：别连续追问、堆叠升温；先接住这句话。</p></li>
-        <li><span class="coach-action-label">接话方式</span><p id="field-coach-next">结合当前话题给建议。</p></li>
+        <li><span class="coach-action-label">后续对话的方向</span><p id="field-coach-initiative">先录入对方的一句原话；认识背景可以边聊边补。</p></li>
+        <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">通用提醒：保留原话，猜测和补充背景分开记录。</p></li>
+        <li><span class="coach-action-label">接话方式</span><p id="field-coach-next">录入后点「给我建议」，少量内容也可以开始。</p></li>
       </ol>
       <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
       <div id="coach-glossary-terms" class="coach-footnotes" role="note" aria-label="本段用语注释" hidden></div>

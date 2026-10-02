@@ -301,7 +301,7 @@ export function computeHeat(classification, { history = [], observedAt, context 
   if (current.obstacle.type === 'negative') {
     status = 'pause'; explanation = '已观察到明确负面阻力，先停止相关推进；综合分数不能覆盖拒绝。';
   } else if (!sufficientEvidence) {
-    status = 'insufficient_evidence'; explanation = '证据不足，先补充背景与互动；未知维度保留未知，不按零分处理。';
+    status = 'insufficient_evidence'; explanation = '先依据现有线索做初步判断；还不清楚的部分，在自然交流中获得更多信息后再调整。';
   } else if (current.confidence !== 'limited' && coverage >= 0.6 && evidenceIds.length >= 3 && score >= 65 && positive('personalInterest') && (positive('reciprocalFlirting') || positive('actionFollowThrough')) && (positive('activeInteraction') || positive('responseEngagement')) && current.obstacle.type !== 'ambiguous') {
     status = 'high_invite'; explanation = '多个维度出现积极且有覆盖的证据，可以考虑一个可拒绝的具体邀约；仍需双方确认。';
   } else if (current.confidence !== 'limited' && coverage >= 0.6 && evidenceIds.length >= 3 && positiveCount === 0 && (negativeCount >= 2 || (knownNames.length >= 4 && evidenceIds.length >= 4))) {

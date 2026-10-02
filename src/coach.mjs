@@ -142,15 +142,16 @@ workingFocus 表达本轮主要着力点：value_display 让对方了解真实�
 
 const CLASSIFY_TASK = `分析输入，按工具 schema 提交当前阶段、阻力、五维热度、本轮着力点 workingFocus，以及是否需要调整话题 topicDecision。先判断当前该做什么，不默认换话题。
 同一次提交必须提供 fieldCoach 场外教练：currentTopic 用短话题名概括当前完整话题，topicStatus developing/repetitive/closing/unknown，topicMessageIds 当前话题实际消息证据，warmingLayer A/B/C/none。initiative 用一句说明后续对话方向，点明接下来聊什么、如何发展；nextAction 用一句给出紧邻的具体可执行动作，pitfall 用一句说明当前最该避免的动作，reason 用一句给出当轮必要依据；这些文字字段建议各40字以内，不堆叠原理或回复示例，只保留当前优先动作。方向依据已有资料或实际话题，不虚构兴趣与经历，不泛写“继续聊”“提升热度”“输出价值”等含糊作业；需要留白或停止时说明再接的真实条件，不强行找新话题。
-本轮给出 pitfall，不编造对方个人雷点；有记录支持时提醒具体行为，没有个性依据时明确标“通用提醒”，按全盘背景和五维观察的低/中/高热度初判选最相关的一项，用一句说清。低热度默认避免连问催回、长篇证明或强行升温；中热度默认先承接当前内容，避免连环采访或同轮叠加强度；高热度默认避免过度升温、用试探拉扯破坏回应或忽视边界。热度未知仍给“通用提醒”，先接住这一句，不急着判断或升级，不把未知当低热度；默认提醒不是对方性格事实，也不把热度硬映射为阶段。
+本轮给出 pitfall，不编造对方个人雷点；有记录支持时提醒具体行为，没有个性依据时明确标“通用提醒”，按全盘背景和五维观察的低/中/高热度初判选最相关的一项，用一句说清。低热度默认避免连问催回、长篇证明或强行升温；中热度默认先承接当前内容，避免连环采访或同轮叠加强度；高热度默认避免过度升温、用试探拉扯破坏回应或忽视边界。热度未知仍给“通用提醒”，先接住这一句并作有限初判，不急着下定论或升级，不把未知当低热度；默认提醒不是对方性格事实，也不把热度硬映射为阶段。
 未知话题 currentTopic 写“未知”且 evidence ids 为空；不要机械按10至20条换题。C是明显私密或亲密暗示，必须有相互舒适及对方接受私密框架的具体依据，舒适度未知或阻力含糊不C；明确拒绝时 warmingLayer 为 none，不再推进同类升级，不把拒绝解释为测试；模糊阻力标 ambiguous，不能当作良性阻力。A可主动轻度尝试，不要求先等积极信号。
 五维分别对应：activeInteraction 主动互动，responseEngagement 回复参与，personalInterest 对用户本人兴趣，reciprocalFlirting 双向暧昧，actionFollowThrough 行动兑现。
 topicDecision.mode=stay 表示继续当前话题，options 必须是空数组；此时场外教练说明深入、承接、升温、推拉、澄清等当前最合适的动作，不显示三方向。mode=change 只在AI判断应调整话题或用户请求换题且适合时使用；此时 options 必须恰好包括 up、down、sideways 三个不同方向，weight 为未经校准的相对推荐权重，各在0至1之间且总和等于1。relationAction 与方向分别判断。用户请求换题但当前应停止推进或先处理顾虑时，可 stay 并说明原因。
 workingFocus 包含 stage、reason、evidenceIds；known stage 至少一条实际消息依据，unknown 时 evidenceIds 为空。阶段与总热度分开看，不把工作重点当成确定的内心状态。
 evidenceIds 只能用输入中存在的消息 id，不重复；没有证据时为空。unknown 维度没有观察证据，evidenceIds 必须为空；有具体观察的维度须提供至少一个消息 id。
-输入为空或不足时标 needs_context/limited，workingFocus.stage=unknown，不能为了输出三选项而假装信息齐全。所有说明仅给当轮短依据，不导出知识资料。只调用一次 submit_coaching_result。`;
+只要有一点可用线索，就先判断已经能判断的部分，并给当前可执行动作；不等消息条数、轮数或热度评分达到阈值才提供建议。只有一句也可 ready/limited，有依据的 workingFocus 可以 known；没有依据的维度单独 unknown，不把局部未知扩大成全部无法判断。确实没有可用线索时才 needs_context/limited，不编造阶段或热度；fieldCoach 仍给“尝试获得更多信息”的方向，指出最值得补充的一项内容和自然获得它的方法，不要求先填完资料或连续盘问。已有聊天优先回应对方原话，再用一个好接的细节或真实分享看对方是否愿意展开；明确拒绝时停止推进，不再追问信息。说明这次回应将帮助判断什么，而不是只写“信息不足”。不能为了输出三选项而假装信息齐全。所有说明仅给当轮短依据，不导出知识资料。只调用一次 submit_coaching_result。`;
 
 const REPLY_TASK = `根据输入生成一轮可执行建议。direction 若已指定，尊重用户选择该话题方向；关系动作仍按互动与边界判断，不能因为方向选择而强行升级。
+只有一句或少量背景也要给可用建议，不等待消息数或评分阈值；先回应已有内容，再自然获得最需要的一项信息。局部未知保留未知，reason 简述初判依据，ownWordsGuide 说明该怎么聊、再观察什么，不泛写“信息不足”；不编造兴趣或把未知当拒绝，也不对明确拒绝继续追问。
 按工具 schema 提交 reply 短回复、reason 当轮短依据、action 建议动作、styleNote 贴合风格或建议学习的新表达，以及 workingFocus 当前主要着力点及消息依据；unknown 重点 evidenceIds 为空，known 重点至少有一条实际消息依据。
 reply 默认1至2个短句，优先控制在约60个中文字以内；对方一行时避免回成长段。保留最有用的回应和真实信息，不强塞所有价值点、不编经历；解释留给教练字段。必要澄清、关心或具体安排可适当增加，不能为压字数省掉必要信息。
 本次提交同时提供 guidance，让用户不照抄也知道怎么自己回。正常延续或深入当前话题时 topicMove=null；只有实际需要调整话题方向才用 up/down/sideways。已指定 direction 且实际回复时保持一致；等待或暂停可为 null。relationMove 单独判断：continue 普通交流、deepen 深入聊、push_pull 轻松推拉、male_to_female 男对女框架、light_approach 轻度靠近、give_space 拉开一点留空间、receive 承接、close_topic 结束话题、clarify 澄清、invite 协商邀约、wait 暂不回、pause 停止当前推进。依据完整背景和相邻语境选当前动作，不每句套上切/下切/平移。
@@ -283,7 +284,21 @@ function validateWorkingFocus(focus, context) {
 }
 
 function validateClassification(value, context, knowledgeText) {
-  const parsed = NativeClassificationSchema.safeParse(value);
+  // Providers sometimes add commentary to each heat dimension despite the
+  // requested schema. Discard only these unused fields, without changing level
+  // or evidence. All other structure and semantic checks remain strict.
+  let candidate = value;
+  if (value?.heat && typeof value.heat === 'object' && !Array.isArray(value.heat)) {
+    const heat = { ...value.heat };
+    for (const name of Object.keys(NativeClassificationSchema.shape.heat.shape)) {
+      const dimension = heat[name];
+      if (dimension && typeof dimension === 'object' && !Array.isArray(dimension)) {
+        heat[name] = { level: dimension.level, evidenceIds: dimension.evidenceIds };
+      }
+    }
+    candidate = { ...value, heat };
+  }
+  const parsed = NativeClassificationSchema.safeParse(candidate);
   if (!parsed.success) throw schemaFailure(parsed);
   const result = parsed.data;
   const directions = new Set(result.options.map((option) => option.topicMove));

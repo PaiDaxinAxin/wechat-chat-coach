@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ChatInputSchema, ReplyInputSchema, classifyChat, generateReply, CoachError } from '../src/coach.mjs';
+import { computeHeat } from '../src/domain.mjs';
 
 const env = { AGNES_API_KEY: 'mock-key' };
 const workingFocus = { stage: 'unknown', reason: '背景有限，主要着力点仍需观察。', evidenceIds: [] };
@@ -92,6 +93,56 @@ test('input schemas reject duplicate message IDs before an API call', async () =
   assert.equal(ChatInputSchema.safeParse(duplicate).success, false);
   assert.equal(ReplyInputSchema.safeParse({ context: input, direction: 'invented' }).success, false);
   await assert.rejects(classifyChat(duplicate, { knowledgeText, env, fetchImpl: () => { throw new Error('must not call'); } }), { code: 'invalid_input' });
+});
+
+test('one sparse message yields a provisional judgment and a concrete information-gathering action', async () => {
+  const value = validClassification();
+  value.topicDecision = { mode: 'stay', reason: '先接住唯一的一句，不强行换题。' };
+  value.options = [];
+  value.workingFocus = { stage: 'value_display', reason: '先让对方了解真实的日常。', evidenceIds: ['m1'] };
+  value.heat.personalInterest = { level: 'unknown', evidenceIds: [] };
+  value.fieldCoach = { currentTopic: '工作日常', topicStatus: 'developing', topicMessageIds: ['m1'], warmingLayer: 'none',
+    initiative: '先回应工作近况，获得一个具体话题。', nextAction: '简短说自己的近况，问她主要忙哪部分。',
+    pitfall: '通用提醒：不要连续盘问。', reason: '她提了工作并问你，可先自然接话。' };
+  let calls = 0;
+  const result = await classifyChat(input, { knowledgeText, env, fetchImpl: async (...args) => {
+    calls++;
+    const task = JSON.parse(args[1].body).messages[2].content;
+    assert.match(task, /不等消息条数、轮数或热度评分达到阈值/);
+    assert.doesNotMatch(task, /输入为空或不足时标 needs_context/);
+    return mockResponse(value)(...args);
+  } });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.confidence, 'limited');
+  assert.equal(result.workingFocus.stage, 'value_display');
+  assert.equal(result.fieldCoach.nextAction, value.fieldCoach.nextAction);
+  const heat = computeHeat(result, { context: input });
+  assert.equal(heat.score, null, 'A useful first-step judgment does not invent a precise score');
+  assert.deepEqual([heat.preliminaryRange.lower, heat.preliminaryRange.upper], [35, 75]);
+  assert.equal(calls, 1);
+});
+
+test('extra heat-dimension commentary is discarded without weakening the evidence contract or retrying', async () => {
+  const value = validClassification();
+  for (const dimension of Object.values(value.heat)) dimension.explanation = 'Unused provider commentary';
+  let calls = 0;
+  const result = await classifyChat(input, { knowledgeText, env, fetchImpl: async (...args) => { calls++; return mockResponse(value)(...args); } });
+  for (const dimension of Object.values(result.heat)) assert.deepEqual(Object.keys(dimension), ['level', 'evidenceIds']);
+  assert.equal(value.heat.activeInteraction.explanation, 'Unused provider commentary', 'Do not mutate the input');
+  assert.equal(calls, 1);
+  for (const [mutate, code] of [
+    [(v) => { v.heat.responseEngagement.evidenceIds = ['invented-id']; }, 'invalid_evidence_reference'],
+    [(v) => { v.heat.responseEngagement.level = 'unbounded'; }, 'invalid_value'],
+    [(v) => { v.heat.responseEngagement.level = 'unknown'; }, 'unknown_heat_with_evidence'],
+    [(v) => { v.heat.responseEngagement.evidenceIds = ['m1', 'm1']; }, 'duplicate_evidence'],
+    [(v) => { v.heat.extraDimension = { level: 'positive', evidenceIds: ['m1'] }; }, 'unrecognized_keys'],
+    [(v) => { v.extraSummary = 'outside the allowed compatibility scope'; }, 'unrecognized_keys'],
+  ]) {
+    const invalid = structuredClone(value); mutate(invalid); let attempts = 0;
+    await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: async (...args) => { attempts++; return mockResponse(invalid)(...args); } }),
+      (error) => error.code === 'invalid_model_output' && error.diagnostics.some((item) => item.code === code));
+    assert.equal(attempts, 1);
+  }
 });
 
 test('a developing conversation can keep its topic without invented direction choices or weights', async () => {

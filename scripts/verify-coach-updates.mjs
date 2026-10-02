@@ -99,23 +99,34 @@ try {
   const first = await journey('single-message-initial-range', { gate: async () => { firstEntered.resolve(); await firstRelease.promise; } });
   await firstEntered.promise; await updating(first); await first.openCoach();
   assert.equal(await first.page.locator('#field-coach-temperature').textContent(), '初步分析中');
+  assert.equal(await first.page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息');
+  assert.match(await first.page.locator('#field-coach-initiative').textContent(), /初步方向.*尝试获得更多信息/u, 'One message has a useful general direction before a model result exists');
+  assert.match(await first.page.locator('#field-coach-heat-basis').textContent(), /通用初步方向/u);
+  assert.equal(await first.page.locator('#field-coach-update-badge').textContent(), '更新中', 'General preliminary guidance does not claim model completion');
   assert.equal((await first.detail()).heat.preliminaryRange, null, 'An unanalysed first message does not manufacture an empirical range');
   assert.equal(await first.page.locator('#field-coach-initiative').textContent() === '本轮主导建议待判断。', false);
   assert.equal(await first.page.locator('#field-coach-pitfall').textContent() === '本轮雷点待判断。', false);
   firstRelease.resolve(); await updated(first); await assertRange(first);
+  assert.equal(await first.page.locator('#field-coach-initiative').textContent(), '沿她提到的徒步经历继续了解。', 'A model-provided action replaces the general preliminary direction');
+  assert.equal(await first.page.locator('#field-coach-next').textContent(), '聊她最近走过的路线。');
   assert.match(await first.page.locator('#field-coach .coach-action-label').first().textContent(), /后续对话的方向/);
-  await first.finish({ preliminaryRange: true, sparseRankingExcluded: true });
+  await first.finish({ preliminaryRange: true, sparseRankingExcluded: true, pendingGeneralDirection: true, completedModelAction: true });
 
   const unknown = await journey('analysed-with-insufficient-evidence', { mode: 'unknown' }); await updated(unknown); await unknown.openCoach();
   const unknownHeat = await unknown.detail(); assert.equal(unknownHeat.heat.score, null); assert.equal(unknownHeat.heat.preliminaryRange, null);
-  assert.equal(await unknown.page.locator('#field-coach-temperature').textContent(), '线索较少', 'Completed analysis with no usable heat evidence is not described as never analysed');
+  assert.equal(await unknown.page.locator('#field-coach-temperature').textContent(), '初步观察', 'Completed analysis with no usable heat evidence is not described as never analysed');
   await unknown.finish({ unknownIsNotInventedScore: true });
 
   for (const mode of ['low', 'high', 'refusal']) {
     const f = await journey(`${mode}-default-pitfall`, { mode }); await updated(f); await f.openCoach();
     const pitfall = (await f.page.locator('#field-coach-pitfall').textContent()).trim();
     assert.ok(pitfall.length > 0 && !/待判断/.test(pitfall));
-    if (mode === 'refusal') { assert.match(pitfall, /别继续|拒绝|边界|停止/u); assert.equal(await f.page.locator('#field-coach-temperature').textContent(), '先停推进'); }
+    if (mode === 'refusal') {
+      assert.match(pitfall, /别继续|拒绝|边界|停止/u);
+      assert.equal(await f.page.locator('#field-coach-temperature').textContent(), '先停推进');
+      assert.equal(await f.page.locator('#field-coach-focus').textContent(), '本轮重点：停止这类推进');
+      assert.equal(await f.page.locator('#field-coach-initiative').textContent(), '停止这类推进，尊重她的边界。', 'An explicit refusal overrides both model action and general information gathering');
+    }
     else assert.match(pitfall, /通用/u, 'Fallback advice must identify itself as general guidance');
     await f.finish({ pitfall, refusalDominatesRange: mode === 'refusal' });
   }
