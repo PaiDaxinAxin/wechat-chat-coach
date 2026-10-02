@@ -115,7 +115,8 @@ try {
       await scan('conversation');
       const note = page.locator('.message-annotation').first();
       const beforeNoteRequests = modelRequests;
-      await note.locator('summary').click();
+      await note.locator('..').locator('.message-menu > summary').click();
+      await note.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
       await note.locator('textarea').fill('合成线下背景，属于本人补充，不是原话。');
       await scan('message-annotation');
       await note.getByRole('button', { name: '收起', exact: true }).click();

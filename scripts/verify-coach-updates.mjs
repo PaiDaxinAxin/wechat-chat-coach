@@ -172,7 +172,9 @@ try {
   late.controller.replyGate = async () => { lateEntered.resolve(); await lateRelease.promise; };
   await late.page.locator('#direct-reply').click(); await lateEntered.promise; await updating(late);
   const annotation = late.page.locator(`[data-message-id="${late.messages[0].id}"] .message-annotation`);
-  await annotation.locator('summary').click(); await annotation.locator('textarea').fill('我补充的新判断，属于个人解释。');
+  await annotation.locator('..').locator('.message-menu > summary').click();
+  await annotation.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
+  await annotation.locator('textarea').fill('我补充的新判断，属于个人解释。');
   const annotated = late.page.waitForResponse((response) => response.url().endsWith('/annotation') && response.request().method() === 'PATCH');
   await annotation.locator('button[type=submit]').click(); assert.equal((await annotated).status(), 200);
   await late.page.waitForFunction(() => [...document.querySelectorAll('.message-annotation button[type=submit]')].every((button) => !button.disabled));

@@ -28,6 +28,7 @@ jobs:
       - run: npm run test:coach-updates
       - run: npm run test:context-learning
       - run: npm run test:directory
+      - run: npm run test:affordance
       - run: node scripts/verify-ux-feedback.mjs
       - run: node scripts/verify-ux-recovery.mjs
       - run: node scripts/verify-reply-guidance.mjs
