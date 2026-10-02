@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   meta: null, me: null, csrf: '', authMode: 'login', localDemo: false, counterparts: [], topThree: [],
-  selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null,
+  selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null, copyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
   messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
@@ -42,7 +42,9 @@ function el(tag, attributes = {}, ...children) {
   }
   return node;
 }
+let noticeTimer;
 function announce(message, kind = 'success') {
+  clearTimeout(noticeTimer);
   const notice = $('notice');
   notice.textContent = message;
   notice.className = `notice ${kind}`;
@@ -50,6 +52,7 @@ function announce(message, kind = 'success') {
   $('auth-status').textContent = message;
   $('auth-status').className = kind === 'error' ? 'form-error' : 'helper';
   $('auth-status').hidden = $('auth').hidden || !message;
+  if (message && kind === 'success' && $('auth').hidden) noticeTimer = setTimeout(() => announce(''), 5000);
 }
 async function api(path, { method = 'GET', body } = {}) {
   const requestUserId = state.me?.user.id, requestToken = state.csrf;
@@ -97,6 +100,7 @@ async function perform(button, label, callback, scope) {
     if (button?.isConnected) {
       button.disabled = button.dataset.locked === 'true'; button.textContent = original;
       if (button.id === 'save-message') updateComposer();
+      if (button.id === 'copy-reply') updateReplyCopyState();
       if (button.id === 'retry-counterpart' && button.checkVisibility() && !button.disabled && document.activeElement === document.body
           && (!scope || state.me?.user.id === scope.userId && state.selectedId === scope.counterpartId)) button.focus({ preventScroll: true });
     }
@@ -193,6 +197,14 @@ function closeMenu(menu, { restoreFocus = false } = {}) {
 }
 function scrollToLatest() {
   requestAnimationFrame(() => { $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
+}
+function scrollToSuggestion() {
+  const context = currentContextKey(), visit = state.conversationVisit;
+  requestAnimationFrame(() => {
+    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden) return;
+    const thread = $('chat-thread');
+    thread.scrollTop += $('suggestion-panel').getBoundingClientRect().top - thread.getBoundingClientRect().top - 12;
+  });
 }
 function rememberComposer({ changed = false } = {}) {
   const id = state.selectedId;
@@ -714,7 +726,10 @@ async function loadCounterpart(id, { autoAnalyze = false } = {}) {
   fillMeeting(detail.meeting);
   updateComposer();
   if (retryHadFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
-  if (changed) scrollToLatest();
+  if (changed) {
+    if (currentSuggestion()) scrollToSuggestion();
+    else scrollToLatest();
+  }
   updateCoachBusy();
   renderFieldCoachPlan();
   if (autoAnalyze) maybeAutoCoach();
@@ -933,10 +948,25 @@ function cancelMessageEdit() {
 }
 async function deleteMessage(message) {
   if (!confirm('删除这条对话记录？相关的旧判断将失效。')) return;
-  const id = state.selectedId;
-  await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}`, { method: 'DELETE' });
-  await refreshCounterpart(id);
-  announce('消息已删除，后续辅助将使用更新后的记录。');
+  const id = state.selectedId, userId = state.me?.user.id;
+  try {
+    await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}`, { method: 'DELETE' });
+    if (state.me?.user.id !== userId) return;
+    const draft = state.messageDrafts.get(id);
+    if (draft?.editingId === message.id) {
+      if (draft.beforeEdit) state.messageDrafts.set(id, draft.beforeEdit);
+      else state.messageDrafts.delete(id);
+      if (state.selectedId === id) { restoreComposer(id); updateComposer(); }
+    }
+    // Ignore a detail snapshot captured before deletion, including a return to
+    // this conversation while the delete request was still in flight.
+    if (state.selectedId === id) state.detailRequestSerial++;
+    await refreshCounterpart(id);
+    if (state.me?.user.id === userId && state.selectedId === id) announce('消息已删除，后续辅助将使用更新后的记录。');
+  } catch (error) {
+    if (state.me?.user.id !== userId || state.selectedId !== id) error.displayed = true;
+    throw error;
+  }
 }
 function classificationUnavailable() {
   return state.me?.user.plan !== 'paid' && state.me?.quota?.classificationRemaining === 0;
@@ -1335,7 +1365,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
     if (state.selectedId === id && currentContextKey() === inputContext) {
       updateCoachBusy();
       // The complete editor/guidance appears only after the busy state clears.
-      if (replyAccepted) scrollToLatest();
+      if (replyAccepted) scrollToSuggestion();
       if (classificationAccepted && focusTopicChange && (document.activeElement === button || document.activeElement === document.body)) {
         $('direction-options').querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
         $('direction-options').scrollIntoView({ block: 'nearest' });
@@ -1392,9 +1422,27 @@ function renderSuggestion() {
 function isNoReplySuggestion(suggestion) { return ['wait', 'pause'].includes(suggestion?.action); }
 function updateReplyCopyState() {
   const generating = state.modelCalls.get(currentContextKey())?.type === 'reply';
-  const disabled = generating || state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])) || !isPendingSuggestion(state.suggestion) || !$('suggestion-text').value.trim();
+  const copying = state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId]));
+  const disabled = generating || copying || !isPendingSuggestion(state.suggestion) || !$('suggestion-text').value.trim();
+  const feedback = state.copyFeedback;
+  const copied = feedback && feedback.userId === state.me?.user.id && feedback.counterpartId === state.selectedId
+    && feedback.visit === state.conversationVisit && feedback.suggestionId === state.suggestion?.id && feedback.text === $('suggestion-text').value;
+  $('copy-reply').hidden = generating || !state.suggestion || isNoReplySuggestion(state.suggestion);
+  $('copy-reply').textContent = copied ? '已复制' : copying ? '复制中…' : '复制回复';
   $('copy-reply').disabled = disabled;
   $('copy-reply').dataset.locked = String(disabled);
+}
+function showCopyFeedback(feedback) {
+  if (feedback.userId !== state.me?.user.id || feedback.counterpartId !== state.selectedId
+      || feedback.visit !== state.conversationVisit || feedback.suggestionId !== state.suggestion?.id
+      || feedback.text !== $('suggestion-text').value) return;
+  state.copyFeedback = feedback;
+  updateReplyCopyState();
+  setTimeout(() => {
+    if (state.copyFeedback !== feedback) return;
+    state.copyFeedback = null;
+    updateReplyCopyState();
+  }, 3000);
 }
 function isPendingSuggestion(suggestion) {
   return isCurrentSuggestion(suggestion) && !isNoReplySuggestion(suggestion) && suggestion.pendingEligible === true;
@@ -1476,10 +1524,10 @@ function openCounterpart(person = null) {
   openInlineCard('counterpart-dialog');
   $('intake-alias').focus();
 }
-async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。') {
+async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。', isCurrent = () => true) {
   if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return false; }
-  try { await navigator.clipboard.writeText(text); announce(confirmation); return true; }
-  catch { announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
+  try { await navigator.clipboard.writeText(text); if (confirmation && isCurrent()) announce(confirmation); return true; }
+  catch { if (isCurrent()) announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
 }
 async function loadAdmin() {
   if (state.localDemo || state.me.user.role !== 'owner') return;
@@ -1725,23 +1773,45 @@ $('counterpart-form').addEventListener('submit', (event) => {
     announce(newerDraft ? '提交的背景已保存，刚补充的内容仍保留在表单里。' : '认识背景已保存。');
   });
 });
-$('delete-counterpart').addEventListener('click', () => void perform($('delete-counterpart'), '删除中…', async () => {
-  if (!confirm('删除这个对象及其关联的私有记录？此操作不能撤销。')) return;
-  const id = state.selectedId;
-  await api(counterpartPath(id), { method: 'DELETE' });
-  for (const suggestion of state.detail?.suggestions || []) state.suggestionDrafts.delete(suggestion.id);
-  state.intentDrafts.delete(id); state.requestIds.clear();
-  state.messageDrafts.delete(id);
-  state.intakeDrafts.delete(id);
-  state.counterparts = state.counterparts.filter((person) => person.id !== id);
-  state.selectedId = null; state.detail = null; state.suggestion = null;
-  $('suggestion-text').value = ''; $('intent').value = '';
-  for (const element of ['transcript', 'direction-options', 'heat-dimensions']) $(element).replaceChildren();
-  $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
-  $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
-  closeInlineCards(); updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
-  await loadCounterparts(); announce('对象及其关联记录已删除。');
-}));
+function isCounterpartStateKey(key, userId, id) {
+  let parts;
+  try { parts = JSON.parse(key); } catch { return false; }
+  if (!Array.isArray(parts)) return false;
+  if (parts[0] === userId && parts[1] === id || parts[1] === userId && parts[2] === id) return true;
+  // Model request IDs wrap a context key; plan results pair one with a plan.
+  if (parts.length === 6 && parts[1] === id && ['classify', 'reply', 'coach-plan'].includes(parts[0])) return isCounterpartStateKey(parts[5], userId, id);
+  return parts.length === 2 && typeof parts[0] === 'string' && isCounterpartStateKey(parts[0], userId, id);
+}
+$('delete-counterpart').addEventListener('click', () => {
+  const id = state.editingCounterpartId, userId = state.me?.user.id;
+  const scope = { userId, counterpartId: id };
+  const suggestionIds = state.detail?.counterpart.id === id ? (state.detail.suggestions || []).map(({ id }) => id) : [];
+  void perform($('delete-counterpart'), '删除中…', async () => {
+    if (!id || !userId || !confirm('删除这个对象及其关联的私有记录？此操作不能撤销。')) return;
+    await api(counterpartPath(id), { method: 'DELETE' });
+    if (state.me?.user.id !== userId) return;
+    for (const suggestionId of suggestionIds) state.suggestionDrafts.delete(suggestionId);
+    for (const drafts of [state.intentDrafts, state.messageDrafts, state.intakeDrafts]) drafts.delete(id);
+    for (const entries of [state.requestIds, state.messageCalls, state.timeCalls, state.imageCalls, state.topicChangeContexts, state.annotationDrafts, state.annotationOpen, state.annotationCalls, state.annotationErrors, state.meetingDrafts, state.planDrafts, state.planResults, state.planCalls, state.copyReceipts, state.copyCalls, state.autoAttempts, state.modelCalls]) {
+      for (const key of entries.keys()) if (isCounterpartStateKey(key, userId, id)) entries.delete(key);
+    }
+    state.counterparts = state.counterparts.filter((person) => person.id !== id);
+    state.directoryReadSerial++;
+    if (state.selectedId !== id) { await loadCounterparts({ selectIfNeeded: false }); return; }
+    // Retire in-flight reads before clearing the selected conversation. A late
+    // pre-delete response must not restore it or take over the next selection.
+    state.detailRequestSerial++; state.conversationVisit++;
+    state.selectedId = null; state.detail = null; state.suggestion = null; state.coachUpdate = null; state.replyFeedback = null;
+    restoreComposer(null);
+    $('suggestion-text').value = ''; $('intent').value = '';
+    for (const element of ['transcript', 'direction-options', 'heat-dimensions']) $(element).replaceChildren();
+    $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
+    $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
+    closeInlineCards(); updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
+    await loadCounterparts();
+    if (state.me?.user.id === userId) announce('对象及其关联记录已删除。');
+  }, scope);
+});
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);
 $('add-message-image').addEventListener('click', () => $('message-image-file').click());
 $('message-image-file').addEventListener('change', (event) => { void attachMessageImage(event.target.files?.[0]); event.target.value = ''; });
@@ -1802,15 +1872,17 @@ $('change-topic').addEventListener('click', () => {
   if (classificationUnavailable()) { renderClassification(state.detail?.classification); $('direction-options').querySelector('button')?.focus({ preventScroll: true }); }
   else void coachCall('classify', $('change-topic'), { topicChangeRequested: true });
 });
-$('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
+$('suggestion-text').addEventListener('input', () => { state.copyFeedback = null; if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
 $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '复制中…', async () => {
   const id = state.selectedId, userId = state.me?.user.id, suggestionId = state.suggestion?.id, copiedText = $('suggestion-text').value;
   if (!id || !suggestionId || !copiedText.trim() || !isPendingSuggestion(state.suggestion)) return;
   const copyCall = JSON.stringify([userId, id]);
+  const feedback = { userId, counterpartId: id, suggestionId, text: copiedText, visit: state.conversationVisit };
   state.copyCalls.add(copyCall);
   try {
-    const copied = await copyText(copiedText);
+    const copied = await copyText(copiedText, '', () => state.me?.user.id === userId && state.selectedId === id && state.conversationVisit === feedback.visit);
     if (!copied) return;
+    showCopyFeedback(feedback);
     const key = JSON.stringify(['copy', userId, id, suggestionId, copiedText]);
     if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
     const data = await post(`${counterpartPath(id)}/suggestions/${encodeURIComponent(suggestionId)}/copied`, { copiedText, requestId: state.requestIds.get(key) });

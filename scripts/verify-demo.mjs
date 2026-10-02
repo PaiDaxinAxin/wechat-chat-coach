@@ -1072,10 +1072,10 @@ try {
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   }
   await page.locator('#copy-reply').click();
-  await page.locator('#notice').filter({ hasText: '已复制' }).waitFor();
+  await page.locator('#copy-reply').filter({ hasText: '已复制' }).waitFor();
   await page.waitForFunction(() => !document.getElementById('copy-reply').disabled);
   const visibleFeedback = await page.evaluate(() => {
-    const notice = document.getElementById('notice').getBoundingClientRect();
+    const notice = document.getElementById('copy-reply').getBoundingClientRect();
     const toolbar = document.querySelector('.chat-toolbar').getBoundingClientRect();
     return { fullyVisible: notice.top >= toolbar.bottom - 1 && notice.bottom <= innerHeight, toolbarVisible: toolbar.top >= 0, shellScroll: document.getElementById('workspace').scrollTop };
   });

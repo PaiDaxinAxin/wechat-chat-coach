@@ -158,7 +158,7 @@ try {
     await ready(); pausedReply = await perform('/reply', () => page.locator('[data-direction=down]').click());
     assert.equal(pausedReply.suggestion.createdAt, legacyReply.suggestion.createdAt);
     releaseCopy(); await response;
-    await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制');
+    await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制回复');
   } finally { releaseCopy(); await page.unroute(copyUrl, copyHandler); }
   assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 停止当前推进');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
