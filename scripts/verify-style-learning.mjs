@@ -74,8 +74,12 @@ try {
   }
   const save = () => page.locator('#profile-form > button[type=submit]').click();
   await page.goto(origin); await login('style-owner');
-  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   const id = await page.locator('#counterpart-select').inputValue(), secondId = id === primary.id ? secondary.id : primary.id;
+  assert.equal(classifications, 0, 'Login only reads the saved conversation');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await response(`/api/counterparts/${id}/classify`, 'POST', () => page.locator('#classify').click());
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await response(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
   const original = await page.locator('#suggestion-text').inputValue(), ownVersion = '我最近也在做设计。你最投入的项目是什么？';
@@ -121,7 +125,7 @@ try {
   await page.locator('#style-cancel-draft').click();
   // Adopted rules are account scoped and enter an explicit later call on another object.
   await page.locator('#counterpart-select').selectOption(secondId);
-  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction((secondId) => document.getElementById('counterpart-select').value === secondId && document.getElementById('counterpart-workspace').checkVisibility() && !document.getElementById('direct-reply').disabled, secondId);
   await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('#direct-reply').click());
   assert.deepEqual(JSON.parse(contexts.at(-1).userProfile).confirmedPersonalStyle.rules.map(({ text }) => text), [candidateText]);
   await openPreferences();

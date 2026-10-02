@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ChatMessageSchema } from './chat-record.mjs';
 import { FIELD_COACH_SCHEMA, validateFieldCoachObservation } from './field-coach.mjs';
-import { ContextUpdatesSchema, validateContextUpdates } from './context-updates.mjs';
+import { ContextUpdatesSchema, sanitizeContextUpdates } from './context-updates.mjs';
 
 const NonEmptyText = z.string().trim().min(1);
 
@@ -269,10 +269,9 @@ function schemaFailure(parsed) {
 function semanticFailure(category) {
   return new CoachError('invalid_model_output', undefined, [{ code: category, path: [] }]);
 }
-function validateDerivedContext(result, context) {
-  if (result.contextUpdates === undefined) return;
-  try { result.contextUpdates = validateContextUpdates(result.contextUpdates, context); }
-  catch (error) { throw new CoachError('invalid_model_output', undefined, error.diagnostics ?? [{ code: 'invalid_context_updates', path: ['contextUpdates'] }]); }
+function withValidatedContextUpdates(value, context) {
+  if (!value || typeof value !== 'object' || !Object.hasOwn(value, 'contextUpdates')) return value;
+  return { ...value, contextUpdates: sanitizeContextUpdates(value.contextUpdates, context) };
 }
 
 function validateWorkingFocus(focus, context) {
@@ -298,7 +297,7 @@ function validateClassification(value, context, knowledgeText) {
     }
     candidate = { ...value, heat };
   }
-  const parsed = NativeClassificationSchema.safeParse(candidate);
+  const parsed = NativeClassificationSchema.safeParse(withValidatedContextUpdates(candidate, context));
   if (!parsed.success) throw schemaFailure(parsed);
   const result = parsed.data;
   const directions = new Set(result.options.map((option) => option.topicMove));
@@ -322,7 +321,6 @@ function validateClassification(value, context, knowledgeText) {
     if (dimension.level !== 'unknown' && dimension.evidenceIds.length === 0) throw semanticFailure('observed_heat_without_evidence');
   }
   if (result.fieldCoach) result.fieldCoach = validateFieldCoachObservation(result.fieldCoach, context, { confidence: result.confidence, obstacleType: result.obstacle.type, knowledgeText });
-  validateDerivedContext(result, context);
   return result;
 }
 
@@ -337,10 +335,9 @@ export async function classifyChat(input, options = {}) {
 export async function generateReply(input, options = {}) {
   const context = parseInput(ReplyInputSchema, input);
   const value = await runTask(REPLY_TASK, context, NativeReplySchema, options, 3_500);
-  const result = NativeReplySchema.safeParse(value);
+  const result = NativeReplySchema.safeParse(withValidatedContextUpdates(value, context.context));
   if (!result.success) throw schemaFailure(result);
   validateWorkingFocus(result.data.workingFocus, context.context);
-  validateDerivedContext(result.data, context.context);
   if (context.direction && ['reply', 'clarify', 'invite'].includes(result.data.action) && result.data.guidance.topicMove !== context.direction) {
     throw new CoachError('invalid_model_output', undefined, [{ code: 'custom', path: ['guidance', 'topicMove'] }]);
   }

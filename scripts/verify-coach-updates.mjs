@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { createBetaServer, seedOwner } from '../src/beta-api.mjs';
 import { QUESTIONNAIRES, validateProfile } from '../src/domain.mjs';
 import { DEFAULT_KNOWLEDGE_PATH } from '../src/knowledge.mjs';
+import { CoachError } from '../src/coach.mjs';
 
 // Synthetic accounts, a temporary database and copied knowledge only. All model
 // entry points are injected; browser requests cannot leave this temporary origin.
@@ -42,7 +43,7 @@ function classification(context, mode = 'neutral') {
 
 try {
   await mkdir(evidenceDir, { recursive: true });
-  const knowledgeText = await readFile(DEFAULT_KNOWLEDGE_PATH, 'utf8');
+  let knowledgeText = await readFile(DEFAULT_KNOWLEDGE_PATH, 'utf8');
   const knowledgePath = join(directory, 'knowledge.md'); await writeFile(knowledgePath, knowledgeText);
   const webDir = join(directory, 'public'); await mkdir(webDir);
   for (const name of ['index.html', 'app.js', 'styles.css']) await writeFile(join(webDir, name), await readFile(new URL(`../web/${name}`, import.meta.url)));
@@ -63,7 +64,7 @@ try {
   browser = await chromium.launch({ ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {}) });
   report.browser = browser.version();
 
-  async function journey(name, { mode = 'neutral', width = 1280, reducedMotion = 'no-preference', gate } = {}) {
+  async function journey(name, { mode = 'neutral', width = 1280, reducedMotion = 'no-preference', gate, analyze = true } = {}) {
     const invite = server.betaStore.createInvite({ ownerId: owner.id, plan: 'paid' }).invite;
     const user = await server.betaStore.register({ invite, username: `synthetic_${randomUUID().slice(0, 8)}`, password });
     server.betaStore.putProfile(user.id, validateProfile({ background: '虚构成年设计师，喜欢散步。', style: '简短自然。', growthGoals: '学会承接话题。', relationshipGoal: '双方自愿了解。', questionnaire: { kind: 'short', answers: Object.fromEntries(QUESTIONNAIRES.short.map(({ id }) => [id, 3])) } }, 'paid'));
@@ -76,12 +77,17 @@ try {
     await context.addCookies([{ name: 'chat_coach_session', value: session.token, url: origin, httpOnly: true, sameSite: 'Strict' }]);
     await context.route('**/*', (route) => { if (new URL(route.request().url()).origin === origin) return route.continue(); report.externalRequests.push(new URL(route.request().url()).origin); return route.abort('blockedbyclient'); });
     const page = await context.newPage(); page.setDefaultTimeout(15_000); page.on('pageerror', (error) => report.pageErrors.push(error.message));
+    const modelPosts = [];
+    page.on('request', (request) => { if (request.method() === 'POST' && /\/(classify|reply|coach-plan|image-read)$/.test(new URL(request.url()).pathname)) modelPosts.push(request.url()); });
     await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+    const startAnalysis = async () => { await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; }); await page.locator('#classify').click(); };
+    assert.equal(modelPosts.length, 0, 'Opening an existing conversation is read-only');
+    if (analyze) await startAnalysis();
     const idle = () => page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
     const openCoach = async () => { if (!await page.locator('#field-coach').isVisible()) await page.locator('#toggle-field-coach').click(); };
     const detail = async () => { const response = await context.request.get(`${origin}/api/counterparts/${person.id}`); assert.equal(response.status(), 200); return (await response.json()).data; };
     const finish = async (extra = {}) => { report.cases.push({ name, passed: true, classifications: controller.classifications, replies: controller.replies, ...extra }); await context.close(); contexts.delete(context); };
-    return { user, person, messages, controller, context, page, session, idle, openCoach, detail, finish, url: `${origin}/api/counterparts/${person.id}` };
+    return { user, person, messages, controller, context, page, session, idle, openCoach, detail, finish, modelPosts, startAnalysis, url: `${origin}/api/counterparts/${person.id}` };
   }
 
   const updated = async (f) => { await f.idle(); await f.page.locator('#coach-update-note').waitFor({ state: 'visible' }); assert.equal(await f.page.locator('#coach-update-text').textContent(), '场外教练的指示已更新'); };
@@ -184,6 +190,7 @@ try {
   // result as a fresh update. Select and analyze it once before the late-response case.
   await switched.page.reload(); await switched.page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await switched.page.locator('#counterpart-select').selectOption(other.id); await selectedReady(other.id, otherMessage.id);
+  await switched.startAnalysis(); await switched.idle();
   await switched.page.locator('#counterpart-select').selectOption(switched.person.id); await selectedReady(switched.person.id, switched.messages[0].id); await noUpdated(switched);
   const switchEntered = deferred(), switchRelease = deferred();
   switched.controller.replyGate = async () => { switchEntered.resolve(); await switchRelease.promise; };
@@ -201,6 +208,7 @@ try {
   await roundtrip.page.reload(); await roundtrip.page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   const roundtripReady = (id, messageId, allowBusy = false) => roundtrip.page.waitForFunction(({ id, messageId, allowBusy }) => document.getElementById('counterpart-select').value === id && document.getElementById('counterpart-workspace').checkVisibility() && document.querySelector(`[data-message-id="${messageId}"]`) && (allowBusy || document.getElementById('coach-panel').getAttribute('aria-busy') === 'false'), { id, messageId, allowBusy });
   await roundtrip.page.locator('#counterpart-select').selectOption(roundtripOther.id); await roundtripReady(roundtripOther.id, roundtripMessage.id);
+  await roundtrip.startAnalysis(); await roundtrip.idle();
   await roundtrip.page.locator('#counterpart-select').selectOption(roundtrip.person.id); await roundtripReady(roundtrip.person.id, roundtrip.messages[0].id);
   const roundtripEntered = deferred(), roundtripRelease = deferred();
   roundtrip.controller.replyGate = async () => { roundtripEntered.resolve(); await roundtripRelease.promise; };
@@ -227,6 +235,35 @@ try {
   assert.equal(motion.reduced, true); assert.equal(motion.animationName, 'none'); assert.equal(motion.overflow, false);
   await mobile.page.screenshot({ path: join(evidenceDir, 'mobile-reduced-motion.png') });
   await mobile.finish({ replyCueVisibleInChatViewport: true, textCueSurvivesReducedMotion: true, noHorizontalOverflow: true });
+
+  const readOnly = await journey('refresh-read-only-without-cache-and-after-version-change', { analyze: false });
+  const assertReadOnly = async (postCount) => {
+    await readOnly.idle(); await noUpdated(readOnly);
+    assert.equal(readOnly.modelPosts.length, postCount, 'A detail read cannot issue a model POST');
+    assert.equal(await readOnly.page.locator('#coach-error').isVisible(), false, 'A read must not manufacture a model failure');
+  };
+  await assertReadOnly(0);
+  await readOnly.page.reload(); await readOnly.page.locator('#counterpart-workspace').waitFor({ state: 'visible' }); await assertReadOnly(0);
+  await readOnly.startAnalysis(); await updated(readOnly);
+  assert.equal(readOnly.controller.classifications, 1);
+  const beforeVersionChange = readOnly.modelPosts.length;
+  knowledgeText += '\n\n合成验收增补：只用于临时知识库版本失效测试。\n';
+  await writeFile(knowledgePath, knowledgeText);
+  await readOnly.page.reload(); await readOnly.page.locator('#counterpart-workspace').waitFor({ state: 'visible' }); await assertReadOnly(beforeVersionChange);
+  assert.equal((await readOnly.detail()).classification, null, 'Changed knowledge invalidates the cached result without rerunning it');
+  assert.equal(await readOnly.page.locator('#field-coach-temperature').textContent(), '初步方向');
+  await readOnly.page.route(readOnly.url, (route) => route.request().method() === 'GET' ? route.fulfill({ status: 503, json: { error: { code: 'SYNTHETIC_READ_FAILURE', message: '合成读取失败。' } } }) : route.continue());
+  await readOnly.page.reload(); await readOnly.page.locator('#startup-retry').waitFor({ state: 'visible' });
+  assert.equal(readOnly.modelPosts.length, beforeVersionChange);
+  assert.equal(await readOnly.page.locator('#coach-update-note').isVisible(), false);
+  assert.equal(await readOnly.page.locator('#coach-error').isVisible(), false);
+  await readOnly.page.unroute(readOnly.url);
+  await readOnly.page.locator('#startup-retry').click(); await readOnly.page.locator('#counterpart-workspace').waitFor({ state: 'visible' }); await assertReadOnly(beforeVersionChange);
+  readOnly.controller.classifyGate = async () => { throw new CoachError('provider_timeout'); };
+  await readOnly.startAnalysis(); await readOnly.page.locator('#retry-coach:not([disabled])').waitFor({ state: 'visible' }); await readOnly.idle();
+  assert.equal(await readOnly.page.locator('#coach-error').isVisible(), true, 'An explicitly requested failed model call still shows its retryable error');
+  assert.equal(readOnly.modelPosts.length, beforeVersionChange + 2, 'Manual classification keeps its bounded recovery');
+  await readOnly.finish({ uncachedRefreshNoModel: true, changedKnowledgeRefreshNoModel: true, failedReadNoModel: true, explicitFailureVisible: true });
 
   assert.deepEqual(report.pageErrors, []); assert.deepEqual(report.externalRequests, []);
   assert.ok(report.cases.length > 0, 'At least one complete journey must execute');

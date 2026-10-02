@@ -894,31 +894,76 @@ test('automatic facts survive appended messages, invalidate on corrected evidenc
   assert.equal(calls, 4, 'Editing/readback itself performs no extraction request');
 });
 
-test('injected extraction output must cite actual records, and inferred drafts never become profile facts', async (t) => {
+test('injected invalid extraction is discarded while valid coaching succeeds and inferred drafts never become profile facts', async (t) => {
   let calls = 0, useDraft = false;
   const f = await fixture(t, { classifyFn: async (context) => { calls++; return { ...classification(context), contextUpdates: { facts: useDraft ? [contextFact(context.messages.find(({ provenance }) => provenance === 'inferred_from_followup'), 'work', '医生')] : [{ subject: 'other', field: 'work', value: '医生', evidence: [{ messageId: 'nonexistent-message', quote: '我是医生', source: 'text' }] }], meeting: null } }; } });
   const user = await f.register('invalidExtractionUser'), id = await f.addContext(user), path = `/api/counterparts/${id}`;
   const invalid = await user.call('POST', `${path}/classify`, { requestId: 'invalid_context_quote' });
-  assert.equal(invalid.status, 502); assert.equal(invalid.error.code, 'INVALID_MODEL_OUTPUT');
-  const auditDb = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
-  try {
-    const diagnostics = auditDb.prepare("SELECT details_json FROM audit_log WHERE action='model_job_failed' ORDER BY rowid DESC LIMIT 1").get();
-    assert.ok(diagnostics.details_json.includes('invalid_context_evidence_reference'));
-    assert.ok(!diagnostics.details_json.includes('nonexistent-message'));
-    assert.ok(!diagnostics.details_json.includes('医生'));
-  } finally { auditDb.close(); }
-  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 3);
+  assert.equal(invalid.status, 200);
+  assert.deepEqual(invalid.data.classification.contextUpdates, { facts: [], meeting: null });
+  assert.ok(!JSON.stringify(f.server.betaStore.listJobs(user.user.id, id)).includes('nonexistent-message'));
+  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 2);
+  assert.equal(f.server.betaStore.quota(user.user.id).providerRemaining, 9);
   const invalidReplay = await user.call('POST', `${path}/classify`, { requestId: 'invalid_context_quote' });
-  assert.equal(invalidReplay.status, 409); assert.equal(calls, 1);
+  assert.equal(invalidReplay.status, 200); assert.equal(invalidReplay.data.cached, true); assert.equal(calls, 1);
+  assert.equal(f.server.betaStore.quota(user.user.id).providerRemaining, 9);
   const suggestion = (await user.call('POST', `${path}/reply`, { requestId: 'draft_context_source' })).data.suggestion;
   const followup = await user.call('POST', `${path}/followup`, { requestId: 'draft_context_followup', text: '你今天忙吗？', previousSuggestionId: suggestion.id, previousReplyText: '我是医生。' });
   assert.equal(followup.data.previousMessage.provenance, 'inferred_from_followup');
   useDraft = true;
   const inferred = await user.call('POST', `${path}/classify`, { requestId: 'invalid_inferred_fact' });
-  assert.equal(inferred.status, 502); assert.equal(inferred.error.code, 'INVALID_MODEL_OUTPUT');
+  assert.equal(inferred.status, 200);
+  assert.deepEqual(inferred.data.classification.contextUpdates, { facts: [], meeting: null });
   assert.deepEqual((await user.call('GET', path)).data.backgroundContext.facts, []);
-  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 3);
-  assert.equal(f.server.betaStore.latestContextUpdates(user.user.id, id), null);
+  assert.equal(f.server.betaStore.quota(user.user.id).classificationRemaining, 1);
+  assert.deepEqual(f.server.betaStore.latestContextUpdates(user.user.id, id).result.classification.contextUpdates, { facts: [], meeting: null });
+  assert.equal(calls, 2);
+});
+
+test('injected classify and reply persist only validated facts and independently evidenced meetings', async (t) => {
+  let calls = 0;
+  const extraction = (context) => {
+    const self = context.messages.find(({ speaker }) => speaker === 'self'), other = context.messages.find(({ speaker }) => speaker === 'other');
+    return { facts: [
+      { ...contextFact(other, 'work', '设计'), evidence: [{ messageId: other.id, quote: '做设计', source: 'text' }] },
+      { subject: 'other', field: 'location', value: 'private-bad-candidate', evidence: [{ messageId: other.id, quote: 'private-fabricated-quote', source: 'text' }] },
+    ], meeting: { status: 'confirmed', time: '周六 19:00', place: '湖畔咖啡', note: '', evidence: [
+      { messageId: self.id, quote: self.text, source: 'text' }, { messageId: other.id, quote: other.text, source: 'text' },
+    ] } };
+  };
+  const f = await fixture(t, {
+    classifyFn: async (context, options) => { calls++; assert.equal(options.knowledgeText, f.knowledgeText); return { ...classification(context), contextUpdates: extraction(context) }; },
+    replyFn: async ({ context }, options) => { calls++; assert.equal(options.knowledgeText, f.knowledgeText); return { ...reply(), contextUpdates: extraction(context) }; },
+  });
+  const user = await f.register('partialExtractionUser', 'paid'), id = await f.addContext(user, '有依据的安排', { messages: false }), path = `/api/counterparts/${id}`;
+  await user.call('POST', `${path}/messages`, { speaker: 'self', text: '周六 19:00 一起去湖畔咖啡见面？' });
+  const other = (await user.call('POST', `${path}/messages`, { speaker: 'other', text: '我在杭州做设计。好，周六 19:00 湖畔咖啡见。' })).data.message;
+  for (const operation of ['classify', 'reply']) {
+    const result = await user.call('POST', `${path}/${operation}`, { requestId: `partial_${operation}` });
+    assert.equal(result.status, 200);
+    const core = operation === 'classify' ? result.data.classification : result.data.suggestion;
+    assert.equal(core.contextUpdates.facts.length, 1); assert.equal(core.contextUpdates.facts[0].value, '设计');
+    assert.equal(core.contextUpdates.meeting.status, 'confirmed');
+    assert.equal(result.data.backgroundContext.facts[0].value, '设计'); assert.equal(result.data.meeting.status, 'confirmed');
+    assert.equal((await user.call('POST', `${path}/${operation}`, { requestId: `partial_${operation}` })).data.cached, true);
+  }
+  assert.equal(calls, 2);
+  assert.equal(f.server.betaStore.quota(user.user.id).providerRemaining, 8);
+  const rejected = await user.call('PUT', `${path}/messages/${other.id}`, { speaker: 'other', text: '我在杭州做设计，但周六没空。' });
+  assert.equal(rejected.status, 200);
+  const result = await user.call('POST', `${path}/reply`, { requestId: 'partial_bad_meeting' });
+  assert.equal(result.status, 200); assert.equal(result.data.suggestion.reply, reply().reply);
+  assert.equal(result.data.suggestion.contextUpdates.facts.length, 1); assert.equal(result.data.suggestion.contextUpdates.meeting, null);
+  assert.equal(result.data.meeting.status, 'none');
+  const persisted = JSON.stringify(f.server.betaStore.listJobs(user.user.id, id));
+  assert.ok(!persisted.includes('private-bad-candidate')); assert.ok(!persisted.includes('private-fabricated-quote'));
+  const db = new DatabaseSync(join(f.dataDir, 'beta.sqlite'));
+  try {
+    const rows = db.prepare('SELECT result_json FROM model_jobs WHERE user_id=? AND counterpart_id=?').all(user.user.id, id);
+    assert.equal(rows.length, 3); assert.ok(!JSON.stringify(rows).includes('private-'));
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_log WHERE action='model_job_failed'").get().count, 0);
+  } finally { db.close(); }
+  assert.equal(calls, 3, 'Discarding a bad meeting never performs a recovery model call');
 });
 
 test('manual meeting cancellation wins through same-clock saves and reversals until new chat evidence updates it', async (t) => {

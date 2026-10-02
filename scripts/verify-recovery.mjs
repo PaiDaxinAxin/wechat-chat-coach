@@ -96,6 +96,8 @@ try {
     await page.goto(origin);
     await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
     if (await page.locator('#counterpart-select').inputValue() !== person.id) await page.locator('#counterpart-select').selectOption(person.id);
+    assert.equal(requests.length, 0, 'Login and object selection do not spend model calls');
+    await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; }); await page.locator('#classify').click();
     await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && document.getElementById('classification-summary').textContent.includes('合成话题') && document.getElementById('coach-panel').getAttribute('aria-busy') === 'false', person.id);
     assert.equal(await page.locator('#job-history').count(), 0, 'Operation history is absent, including after a persisted job');
     await page.locator('#intent').evaluate((element) => { element.closest('details').open = true; });

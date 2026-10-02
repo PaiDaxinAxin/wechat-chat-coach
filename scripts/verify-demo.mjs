@@ -56,6 +56,8 @@ try {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   const page = await context.newPage(); page.setDefaultTimeout(15_000);
   const pageErrors = []; page.on('pageerror', (error) => pageErrors.push(error.message));
+  const modelPosts = [];
+  page.on('request', (request) => { if (request.method() === 'POST' && /\/(classify|reply|coach-plan|image-read)$/.test(new URL(request.url()).pathname)) modelPosts.push(request.url()); });
   async function response(suffix, method, action) {
     const waiting = page.waitForResponse((r) => r.url().endsWith(suffix) && r.request().method() === method);
     await action(); const r = await waiting; const payload = await r.json(); assert.equal(r.status(), 200, JSON.stringify(payload)); return payload.data;
@@ -66,8 +68,10 @@ try {
   assert.equal(await page.locator('#auth').isVisible(), false);
   assert.equal(await page.locator('#demo-banner').isVisible(), true);
   assert.equal(await page.locator('.message-bubble').count(), 4);
+  assert.equal(classifications, 0, 'Opening the demo reads existing messages without automatically analyzing');
+  await response('/classify', 'POST', async () => { await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; }); await page.locator('#classify').click(); });
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
-  assert.equal(classifications, 1, 'First complete context analyzes once');
+  assert.equal(classifications, 1, 'Explicit first analysis runs once');
   assert.equal(replies, 0, 'Opening does not generate a reply');
   assert.equal(await page.locator('#direction-options button').count(), 3);
   assert.ok((await page.locator('[data-direction=down]').textContent()).includes('10%'));
@@ -307,15 +311,19 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 4);
   const beforeFailedClassification = classifications;
+  const beforeAutomaticFailurePosts = modelPosts.length;
   classificationFailuresRemaining = 2;
+  let failedAutomaticResponses = 0;
+  const automaticFailureFinished = page.waitForResponse((response) => response.url().endsWith(`/api/counterparts/${secondId}/classify`) && response.request().method() === 'POST' && ++failedAutomaticResponses === 2);
   await page.locator('#message-text').fill('这轮合成分析会失败。');
   await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  await page.locator('#coach-error').waitFor({ state: 'visible' });
-  await page.locator('#retry-coach:not([disabled])').waitFor({ state: 'visible' });
-  assert.equal(classifications, beforeFailedClassification + 2, 'A transient provider failure has one bounded fresh attempt before showing retry');
-  assert.equal(classificationFailuresRemaining, 0);
-  assert.doesNotMatch(await page.locator('#coach-error').textContent(), /Synthetic|PROVIDER_TIMEOUT|不会自动重试/);
+  await automaticFailureFinished;
   await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
+  assert.equal(classifications, beforeFailedClassification + 2, 'Automatic analysis has one bounded fresh attempt before retaining preliminary guidance');
+  assert.equal(modelPosts.length, beforeAutomaticFailurePosts + 2);
+  assert.equal(classificationFailuresRemaining, 0);
+  assert.equal(await page.locator('#coach-error').isVisible(), false, 'Background automatic failure does not replace the conversation with a retry error');
+  assert.equal(await page.locator('#retry-coach').isVisible(), false);
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'A failed analysis keeps a usable preliminary direction without inventing a temperature');
   assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息');
   assert.match(await page.locator('#field-coach-initiative').textContent(), /初步方向.*尝试获得更多信息/u);
@@ -329,6 +337,8 @@ try {
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForTimeout(150);
   assert.equal(classifications, beforeFailedClassification + 2, 'Exhausted recovery for the current context does not restart after reload');
+  assert.equal(modelPosts.length, beforeAutomaticFailurePosts + 2, 'Reload after automatic failure sends no model POST, including cached replays');
+  assert.equal(await page.locator('#coach-error').isVisible(), false);
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向');
   assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息', 'Reload retains the general direction without silently rerunning a failed model');
   await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });

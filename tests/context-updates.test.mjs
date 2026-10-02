@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
-import { ContextUpdatesSchema, validateContextUpdates, normalizeContextUpdates, ContextUpdatesError } from '../src/context-updates.mjs';
+import { ContextUpdatesSchema, validateContextUpdates, normalizeContextUpdates, sanitizeContextUpdates, ContextUpdatesError } from '../src/context-updates.mjs';
 
 const evidence = (messageId, quote, source = 'text') => ({ messageId, quote, source });
 const context = {
@@ -147,4 +147,66 @@ test('errors contain categories and fixed paths, never quote, identity values or
   const privateValue = 'private-marker-not-in-any-record';
   try { validateContextUpdates({ facts: [fact('other', 'work', privateValue, evidence('private-id', privateValue))], meeting: null }, context); assert.fail('Expected evidence rejection'); }
   catch (error) { assert.equal(error.code, 'INVALID_CONTEXT_UPDATES'); assert.doesNotMatch(JSON.stringify(error), /private-marker|private-id/); assert.deepEqual(error.diagnostics, [{ code: 'invalid_context_evidence_reference', path: ['facts', 0, 'evidence', 0, 'messageId'] }]); }
+});
+test('sanitization preserves evidenced facts while isolating fabricated quotes, wrong speakers, missing evidence and image guesses', () => {
+  const input = { ...context, messages: [...context.messages, { id: 'image', speaker: 'other', text: '【图片记录·AI识读后可修改，不是准确原文，可能包含双方内容】\n我是老师，喜欢潜水。', annotation: { text: '图片里看起来像住在杭州。', source: 'user_annotation', updatedAt: '2026-10-01T08:00:00.000Z' } }] };
+  const good = [fact('self', 'work', '产品设计', evidence('self', '做产品设计')), fact()];
+  const updates = { facts: [
+    good[0],
+    fact('other', 'location', '北京', evidence('other', '住北京')),
+    fact('self', 'availability', '周六有空', evidence('other', '周六 19:00')),
+    good[1],
+    { subject: 'relationship', field: 'met', value: '已经见面' },
+    fact('other', 'interests', '潜水', evidence('image', '喜欢潜水')),
+    fact('other', 'background', '杭州', evidence('image', '杭州', 'annotation')),
+  ], meeting: null };
+  assert.deepEqual(sanitizeContextUpdates(updates, input), { facts: good, meeting: null });
+  invalid(updates, input);
+});
+test('sanitization drops every duplicate subject/field candidate including identical, contradictory and invalid duplicates', () => {
+  const retained = fact('self', 'interests', '骑车', evidence('self', '喜欢骑车'));
+  const bad = { ...fact(), evidence: [] };
+  for (const duplicates of [[fact(), fact()], [fact(), { ...fact(), value: '另一职业' }], [fact(), bad], [bad, fact()]]) {
+    const updates = { facts: [duplicates[0], retained, duplicates[1]], meeting: null };
+    assert.deepEqual(sanitizeContextUpdates(updates, context), { facts: [retained], meeting: null });
+    invalid(updates);
+  }
+});
+test('sanitization validates meeting independently so bad facts preserve a good meeting and bad meetings preserve good facts', () => {
+  const updates = { ...confirmed(), facts: [fact(), fact('self', 'location', '北京', evidence('self', '住北京'))] };
+  assert.deepEqual(sanitizeContextUpdates(updates, context), { facts: [fact()], meeting: confirmed().meeting });
+  invalid(updates);
+  for (const meeting of [
+    { ...confirmed().meeting, place: '未提及的地方' },
+    { ...confirmed().meeting, evidence: [evidence('self', '周六 19:00 一起去湖畔咖啡见面？'), evidence('other', '我已经确认')] },
+    { ...confirmed().meeting, evidence: [] },
+  ]) {
+    const value = { facts: [fact()], meeting };
+    assert.deepEqual(sanitizeContextUpdates(value, context), { facts: [fact()], meeting: null });
+    invalid(value);
+  }
+});
+test('sanitization rejects malformed or oversized top-level structures as an empty projection', () => {
+  const empty = { facts: [], meeting: null };
+  const self = fact('self', 'work', '产品设计', evidence('self', '做产品设计'));
+  for (const value of [
+    null, [], 'invalid', {}, { facts: [fact()] }, { meeting: confirmed().meeting },
+    { facts: 'invalid', meeting: confirmed().meeting },
+    { facts: [fact()], meeting: null, extra: true },
+    { facts: [self, ...Array.from({ length: 24 }, () => fact())], meeting: null },
+  ]) {
+    assert.deepEqual(sanitizeContextUpdates(value, context), empty);
+    invalid(value);
+  }
+});
+test('sanitization retains optional absence and normalization without mutation while strict APIs still reject bad projections', () => {
+  assert.equal(sanitizeContextUpdates(undefined, context), undefined);
+  const value = { ...confirmed(), facts: [fact('self', 'work', ' 产品设计 ', evidence('self', '做产品设计')), fact('other', 'location', '北京', evidence('other', '住北京'))] };
+  const originalValue = structuredClone(value), originalContext = structuredClone(context);
+  const result = sanitizeContextUpdates(value, context);
+  assert.equal(result.facts[0].value, '产品设计');
+  assert.equal(result.meeting.status, 'confirmed');
+  assert.deepEqual(value, originalValue); assert.deepEqual(context, originalContext);
+  invalid(value);
+  assert.throws(() => normalizeContextUpdates(value, context), ContextUpdatesError);
 });

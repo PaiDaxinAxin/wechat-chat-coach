@@ -89,7 +89,10 @@ try {
       const complete = ready(); release(); await complete;
     } finally { release(); await page.unroute(url, handler); }
   }
-  await page.goto(origin); await ready();
+  await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(classifications, 0, 'Opening the saved conversation is read-only');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await perform('/classify', () => page.locator('#classify').click()); await ready();
   const id = await page.locator('#counterpart-select').inputValue();
   const firstReply = await perform('/reply', () => page.locator('[data-direction=down]').click());
   assert.equal(await page.locator('#reply-guidance').isVisible(), true);

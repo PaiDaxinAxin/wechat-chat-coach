@@ -194,6 +194,36 @@ export function validateContextUpdates(updates, context) {
   return result;
 }
 
+/** Keep only independently evidenced auxiliary output. Invalid extraction must
+ * not discard an otherwise valid coaching result. Readback still uses the
+ * complete strict validator above; no rejected candidate enters stored state.
+ */
+export function sanitizeContextUpdates(updates, context) {
+  if (updates === undefined) return undefined;
+  const empty = { facts: [], meeting: null };
+  if (!updates || typeof updates !== 'object' || Array.isArray(updates)
+    || !Object.hasOwn(updates, 'facts') || !Object.hasOwn(updates, 'meeting')
+    || Object.keys(updates).some((key) => !['facts', 'meeting'].includes(key))
+    || !Array.isArray(updates.facts) || updates.facts.length > 24) return empty;
+
+  const keyOf = (fact) => typeof fact?.subject === 'string' && typeof fact?.field === 'string' ? JSON.stringify([fact.subject, fact.field]) : null;
+  const counts = new Map();
+  for (const fact of updates.facts) {
+    const key = keyOf(fact);
+    if (key !== null) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  for (const fact of updates.facts) {
+    // Even one invalid duplicate makes the intended value unresolved. Never
+    // select the first or last conflicting extraction as authoritative.
+    if (counts.get(keyOf(fact)) > 1) continue;
+    try { empty.facts.push(...validateContextUpdates({ facts: [fact], meeting: null }, context).facts); }
+    catch (error) { if (!(error instanceof ContextUpdatesError)) throw error; }
+  }
+  try { empty.meeting = validateContextUpdates({ facts: [], meeting: updates.meeting }, context).meeting; }
+  catch (error) { if (!(error instanceof ContextUpdatesError)) throw error; }
+  return empty;
+}
+
 // Normalization is schema trimming plus the same evidence validation; it is not
 // a second source of derived state or a NLP reconstruction of missing facts.
 export const normalizeContextUpdates = validateContextUpdates;

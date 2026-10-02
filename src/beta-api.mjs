@@ -10,7 +10,7 @@ import { createKnowledgeStore, guardRestrictedOutput, PROJECT_ROOT } from './kno
 import { COACH_CONTEXT_VERSION, COACH_PROTOCOL_VERSION } from './chat-record.mjs';
 import { StyleLearningInputSchema } from './style-learning.mjs';
 import { generateFieldCoachPlan } from './field-coach.mjs';
-import { validateContextUpdates } from './context-updates.mjs';
+import { validateContextUpdates, sanitizeContextUpdates } from './context-updates.mjs';
 import { buildDirectoryHeat, latestCounterpartReply } from './directory-heat.mjs';
 import { classifyChat, generateReply } from './coach.mjs';
 import { interpretChatImage, validateChatImage, guardImageBytes, validateImageInterpretation, IMAGE_BODY_LIMIT, IMAGE_INPUT_VERSION } from './image-input.mjs';
@@ -420,8 +420,8 @@ export async function createBetaServer({
           : operation === 'image_read' ? await imageFn({ context, image: input.image, explanation: input.explanation }, options)
           : operation === 'coach_plan' ? await planFn({ context, plan: input.plan }, options)
           : await replyFn({ context, ...(input.direction === undefined ? {} : { direction: input.direction }) }, options);
+        if (['classify', 'reply'].includes(operation) && output?.contextUpdates !== undefined) output = { ...output, contextUpdates: sanitizeContextUpdates(output.contextUpdates, context) };
         guardRestrictedOutput(output, knowledgeSnapshot.text);
-        if (['classify', 'reply'].includes(operation) && output?.contextUpdates !== undefined) output = { ...output, contextUpdates: validateContextUpdates(output.contextUpdates, context) };
         if (operation === 'image_read') output = validateImageInterpretation(output, input.image);
         return await withTransaction(async () => {
           const currentKnowledge = await knowledge.read();

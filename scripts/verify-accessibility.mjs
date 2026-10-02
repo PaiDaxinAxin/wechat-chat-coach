@@ -108,6 +108,8 @@ try {
     }
     try {
       await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+      await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+      await page.locator('#classify').click();
       await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
       assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
       await scan('conversation');

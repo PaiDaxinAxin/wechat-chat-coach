@@ -73,6 +73,9 @@ try {
   await perform('/api/login', 'POST', () => page.locator('#auth-submit').click());
   await ready();
   if (await page.locator('#counterpart-select').inputValue() !== person.id) { await page.locator('#counterpart-select').selectOption(person.id); await ready(); }
+  assert.equal(calls.classify, 0, 'Login and object selection read context without model calls');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await perform('/classify', 'POST', () => page.locator('#classify').click()); await ready();
   await page.waitForFunction(() => document.getElementById('classification-summary').textContent.includes('接着当前话题'));
   assert.equal(calls.reply, 0); assert.equal(await page.locator('#direction-options').isVisible(), false);
   assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：安全需求');
@@ -113,7 +116,9 @@ try {
   assert.equal(saved.annotation.source, 'user_annotation'); assert.equal(saved.annotation.text, '线下聊过，这是我补充的背景。');
   for (const key of ['text', 'speaker', 'createdAt', 'updatedAt', 'provenance']) assert.equal(saved[key], original[key], `Annotation preserves ${key}`);
   assert.equal(calls.reply, 1); assert.equal(calls.classify, 1, 'Annotation save never triggers a model');
-  await page.reload(); await ready(); assert.equal(calls.reply, 1); assert.equal(calls.classify, 2, 'Reload can analyze newly annotated context but cannot spend a reply');
+  await page.reload(); await ready(); assert.equal(calls.reply, 1); assert.equal(calls.classify, 1, 'Reloading newly annotated context remains read-only');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await perform('/classify', 'POST', () => page.locator('#classify').click()); await ready();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
   await note().locator('summary').click();
   await note().locator('textarea').fill('失败时仍保留的背景草稿。');

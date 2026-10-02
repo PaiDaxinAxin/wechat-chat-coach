@@ -409,6 +409,9 @@ async function enterWorkspace() {
   fillProfile();
   await loadStyleLearning();
   await loadCounterparts();
+  // A failed initial detail read has already selected its conversation. Retrying
+  // startup must read that selection again without starting model analysis.
+  if (state.selectedId && !state.detail && state.counterparts.some(({ id }) => id === state.selectedId)) await loadCounterpart(state.selectedId);
   const requiresUpdate = state.me.requiresQuestionnaireUpdate || state.me.profile?.requiresQuestionnaireUpdate;
   showView(requiresUpdate ? 'profile' : 'coach');
   if (requiresUpdate) announce('当前账号已改为免费内测。请保存精简问卷版本后继续，答案可以以后再补。', 'error');
@@ -646,7 +649,7 @@ function showCounterpartLoading(message = '', failed = false) {
   $('counterpart-loading-message').textContent = message;
   $('retry-counterpart').hidden = !failed;
 }
-async function loadCounterpart(id, { autoAnalyze = true } = {}) {
+async function loadCounterpart(id, { autoAnalyze = false } = {}) {
   const serial = ++state.detailRequestSerial;
   const retryHadFocus = document.activeElement === $('retry-counterpart');
   const coachResultRevision = state.coachResultRevision;
@@ -1304,15 +1307,19 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
         state.replyFeedback = null;
       }
       announce('');
-      state.coachErrorContext = inputContext;
-      localError.replaceChildren(el('p', {}, modelFailureMessage(error)));
-      if (canRetryModel(error)) {
-        const retry = el('button', { id: 'retry-coach', type: 'button', class: 'secondary', onclick: () => {
-          if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext) void coachCall(type, retry, { direction, topicChangeRequested });
-        } }, '重试');
-        localError.append(retry);
+      // Background analysis can leave the initial guidance in place. A failed
+      // explicit request still needs a visible outcome and a recovery action.
+      if (!automatic) {
+        state.coachErrorContext = inputContext;
+        localError.replaceChildren(el('p', {}, modelFailureMessage(error)));
+        if (canRetryModel(error)) {
+          const retry = el('button', { id: 'retry-coach', type: 'button', class: 'secondary', onclick: () => {
+            if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext) void coachCall(type, retry, { direction, topicChangeRequested });
+          } }, '重试');
+          localError.append(retry);
+        }
+        localError.hidden = false;
       }
-      localError.hidden = false;
     }
     try { await reloadMe(); } catch { /* Preserve the original recovery state. */ }
     if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {

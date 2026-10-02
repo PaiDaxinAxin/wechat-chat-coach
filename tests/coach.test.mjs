@@ -489,7 +489,7 @@ test('each native coaching call requires a complete evidence-backed context proj
   assert.equal(calls, 2, 'One requested classify and one requested reply, with no extraction-only model call');
 });
 
-test('missing native projection and false evidence fail without retry or private source diagnostics', async () => {
+test('missing native projection remains required without an automatic retry', async () => {
   const reply = { workingFocus, reply: '自然接话。', reason: '结合当前内容。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: null, relationMove: 'continue', ownWordsGuide: '接住当前内容。', reentryWhen: '对方展开后再继续。' } };
   const classification = validClassification(); delete classification.contextUpdates;
   for (const [operation, value] of [['classify', classification], ['reply', reply]]) {
@@ -498,6 +498,38 @@ test('missing native projection and false evidence fail without retry or private
     await assert.rejects(operation === 'classify' ? classifyChat(input, { knowledgeText, env, fetchImpl }) : generateReply({ context: input }, { knowledgeText, env, fetchImpl }), (error) => error.code === 'invalid_model_output' && error.diagnostics.some(({ path }) => path[0] === 'contextUpdates'));
     assert.equal(calls, 1);
   }
-  const invalid = { ...validClassification(), contextUpdates: { facts: [{ subject: 'other', field: 'work', value: 'private-value-never-return', evidence: [{ messageId: 'm1', quote: 'private-evidence-never-return', source: 'text' }] }], meeting: null } };
-  await assert.rejects(classifyChat(input, { knowledgeText, env, fetchImpl: mockResponse(invalid) }), (error) => error.code === 'invalid_model_output' && !JSON.stringify(error).includes('private-'));
+});
+
+test('invalid auxiliary extraction cannot discard valid native coaching or create a second request', async () => {
+  const good = { subject: 'other', field: 'availability', value: '近期工作忙', evidence: [{ messageId: 'm1', quote: '最近忙工作', source: 'text' }] };
+  const bad = { subject: 'other', field: 'work', value: 'private-value-never-return', evidence: [{ messageId: 'm1', quote: 'private-evidence-never-return', source: 'text' }] };
+  const reply = { workingFocus, reply: '自然接话。', reason: '结合当前内容。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: null, relationMove: 'continue', ownWordsGuide: '接住当前内容。', reentryWhen: '对方展开后再继续。' } };
+  for (const updates of [
+    { facts: [bad, good], meeting: { status: 'confirmed', time: '周六', place: '咖啡店', note: '', evidence: good.evidence } },
+    { facts: [{ ...bad, evidence: [] }, good], meeting: null },
+    null,
+  ]) {
+    for (const [operation, value] of [['classify', validClassification()], ['reply', reply]]) {
+      let calls = 0;
+      const fetchImpl = async () => { calls++; return mockResponse({ ...value, contextUpdates: updates })(); };
+      const result = await (operation === 'classify' ? classifyChat(input, { knowledgeText, env, fetchImpl }) : generateReply({ context: input }, { knowledgeText, env, fetchImpl }));
+      assert.deepEqual(result.contextUpdates, { facts: updates === null ? [] : [good], meeting: null });
+      assert.deepEqual({ ...result, contextUpdates: undefined }, { ...value, contextUpdates: undefined });
+      assert.ok(!JSON.stringify(result).includes('private-'));
+      assert.equal(calls, 1, 'Sanitization does not retry or perform a separate extraction call');
+    }
+  }
+});
+
+test('sanitizing auxiliary extraction never weakens core evidence validation', async () => {
+  const updates = { facts: [{ subject: 'other', field: 'work', value: 'private-value', evidence: [] }], meeting: null };
+  const classification = { ...validClassification(), contextUpdates: updates };
+  classification.heat.responseEngagement.evidenceIds = ['missing-core-id'];
+  const reply = { contextUpdates: updates, workingFocus: { stage: 'emotion', reason: '当前内容。', evidenceIds: ['missing-core-id'] }, reply: '自然接话。', reason: '结合当前内容。', action: 'reply', styleNote: '保留真实表达。', guidance: { topicMove: null, relationMove: 'continue', ownWordsGuide: '接住当前内容。', reentryWhen: '对方展开后再继续。' } };
+  for (const [operation, value] of [['classify', classification], ['reply', reply]]) {
+    let calls = 0;
+    const fetchImpl = async () => { calls++; return mockResponse(value)(); };
+    await assert.rejects(operation === 'classify' ? classifyChat(input, { knowledgeText, env, fetchImpl }) : generateReply({ context: input }, { knowledgeText, env, fetchImpl }), (error) => error.code === 'invalid_model_output' && error.diagnostics.some(({ code }) => code === 'invalid_evidence_reference') && !JSON.stringify(error).includes('private-value'));
+    assert.equal(calls, 1);
+  }
 });
