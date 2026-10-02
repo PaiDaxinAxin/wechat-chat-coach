@@ -6,7 +6,7 @@ On 2026-10-01 the owner selected personal cloud hosting, clarified that Vercel m
 
 | Resource | Verified target |
 | --- | --- |
-| GitHub | `PaiDaxinAxin/wechat-chat-coach` (private) |
+| GitHub | `PaiDaxinAxin/wechat-chat-coach` (public; code and knowledge opened under the owner-selected licenses) |
 | Vercel workspace | `Leon using's projects`, slug `leon-using-s-projects`, ID `team_4xgVOBRbMieZAZqBVxbb5Yff` |
 | Vercel project | `wechat-chat-coach`, ID `prj_Myp1rpSCT0zKPGGAQL2RnakDV8Q0` |
 | Supabase organization | `PaiDaxinAxin's Org`, ID `snqynvmeojjevydxevgv` |
@@ -49,3 +49,11 @@ The `91c9b12c910fb8187dfad5c341582e365b6c312e` follow-up fixes browser-test read
 A bounded one-call Agnes check accepted an inline synthetic PNG screenshot and recognized its Chinese text and emoji. This establishes this gateway input path, not general OCR or relationship-assessment accuracy. Hosted persistence checks made zero provider calls. Browser behavior is established by isolated synthetic journeys; no real dating outcome is claimed. Required GitHub checks and the final reviewed revision are recorded in PR #13 before merge.
 
 References: [Supabase connections](https://supabase.com/docs/guides/database/connecting-to-postgres), [Supabase TLS](https://supabase.com/docs/guides/platform/ssl-enforcement), [Vercel Node runtime](https://vercel.com/docs/functions/runtimes/node-js), [Vercel Authentication](https://vercel.com/docs/deployment-protection/methods-to-protect-deployments/vercel-authentication).
+
+## Authorized owner-preview update — 2026-10-02
+
+Following the owner's request to push the latest changes to the cloud, reviewed application revision `0cf1f17b302bf60204fb1cbe79c07a6a94067459` was deployed to the existing Leon project as `dpl_GDBQH99UBKPBaHQhtQWD68vtcmUz`. The supported entry is [the updated owner preview](https://wechat-chat-coach-3eof6o9kk-leon-using-s-projects.vercel.app). Vercel reports READY, Preview, Node 24, function region `hnd1`. All four required CI jobs passed for this application revision in run `36982830944`; the subsequent delivery-record commit changes documentation only. No merge or public production promotion was performed.
+
+Before deployment, the existing idempotent account/knowledge initializers and runtime grants added `reply_daily_usage`, message annotation fields, copy-receipt annotation revisions and reply-reservation fields within `chat_coach`. The six new columns, runtime access and daily-usage RLS were read back. The complete G5–G8 additions were published append-only against the observed G4 cloud hash; all 63,674 UTF-8 bytes exactly match local hash `2a5ae254b8361da078158be6c9fbb3e629cb682cc39441c2e0f1945e61bf610c`. No unrelated application schema or existing credential was replaced.
+
+Hosted acceptance verified Vercel protection redirects, owner session and wrong-origin checks, all three static assets, new API fields and independent PostgreSQL persistence. HTML has the original exact bytes followed only by Vercel's known deployment-specific preview-toolbar script; JavaScript and CSS match byte-for-byte. A disposable synthetic counterpart, message, annotation and meeting were written, independently read and removed. Three list/detail refresh cycles added zero model jobs. The runtime role cannot read tables in `public` or `knowledge_hub`; private file paths and unauthenticated MCP remain closed. These checks made zero provider calls and do not claim real-model or real-chat outcome validation. Local demo data was not imported into the cloud account.
