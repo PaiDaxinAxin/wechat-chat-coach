@@ -4,7 +4,7 @@ The owner requested one simulated WeChat conversation on 2026-09-30: the counter
 
 ## Reference and scope
 
-Read-only source: [LYNCA Design Standard 1.3.0](https://linear.app/lynca/document/infralynca-design-standard-505c197ca09a), effective 2026-09-29, canonical `updatedAt` `2026-09-29T14:13:47.813Z`. Its less-is-more hierarchy, truthful states, typography roles, keyboard access, minimum touch targets and restrained composition apply here. The implementation reference is the owner-export-checked Nocturne snapshot of 2026-09-07 and LYNCA overlays.
+Read-only source: [LYNCA Design Standard 1.4.0](https://linear.app/lynca/document/infralynca-design-standard-505c197ca09a), effective 2026-10-02, canonical `updatedAt` `2026-10-02T14:47:48.520Z`. Its less-is-more hierarchy, truthful states, typography roles, keyboard access, minimum touch targets and restrained composition apply here. The implementation reference is the owner-export-checked Nocturne snapshot of 2026-09-07 and LYNCA overlays.
 
 The personal project's visual values have one implementation home, `web/styles.css`. Night base roles, spacing, radii and font stacks follow the reference. The day palette and accent-tinted speaker bubbles are scoped product decisions for this chat demo, rather than changes to the company's design system. The same hierarchy and controls apply to both themes. Chat bubbles and compact controls use the UI font stack; long reading/display retains the serif role. No remote font dependency or glass chrome is required.
 
@@ -130,3 +130,15 @@ Generated and restored suggestions scroll to their beginning inside the conversa
 Routine success notices dismiss after five seconds; errors and active progress remain available. A newer message cancels the older notice's timer. Copying a reply uses local button feedback, without a page-wide success banner.
 
 Deleting an edited message restores the preceding composer draft. Failed deletion preserves the edit. Late deletion results for one counterpart preserve another counterpart's current fields, reply draft and focus; stale detail responses cannot restore a deleted counterpart. These changes add no provider calls or persistence contracts. Isolated browser regressions cover desktop and narrow layouts, refresh/switch restoration, clipboard delays and deletion races.
+
+## Clear affordances and next-step guidance — 2026-10-02
+
+The owner found controls discoverable only on hover, weak next-action guidance and broken interaction states in both day and night themes. Following LYNCA Design Standard 1.4.0 interaction-state rules (§5.1), controls now use four tiers: Solid for primary actions, Outline for secondary actions and menu triggers, accent text with a chevron for disclosures/links, and full-width borderless menu rows. Disabled labels use explicit colors and dashed control borders rather than faded opacity; keyboard focus and 44px targets remain.
+
+The shared token block adds `--color-control-line`, `--color-hover`, `--color-press`, `--color-accent-strong` and `--color-disabled-text` for each theme. Explicit alpha overlays replace accent-soft hover fills; no application `color-mix()` is used. Hover applies only to fine pointers that support it. Touch uses the same visible rest affordances. The selected directory row retains its static accent-soft fill with an accent inline-start indicator.
+
+Exactly one action in record → advice → copy is highlighted, or none while the current model call is preparing without a composer draft. A persistent, wrapping hint above the composer identifies the next step from existing context, input and copy receipts. Timing and keyboard help share one muted line. These DOM-derived cues add no requests or storage.
+
+Message annotations open through `⋯ → 添加批注 / 编辑批注`, with focus in the existing editor. Empty closed annotations stay hidden; saved background retains the `批注 · 已补背景` disclosure. Draft, pending-save, error and focus recovery remain intact.
+
+`npm run test:affordance` checks rest/hover contrast, disabled labels, the single-highlighted loop and annotation focus/save behavior in day/night at 1440×900 and 390×844. It retains screenshots in its temporary run directory and uses isolated synthetic data, a knowledge copy and injected providers with zero paid calls.

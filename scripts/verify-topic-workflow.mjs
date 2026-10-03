@@ -67,6 +67,10 @@ try {
     await action(); const response = await waiting, body = await response.json(); assert.equal(response.status(), 200, JSON.stringify(body)); return body.data;
   }
   const note = () => page.locator(`[data-message-id="${original.id}"] .message-annotation`);
+  async function openAnnotation() {
+    await note().locator('..').locator('.message-menu > summary').click();
+    await note().locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
+  }
   async function ready() { await page.locator('#counterpart-workspace').waitFor({ state: 'visible' }); await page.waitForFunction(() => !document.getElementById('coach-panel').getAttribute('aria-busy') || document.getElementById('coach-panel').getAttribute('aria-busy') === 'false'); }
   async function detail() { return (await (await context.request.get(`${origin}/api/counterparts/${person.id}`)).json()).data; }
   await page.goto(origin); await page.locator('#username').fill(user.username); await page.locator('#password').fill(password);
@@ -98,7 +102,7 @@ try {
   await perform('/copied', 'POST', () => page.locator('#copy-reply').click());
   await page.waitForFunction(() => !document.getElementById('copy-reply').disabled);
   await page.locator('#message-text').fill('尚未提交的新消息草稿。');
-  await note().locator('summary').click(); await note().locator('textarea').fill('线下聊过，这是我补充的背景。');
+  await openAnnotation(); await note().locator('textarea').fill('线下聊过，这是我补充的背景。');
   const held = deferred(), started = deferred();
   const annotationUrl = `${origin}/api/counterparts/${person.id}/messages/${original.id}/annotation`;
   await page.route(annotationUrl, async (route) => { if (route.request().method() === 'PATCH') { started.resolve(); await held.promise; } await route.continue(); });
@@ -120,7 +124,7 @@ try {
   await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
   await perform('/classify', 'POST', () => page.locator('#classify').click()); await ready();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
-  await note().locator('summary').click();
+  await openAnnotation();
   await note().locator('textarea').fill('失败时仍保留的背景草稿。');
   await page.route(annotationUrl, (route) => route.fulfill({ status: 503, contentType: 'application/json', json: { error: { code: 'SYNTHETIC_FAILURE', message: '合成保存失败。' } } }));
   await note().locator('button[type=submit]').click(); await note().locator('.form-error').waitFor({ state: 'visible' });
@@ -161,8 +165,9 @@ try {
     for (const width of [1280, 320]) {
       await page.setViewportSize({ width, height: 950 });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+      await openAnnotation();
       const summary = note().locator('summary'); await summary.scrollIntoViewIfNeeded(); await summary.focus();
-      if (!await note().evaluate((element) => element.open)) await page.keyboard.press('Enter');
+      assert.equal(await note().evaluate((element) => element.open), true);
       assert.ok((await summary.boundingBox()).height >= 44);
       await page.keyboard.press('Tab'); assert.equal(await page.evaluate(() => document.activeElement.matches('.message-annotation textarea')), true);
       await page.screenshot({ path: join(evidenceDir, `${width}-${theme}.png`), fullPage: true });
@@ -173,7 +178,7 @@ try {
   await page.setViewportSize({ width: 1280, height: 950 });
   const late = deferred(), applied = deferred();
   await page.route(annotationUrl, async (route) => { const response = await route.fetch(); applied.resolve(); await late.promise; await route.fulfill({ response }); });
-  if (!await note().evaluate((element) => element.open)) await note().locator('summary').click();
+  if (!await note().evaluate((element) => element.open)) await openAnnotation();
   await note().locator('textarea').fill('迟到保存的独立背景。'); clock += 10;
   const lateResponse = page.waitForResponse((r) => r.url() === annotationUrl && r.request().method() === 'PATCH');
   await note().locator('button[type=submit]').click(); await applied.promise;

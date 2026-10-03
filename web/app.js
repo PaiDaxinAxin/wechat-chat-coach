@@ -263,6 +263,54 @@ function updateComposer() {
   $('message-image-description').textContent = state.composerImage?.interpretation?.description || '';
   $('message-image-uncertainty').textContent = state.composerImage?.interpretation?.uncertainty || '';
   for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
+  updateNextStep();
+}
+function updateNextStep() {
+  const actions = { record: $('save-message'), advise: $('direct-reply'), copy: $('copy-reply') };
+  const hint = $('next-step');
+  let step = null, text = '', preparing = false;
+  if (state.selectedId && state.detail?.counterpart.id === state.selectedId) {
+    const hasContent = Boolean($('message-text').value.trim() || state.composerImage || state.editingMessageId);
+    const context = currentContextKey();
+    const busy = state.modelCalls.has(context) || state.planCalls.has(context)
+      || state.imageCalls.get(JSON.stringify([state.me?.user.id, state.selectedId]))?.context === context;
+    const suggestion = currentSuggestion(), reply = $('suggestion-text').value.trim();
+    const feedback = state.copyFeedback;
+    const acknowledged = feedback && feedback.userId === state.me?.user.id && feedback.counterpartId === state.selectedId
+      && feedback.visit === state.conversationVisit && feedback.suggestionId === suggestion?.id && feedback.text === $('suggestion-text').value;
+    const hasCopyReceipt = suggestion && (suggestion.pendingCopyReceiptId && suggestion.pendingReplyText?.trim() === reply
+      || state.copyReceipts.has(JSON.stringify([state.me?.user.id, state.selectedId, suggestion.id, reply])));
+    const copied = hasCopyReceipt || acknowledged;
+    const prerequisite = coachPrerequisite();
+    const quotaExhausted = state.me?.quota?.dailyReplyRemaining === 0;
+    const needsQuestionnaire = state.me?.requiresQuestionnaireUpdate || state.me?.profile?.requiresQuestionnaireUpdate;
+    if (hasContent) {
+      step = 'record';
+      text = `下一步：点「${actions.record.textContent}」或按 Enter`;
+    } else if (busy) {
+      preparing = true;
+      text = 'AI 正在准备，完成后这里会提示下一步';
+    } else if (isPendingSuggestion(suggestion) && reply && !hasCopyReceipt && !acknowledged) {
+      step = 'copy';
+      text = '下一步：改成你的说法，点「复制回复」后发到微信';
+    } else if (!prerequisite && !suggestion && !quotaExhausted && state.detail.messages?.at(-1)?.speaker === 'other') {
+      step = 'advise';
+      text = '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」';
+    } else {
+      step = 'record';
+      text = needsQuestionnaire ? prerequisite : !state.detail.messages?.some(({ speaker }) => speaker === 'other')
+        ? '下一步：把对方的一句原话贴到下方'
+        : copied ? '下一步：发到微信后，等对方回复，把原话贴到下方'
+          : isNoReplySuggestion(suggestion) ? '下一步：这轮先不回；对方再发消息时贴到下方'
+            : quotaExhausted && !suggestion && state.detail.messages?.at(-1)?.speaker === 'other'
+              ? '下一步：今日免费建议已用完；自己回复后，把发出的话记为「我已发送的消息」'
+              : `下一步：等对方回复，把原话贴到下方${quotaExhausted ? '（今日免费建议已用完）' : ''}`;
+    }
+  }
+  for (const [name, action] of Object.entries(actions)) action.classList.toggle('is-next', name === step);
+  if (hint.textContent !== text) hint.textContent = text;
+  hint.hidden = !text;
+  hint.classList.toggle('is-preparing', preparing);
 }
 async function attachMessageImage(file) {
   if (!file || $('add-message-image').disabled) return;
@@ -285,7 +333,7 @@ async function readComposerImage(scope) {
   if (state.imageCalls.has(callKey)) return;
   const key = JSON.stringify(['image-read', scope.userId, id, image.id, submitted.meaning.trim()]);
   if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
-  const call = { imageId: image.id }, context = currentContextKey(); state.imageCalls.set(callKey, call); updateComposer();
+  const context = currentContextKey(), call = { imageId: image.id, context }; state.imageCalls.set(callKey, call); updateComposer();
   const request = { key, id: state.requestIds.get(key) };
   try {
     const data = await modelPost(`${counterpartPath(id)}/image-read`, { image: image.dataUrl, explanation: submitted.meaning.trim() }, request, () => state.me?.user.id === scope.userId && state.selectedId === id && currentContextKey() === context && state.imageCalls.get(callKey) === call && state.composerImage === image && $('message-meaning').value.trim() === submitted.meaning.trim());
@@ -783,6 +831,13 @@ function renderTranscript() {
   $('transcript').replaceChildren(...messages.map((message) => {
     const controls = el('details', { class: 'message-menu chat-menu' });
     controls.append(el('summary', { 'aria-label': `${message.speaker === 'self' ? '我的' : '对方的'}消息操作` }, '⋯'), el('div', { class: 'chat-menu-items' },
+      el('button', { class: 'quiet-button', type: 'button', onclick: () => {
+        controls.open = false;
+        const note = controls.closest('.message').querySelector('.message-annotation');
+        state.annotationOpen.add(note.dataset.annotationKey);
+        note.hidden = false; note.open = true;
+        note.querySelector('textarea').focus();
+      } }, message.annotation?.text ? '编辑批注' : '添加批注'),
       el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => { controls.open = false; editMessage(message); } }, '编辑'),
       el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', 'data-edit-time': '', disabled: state.timeCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])), onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
       el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => { closeMenu(controls, { restoreFocus: true }); void perform(event.currentTarget, '删除中…', () => deleteMessage(message)); } }, '删除')));
@@ -806,17 +861,22 @@ function messageAnnotation(message) {
   const key = JSON.stringify([userId, id, message.id]);
   const note = el('details', { class: 'message-annotation', 'data-annotation-key': key });
   note.open = state.annotationOpen.has(key);
+  const updateVisibility = () => { note.hidden = !message.annotation?.text && !note.open && !state.annotationDrafts.has(key) && !state.annotationCalls.has(key) && !state.annotationErrors.has(key); };
+  updateVisibility();
   const summary = el('summary', {}, message.annotation?.text ? '批注 · 已补背景' : '批注');
   const input = el('textarea', { rows: '2', maxlength: '5000', 'aria-label': '这条消息的背景批注', placeholder: '如：这句话接着线下的话题；她当时是在开玩笑。我的补充，不是对方原话。' });
   input.value = state.annotationDrafts.get(key)?.text ?? message.annotation?.text ?? '';
   const form = el('form', { class: 'message-annotation-form' }, el('label', {}, '背景批注 · 本人补充', input));
   const save = el('button', { class: 'quiet-button', type: 'submit', disabled: state.annotationCalls.has(key) }, state.annotationCalls.has(key) ? '保存批注…' : '保存批注');
   save.dataset.locked = String(state.annotationCalls.has(key));
-  const close = el('button', { class: 'quiet-button', type: 'button', onclick: () => { note.open = false; state.annotationOpen.delete(key); summary.focus({ preventScroll: true }); } }, '收起');
+  const close = el('button', { class: 'quiet-button', type: 'button', onclick: () => {
+    note.open = false; state.annotationOpen.delete(key); updateVisibility();
+    (message.annotation?.text ? summary : note.closest('.message').querySelector('.message-menu > summary')).focus({ preventScroll: true });
+  } }, '收起');
   form.append(el('div', { class: 'button-row' }, save, close), el('p', { class: 'small muted' }, '只补充背景，不改原话；清空并保存可移除。'));
   if (state.annotationErrors.has(key)) form.append(el('p', { class: 'form-error', role: 'alert' }, state.annotationErrors.get(key)));
   input.addEventListener('input', () => state.annotationDrafts.set(key, { text: input.value }));
-  note.addEventListener('toggle', () => { if (note.isConnected && state.me?.user.id === userId && state.selectedId === id) { if (note.open) state.annotationOpen.add(key); else state.annotationOpen.delete(key); } });
+  note.addEventListener('toggle', () => { if (note.isConnected && state.me?.user.id === userId && state.selectedId === id) { if (note.open) state.annotationOpen.add(key); else state.annotationOpen.delete(key); updateVisibility(); } });
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     if (state.annotationCalls.has(key)) return;
@@ -1204,6 +1264,7 @@ function renderFieldCoach(classification) {
 }
 function planDraftKey() { return JSON.stringify([state.me?.user.id, state.selectedId]); }
 function renderFieldCoachPlan() {
+  updateNextStep();
   const key = planDraftKey();
   $('field-coach-plan').value = state.planDrafts.get(key) || '';
   const busy = state.planCalls.has(currentContextKey());
@@ -1250,6 +1311,7 @@ function updateCoachBusy() {
   $('change-topic').disabled = Boolean(busy) || Boolean(coachPrerequisite());
   renderClassification(state.detail?.classification);
   renderSuggestion();
+  updateNextStep();
 }
 function coachPrerequisite() {
   if (!state.me || !state.detail || !state.selectedId) return '先添加一位聊天对象，填一个称呼即可。';
@@ -1418,6 +1480,7 @@ function renderSuggestion() {
   $('reply-wait-reason').textContent = noReply ? `现在不回的依据：${suggestion.reason || '具体依据待判断。'}` : '';
   updateReplyCopyState();
   updateSentState(); updateComposer(); renderFieldCoach(state.detail?.classification);
+  updateNextStep();
 }
 function isNoReplySuggestion(suggestion) { return ['wait', 'pause'].includes(suggestion?.action); }
 function updateReplyCopyState() {
@@ -1431,6 +1494,7 @@ function updateReplyCopyState() {
   $('copy-reply').textContent = copied ? '已复制' : copying ? '复制中…' : '复制回复';
   $('copy-reply').disabled = disabled;
   $('copy-reply').dataset.locked = String(disabled);
+  updateNextStep();
 }
 function showCopyFeedback(feedback) {
   if (feedback.userId !== state.me?.user.id || feedback.counterpartId !== state.selectedId
@@ -1819,7 +1883,7 @@ $('remove-message-image').addEventListener('click', () => { state.composerImage 
 $('message-meaning').addEventListener('input', () => rememberComposer({ changed: true }));
 $('message-text').addEventListener('paste', (event) => { const file = [...(event.clipboardData?.items || [])].find((item) => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile(); if (file && !$('add-message-image').disabled) { event.preventDefault(); void attachMessageImage(file); } });
 $('message-speaker').addEventListener('change', () => { rememberComposer({ changed: true }); updateComposer(); });
-$('message-text').addEventListener('input', () => rememberComposer({ changed: true }));
+$('message-text').addEventListener('input', () => { rememberComposer({ changed: true }); updateNextStep(); });
 $('message-text').addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
   event.preventDefault();

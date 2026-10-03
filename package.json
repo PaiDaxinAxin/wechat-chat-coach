@@ -23,7 +23,8 @@
     "test:recovery": "node scripts/verify-recovery.mjs",
     "test:coach-updates": "node scripts/verify-coach-updates.mjs",
     "test:context-learning": "node scripts/verify-context-learning.mjs",
-    "test:directory": "node scripts/verify-directory.mjs"
+    "test:directory": "node scripts/verify-directory.mjs",
+    "test:affordance": "node scripts/verify-affordance.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",

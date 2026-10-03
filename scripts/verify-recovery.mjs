@@ -203,7 +203,9 @@ try {
     } else {
       const record = server.betaStore.listMessages(f.user.id, f.person.id)[0];
       const note = f.page.locator(`[data-message-id="${record.id}"] .message-annotation`);
-      await note.locator('summary').click(); await note.locator('textarea').fill('本轮上下文已变更。');
+      await note.locator('..').locator('.message-menu > summary').click();
+      await note.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
+      await note.locator('textarea').fill('本轮上下文已变更。');
       const saved = f.page.waitForResponse((response) => response.url().endsWith('/annotation') && response.request().method() === 'PATCH');
       await note.locator('button[type=submit]').click(); assert.equal((await saved).status(), 200);
       await f.page.waitForFunction(() => [...document.querySelectorAll('.message-annotation button[type=submit]')].every((button) => !button.disabled));
@@ -224,7 +226,9 @@ try {
   assert.equal(obsoleteError.controller.calls.reply, 2);
   const annotatedMessage = server.betaStore.listMessages(obsoleteError.user.id, obsoleteError.person.id)[0];
   const annotation = obsoleteError.page.locator(`[data-message-id="${annotatedMessage.id}"] .message-annotation`);
-  await annotation.locator('summary').click(); await annotation.locator('textarea').fill('失败后补充的全新背景。');
+  await annotation.locator('..').locator('.message-menu > summary').click();
+  await annotation.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
+  await annotation.locator('textarea').fill('失败后补充的全新背景。');
   const annotationSaved = obsoleteError.page.waitForResponse((response) => response.url().endsWith('/annotation') && response.request().method() === 'PATCH');
   await annotation.locator('button[type=submit]').click(); assert.equal((await annotationSaved).status(), 200);
   await obsoleteError.page.locator('#coach-error').waitFor({ state: 'hidden' });

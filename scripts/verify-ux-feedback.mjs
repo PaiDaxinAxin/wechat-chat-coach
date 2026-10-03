@@ -209,7 +209,8 @@ try {
   // A normal save produces success; its timer must not erase a later failure.
   async function saveAnnotation(text) {
     const annotation = page.locator('.message-annotation').first();
-    await annotation.evaluate((node) => { node.open = true; });
+    await annotation.locator('..').locator('.message-menu > summary').click();
+    await annotation.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
     await annotation.locator('textarea').fill(text);
     const response = page.waitForResponse((r) => r.url().endsWith('/annotation') && r.request().method() === 'PATCH');
     await annotation.locator('button[type=submit]').click(); assert.equal((await response).status(), 200);
