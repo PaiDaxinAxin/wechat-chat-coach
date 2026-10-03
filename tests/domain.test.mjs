@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   QUESTIONNAIRES, QUESTIONNAIRE_VERSION, ProfileInputSchema, CounterpartInputSchema, MeetingInputSchema,
-  validateProfile, analyzeQuestionnaire, buildChatContext, computeHeat, rankTopThree,
+  validateProfile, analyzeQuestionnaire, buildChatContext, computeHeat, rankTopThree, heatContextsCompatible,
   cleanFeedback, reviewFeedback, redactSensitive, buildFeedbackKnowledgeSupplement, DomainError,
 } from '../src/domain.mjs';
 
@@ -32,15 +32,38 @@ test('original questionnaire inventory has complete, distinct short/full items',
   assert.equal(QUESTIONNAIRES.short.filter(({ reverse }) => reverse).length, 5);
 });
 
-test('complete answers are required and full questionnaire is enforced by plan', () => {
+test('optional profiles and partial answers preserve the paid full-questionnaire restriction', () => {
+  const blank = { background: '', style: '', growthGoals: '', relationshipGoal: '', questionnaire: null };
+  assert.deepEqual(ProfileInputSchema.parse({}), blank);
+  assert.deepEqual(ProfileInputSchema.parse({ background: '  ', questionnaire: null }), blank);
+  assert.equal(validateProfile({}, 'free').questionnaireHypotheses, null);
   assert.equal(validateProfile(profile(), 'free').questionnaireVersion, QUESTIONNAIRE_VERSION);
   assert.throws(() => validateProfile(profile('full'), 'free'), { code: 'FULL_QUESTIONNAIRE_PAID_ONLY' });
   assert.equal(validateProfile(profile('full'), 'paid').questionnaire.kind, 'full');
+  const partial = { questionnaire: { kind: 'short', answers: { s02: 1 } } };
+  assert.deepEqual(validateProfile(partial, 'free').questionnaire, partial.questionnaire);
+  for (const answers of [{}, { f02: 1 }]) {
+    const value = { questionnaire: { kind: 'full', answers } };
+    assert.throws(() => validateProfile(value, 'free'), { code: 'FULL_QUESTIONNAIRE_PAID_ONLY' });
+    assert.deepEqual(validateProfile(value, 'paid').questionnaire.answers, answers);
+  }
+});
+
+test('partial questionnaires still reject foreign question IDs, invalid answers and injected fields', () => {
   for (const modify of [
-    (value) => { delete value.questionnaire.answers.s01; },
     (value) => { value.questionnaire.answers.injected = 3; },
+    (value) => { value.questionnaire.answers.f01 = 3; },
     (value) => { value.questionnaire.answers.s01 = 0; },
+    (value) => { value.questionnaire.answers.s01 = 6; },
     (value) => { value.questionnaire.answers.s01 = 2.5; },
+    (value) => { value.questionnaire.answers.s01 = '3'; },
+    (value) => { value.questionnaire.answers.s01 = null; },
+    (value) => { value.questionnaire.answers = []; },
+    (value) => { delete value.questionnaire.kind; },
+    (value) => { delete value.questionnaire.answers; },
+    (value) => { value.questionnaire.kind = 'mbti'; },
+    (value) => { value.background = null; },
+    (value) => { value.style = 'a'.repeat(10_001); },
     (value) => { value.plan = 'paid'; },
   ]) {
     const value = profile(); modify(value);
@@ -55,6 +78,49 @@ test('custom dimension summaries remain hypotheses and reverse answers are handl
   assert.equal(result.dimensions.directness.status, 'hypothesis');
   assert.equal(result.dimensions.directness.basis, 'self_report');
   assert.match(result.interpretation, /not a validated personality test/);
+});
+
+test('unanswered items stay unknown rather than neutral or invented personality evidence', () => {
+  for (const value of [undefined, null, { kind: 'short', answers: {} }, { kind: 'full', answers: {} }]) {
+    assert.equal(analyzeQuestionnaire(value), null);
+  }
+  const result = analyzeQuestionnaire({ kind: 'short', answers: { s02: 1, s05: 4 } });
+  assert.equal(result.dimensions.directness.mean, 5, 'Only the answered reverse item contributes');
+  assert.equal(result.dimensions.directness.itemCount, 1);
+  assert.equal(result.dimensions.playfulness.mean, 4);
+  assert.equal(result.dimensions.playfulness.itemCount, 1);
+  for (const dimension of ['warmth', 'curiosity', 'pacing']) {
+    assert.equal(result.dimensions[dimension].mean, null);
+    assert.equal(result.dimensions[dimension].itemCount, 0);
+    assert.equal(result.dimensions[dimension].status, 'unknown');
+  }
+  for (const value of [{ kind: 'short', answers: { f01: 3 } }, { kind: 'full', answers: { f01: 99 } }]) {
+    assert.throws(() => analyzeQuestionnaire(value), { code: 'INVALID_QUESTIONNAIRE' });
+  }
+});
+
+test('null and gradually supplied profiles reach full context without invented answers', () => {
+  for (const value of [undefined, null, {}]) {
+    const context = buildChatContext(value, { alias: '虚构对象' }, messages);
+    const user = JSON.parse(context.userProfile), other = JSON.parse(context.counterpartProfile);
+    assert.equal(user.background, ''); assert.equal(user.currentStyle, '');
+    assert.equal(user.questionnaire, null); assert.equal(user.questionnaireHypotheses, null);
+    assert.match(user.interpretationRule, /unknown; do not infer personality from blank fields/);
+    assert.equal(other.channel, 'other'); assert.equal(other.previousRounds, null, 'An unreported round count stays unknown');
+    assert.deepEqual(context.messages, messages, 'Missing registration data never truncates the real chat');
+  }
+  const partial = { background: '本人补充：在杭州做设计。', questionnaire: { kind: 'short', answers: { s02: 1, s05: 4 } } };
+  const before = structuredClone(partial);
+  const context = buildChatContext(partial, { alias: '虚构对象', channel: 'app', background: '认识两天。' }, messages);
+  const user = JSON.parse(context.userProfile);
+  assert.equal(user.background, partial.background);
+  assert.equal(user.currentStyle, '');
+  assert.deepEqual(user.questionnaire.answers, QUESTIONNAIRES.short.filter(({ id }) => Object.hasOwn(partial.questionnaire.answers, id)).map((item) => ({ ...item, answer: partial.questionnaire.answers[item.id] })));
+  assert.equal(user.questionnaire.answers.length, 2);
+  assert.equal(user.questionnaireHypotheses.dimensions.warmth.status, 'unknown');
+  assert.deepEqual(partial, before, 'Context building never fills the original partial profile');
+  assert.equal(JSON.parse(buildChatContext({ questionnaire: { kind: 'short', answers: {} } }, { alias: '虚构对象' }, messages).userProfile).questionnaireHypotheses, null);
+  assert.throws(() => buildChatContext('invalid profile', { alias: '虚构对象' }, messages), { code: 'PROFILE_REQUIRED' });
 });
 
 test('all background, actual style, goals and original full answers reach model context', () => {
@@ -78,9 +144,58 @@ test('all background, actual style, goals and original full answers reach model 
   assert.throws(() => buildChatContext(value, counterpart(), [messages[0], messages[0]]), { code: 'INVALID_MESSAGES' });
 });
 
-test('channel background and confirmed meeting require the applicable details', () => {
-  assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), appProfile: '' }).success, false);
-  assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), channel: 'offline', offlineScene: '' }).success, false);
+test('manual meeting facts carry their message boundary without private receipt metadata', () => {
+  const meeting = { status: 'confirmed', time: '周六下午', place: '咖啡店', note: '本人刚刚补录的安排。' };
+  const boundary = { source: 'user_recorded_meeting', messageIdsAtSave: ['m1'] };
+  const context = buildChatContext(null, { alias: '虚构对象' }, messages, { meeting, manualMeetingBoundary: boundary });
+  const other = JSON.parse(context.counterpartProfile);
+  assert.deepEqual(other.meeting, meeting);
+  assert.deepEqual(other.manualMeetingBoundary, boundary);
+  assert.match(other.manualMeetingRule, /predate that save and cannot overwrite it/);
+  assert.match(other.manualMeetingRule, /Only new conversation evidence/);
+  assert.match(other.manualMeetingRule, /not consent to intimacy/);
+  assert.deepEqual(context.messages, messages, 'Earlier messages are retained rather than suppressed');
+  for (const status of ['none', 'declined']) {
+    const cancelled = JSON.parse(buildChatContext(null, { alias: '虚构对象' }, messages, { meeting: { status }, manualMeetingBoundary: boundary }).counterpartProfile);
+    assert.equal(cancelled.meeting.status, status, 'Manual clearing and cancellation receive the same boundary protection');
+  }
+  const legacy = JSON.parse(buildChatContext(null, { alias: '虚构对象' }, messages, { meeting, manualMeetingBoundary: { ...boundary, messageIdsAtSave: null } }).counterpartProfile);
+  assert.equal(legacy.manualMeetingBoundary.messageIdsAtSave, null);
+  assert.match(legacy.manualMeetingRule, /save boundary is unknown/);
+  assert.equal(Object.hasOwn(JSON.parse(buildChatContext(null, { alias: '虚构对象' }, messages, { meeting }).counterpartProfile), 'manualMeetingBoundary'), false);
+  for (const invalid of [{ ...boundary, source: 'model_guess' }, { ...boundary, receipt: 'private-receipt' }, { ...boundary, messageIdsAtSave: ['m1', 'm1'] }, { ...boundary, messageIdsAtSave: [''] }, { ...boundary, messageIdsAtSave: 'm1' }, null]) {
+    assert.throws(() => buildChatContext(null, { alias: '虚构对象' }, messages, { meeting, manualMeetingBoundary: invalid }), { code: 'INVALID_MEETING_BOUNDARY' });
+  }
+  assert.throws(() => buildChatContext(null, { alias: '虚构对象' }, messages, { manualMeetingBoundary: boundary }), { code: 'INVALID_MEETING_BOUNDARY' });
+});
+
+test('message annotations remain user-sourced complete context and cleared receipts preserve cache identity', () => {
+  const receipt = { annotationRevision: 2, annotationUpdatedAt: '2026-10-01T10:00:00.000Z' };
+  const annotated = { ...messages[0], ...receipt, annotation: { text: '本人补充的线下背景，不是对方原话。', source: 'user_annotation', updatedAt: receipt.annotationUpdatedAt } };
+  const context = buildChatContext(profile(), counterpart(), [annotated]);
+  assert.deepEqual(context.messages, [annotated]);
+  const cleared = buildChatContext(profile(), counterpart(), [{ ...messages[0], ...receipt }]);
+  assert.deepEqual(cleared.messages[0], { ...messages[0], ...receipt });
+  assert.notDeepEqual(cleared.messages, buildChatContext(profile(), counterpart(), [messages[0]]).messages);
+  assert.throws(() => buildChatContext(profile(), counterpart(), [{ ...annotated, annotation: { ...annotated.annotation, source: 'other_said' } }]), { code: 'INVALID_MESSAGES' });
+  assert.equal(buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: true }).topicChangeRequested, true);
+  assert.deepEqual(buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: false }), buildChatContext(profile(), counterpart(), messages));
+  assert.throws(() => buildChatContext(profile(), counterpart(), messages, { topicChangeRequested: 'yes' }), { code: 'INVALID_TOPIC_REQUEST' });
+});
+
+test('counterparts need only an alias while confirmed meetings still require time and place', () => {
+  assert.deepEqual(CounterpartInputSchema.parse({ alias: ' 虚构对象 ' }), { alias: '虚构对象', remark: '', channel: 'other', appProfile: '', offlineScene: '', background: '', rounds: null });
+  assert.equal(CounterpartInputSchema.parse({ alias: '林禾', remark: ' 书店认识的小禾 ' }).remark, '书店认识的小禾');
+  assert.equal(CounterpartInputSchema.safeParse({ alias: '林禾', remark: '字'.repeat(201) }).success, false);
+  assert.deepEqual(buildChatContext(profile(), { ...counterpart(), remark: '书店认识的小禾' }, messages), buildChatContext(profile(), counterpart(), messages), 'Display-only remarks do not change the model context');
+  assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: null }).rounds, null);
+  assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: 0 }).rounds, 0, 'Explicit zero remains different from unknown');
+  assert.equal(CounterpartInputSchema.parse({ alias: '虚构对象', rounds: 12 }).rounds, 12);
+  assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), appProfile: '' }).success, true);
+  assert.equal(CounterpartInputSchema.safeParse({ ...counterpart(), channel: 'offline', offlineScene: '' }).success, true);
+  for (const input of [{}, { alias: ' ' }, { alias: 'a'.repeat(81) }, { alias: '虚构对象', channel: 'unknown' }, { alias: '虚构对象', rounds: -1 }, { alias: '虚构对象', rounds: 0.5 }, { alias: '虚构对象', background: null }, { alias: '虚构对象', ownerId: 'not-mine' }]) {
+    assert.equal(CounterpartInputSchema.safeParse(input).success, false);
+  }
   assert.equal(MeetingInputSchema.safeParse({ status: 'confirmed', time: '周六下午', place: '' }).success, false);
   assert.equal(MeetingInputSchema.safeParse({ status: 'confirmed', time: '周六下午', place: '市中心的咖啡店' }).success, true);
 });
@@ -103,6 +218,74 @@ test('multiple dimensions and independent observations are needed, rather than o
   assert.equal(sparse.score, null);
   assert.equal(sparse.trend.status, 'unknown');
   assert.equal(computeHeat(classification({ responseEngagement: 'positive', personalInterest: 'positive' })).status, 'potential');
+});
+
+test('a first analyzed greeting or engaged message gets a broad working range without a numeric score or top-three promotion', () => {
+  const first = { id: 'first', speaker: 'other', text: '你好' };
+  const context = buildChatContext(profile(), counterpart(), [first]);
+  assert.equal(computeHeat(null, { context }).preliminaryRange, null, 'A pasted message is not an analyzed observation');
+  assert.equal(computeHeat(classification(), { context }).preliminaryRange, null);
+  const passive = classification({ responseEngagement: 'passive' }, { confidence: 'limited' });
+  passive.heat.responseEngagement.evidenceIds = [first.id];
+  const low = computeHeat(passive, { context });
+  assert.deepEqual(low.preliminaryRange, { lower: 10, upper: 45, label: '偏低投入', basis: 'observed_dimensions', evidenceIds: ['first'], provisional: true });
+  assert.equal(low.status, 'insufficient_evidence'); assert.equal(low.score, null);
+  assert.equal(low.dimensions.personalInterest.level, 'unknown');
+  const positive = classification({ activeInteraction: 'positive', responseEngagement: 'positive' });
+  for (const dimension of Object.values(positive.heat)) if (dimension.level !== 'unknown') dimension.evidenceIds = [first.id];
+  const engaged = computeHeat(positive, { context });
+  assert.deepEqual(engaged.preliminaryRange, { lower: 35, upper: 75, label: '积极互动', basis: 'observed_dimensions', evidenceIds: ['first'], provisional: true });
+  assert.equal(engaged.score, null); assert.equal(engaged.status, 'insufficient_evidence');
+  assert.deepEqual(rankTopThree([{ id: 'first-person', heat: engaged }]), []);
+  assert.match(engaged.scoreMeaning, /not statistical confidence intervals or consent/);
+  for (const text of ['?', '字'.repeat(1_000), '😂', '对方一句简短但结合背景积极的话']) {
+    const other = buildChatContext(profile(), counterpart(), [{ ...first, text }]);
+    assert.deepEqual(computeHeat(passive, { context: other }).preliminaryRange, low.preliminaryRange, 'Range selection uses observed dimensions, never punctuation or text length');
+  }
+});
+
+test('preliminary ranges preserve a mature baseline across sparse turns and stop at explicit negative resistance', () => {
+  const context = buildChatContext(profile(), counterpart(), [...Array.from({ length: 5 }, (_, index) => ({ id: `m${index + 1}`, speaker: 'other', text: '虚构先前的完整互动。' })), { id: 'last', speaker: 'other', text: '哈哈' }]);
+  const established = computeHeat(classification({ activeInteraction: 'positive', responseEngagement: 'positive', personalInterest: 'positive', reciprocalFlirting: 'positive' }), { context });
+  assert.equal(established.score, 67);
+  assert.deepEqual(established.preliminaryRange, { lower: 52, upper: 82, label: '综合初判', basis: 'observed_dimensions', evidenceIds: established.evidenceIds, provisional: true });
+  const isolated = classification({ responseEngagement: 'negative' }); isolated.heat.responseEngagement.evidenceIds = ['last'];
+  const sparse = computeHeat(isolated, { context, history: [established] });
+  assert.equal(sparse.score, null); assert.equal(sparse.preliminaryRange.basis, 'historical_baseline');
+  assert.equal(sparse.preliminaryRange.label, '参考此前互动');
+  assert.deepEqual([sparse.preliminaryRange.lower, sparse.preliminaryRange.upper], [52, 82]);
+  assert.deepEqual(sparse.preliminaryRange.evidenceIds, established.evidenceIds);
+  assert.deepEqual(computeHeat(classification(), { context, history: [sparse] }).preliminaryRange, sparse.preliminaryRange, 'Several sparse turns retain rather than erase the same observed baseline');
+  assert.equal(computeHeat(null, { context, history: [established] }).preliminaryRange, null);
+  assert.equal(computeHeat(undefined, { context, history: [established] }).preliminaryRange, null, 'No fresh analyzed classification is never replaced with a guessed historical result');
+  const pause = computeHeat({ ...isolated, obstacle: { type: 'negative' } }, { context, history: [established] });
+  assert.equal(pause.status, 'pause'); assert.equal(pause.preliminaryRange, null);
+  const noResurrection = computeHeat(isolated, { context, history: [established, pause] });
+  assert.equal(noResurrection.preliminaryRange.basis, 'observed_dimensions', 'An earlier high baseline cannot cross a later explicit negative boundary');
+  assert.throws(() => computeHeat(isolated, { context: { messages: [] } }), { code: 'INVALID_CLASSIFICATION' });
+  const removedBaseline = computeHeat(isolated, { context: { messages: [context.messages.at(-1)] }, history: [established, sparse] });
+  assert.equal(removedBaseline.preliminaryRange.label, '偏低投入', 'Removed evidence cannot support a historical range');
+});
+
+test('historical heat context permits appended messages but rejects corrected facts, annotations, timing or either profile', () => {
+  const original = buildChatContext(profile(), counterpart(), messages, { meeting: { status: 'none', time: '', place: '', note: '' } });
+  const appended = buildChatContext(profile(), counterpart(), [...messages, { id: 'm3', speaker: 'other', text: '哈哈' }], { meeting: { status: 'none', time: '', place: '', note: '' }, topicChangeRequested: true });
+  assert.equal(heatContextsCompatible(original, appended), true);
+  assert.equal(heatContextsCompatible(null, appended), false);
+  assert.equal(heatContextsCompatible({ messages: messages }, appended), false);
+  for (const change of [
+    (value) => { value.messages[0].speaker = 'other'; },
+    (value) => { value.messages[0].text = '更正的原话。'; },
+    (value) => { value.messages[0].annotationRevision = 2; value.messages[0].annotationUpdatedAt = '2026-10-01T10:00:00.000Z'; },
+    (value) => { value.messages[0].wechatTime = { at: '2026-10-01T09:00:00.000Z', source: 'user_reported', editedAt: '2026-10-01T10:00:00.000Z' }; },
+    (value) => { value.userProfile = JSON.stringify({ ...JSON.parse(value.userProfile), currentStyle: '更正的本人表达偏好。' }); },
+    (value) => { value.counterpartProfile = JSON.stringify({ ...JSON.parse(value.counterpartProfile), background: '更正的认识背景。' }); },
+    (value) => { value.counterpartProfile = JSON.stringify({ ...JSON.parse(value.counterpartProfile), meeting: { status: 'declined', time: '', place: '', note: '' } }); },
+    (value) => { value.messages.reverse(); },
+  ]) {
+    const revised = structuredClone(appended); change(revised);
+    assert.equal(heatContextsCompatible(original, revised), false);
+  }
 });
 
 test('a single ambiguous reply cannot manufacture a zero score or falling trend over established evidence', () => {

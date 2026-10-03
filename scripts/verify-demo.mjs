@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { chromium } from 'playwright';
 import { createBetaServer } from '../src/beta-api.mjs';
+import { CoachError } from '../src/coach.mjs';
 import { DEFAULT_KNOWLEDGE_PATH } from '../src/knowledge.mjs';
 import { computeHeat } from '../src/domain.mjs';
 
@@ -17,19 +19,21 @@ try {
   const knowledgePath = join(directory, 'knowledge.md');
   await writeFile(knowledgePath, knowledge);
   await mkdir(evidenceDir, { recursive: true });
-  let classifications = 0, replies = 0, plans = 0, nextFailure = false, holdClassification = null;
+  let classifications = 0, replies = 0, plans = 0, classificationFailuresRemaining = 0, holdClassification = null;
+  let timingClockOffset = 0;
   let releaseClassification, releasePlan, holdPlan;
   // The expanded mock journey exceeds ten operations; production budget defaults stay unchanged.
-  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 20,
+  server = await createBetaServer({ dataDir: join(directory, 'data'), knowledgePath, localDemoMode: true, paidProviderDailyLimit: 30, now: () => Date.now() + timingClockOffset,
     classifyFn: async (context, options) => {
       classifications++; assert.equal(options.knowledgeText, knowledge);
-      if (nextFailure) { nextFailure = false; throw Object.assign(new Error('Synthetic classification timeout'), { code: 'PROVIDER_TIMEOUT' }); }
+      if (classificationFailuresRemaining > 0) { classificationFailuresRemaining--; throw new CoachError('provider_timeout'); }
       if (holdClassification) { const held = holdClassification; holdClassification = null; await held; }
       const id = context.messages.at(-1).id;
       const observed = { level: 'positive', evidenceIds: [...new Set([context.messages.find((message) => message.speaker === 'other')?.id || id, id])] };
       return { status: 'ready', confidence: 'moderate', phase: 'ordinary',
         obstacle: { type: 'none', evidenceIds: [], reason: '她主动延续工作话题。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+        topicDecision: { mode: 'change', reason: '合成换题局面，用于三方向与并发回归。' },
         options: [['up', .6], ['down', .1], ['sideways', .3]].map(([topicMove, weight]) => ({ topicMove, weight, relationAction: 'continue', reason: '依据当前的工作话题继续了解。', evidenceIds: [id] })),
         uncertainties: ['对方是否愿意见面尚不清楚。'], recommendationKind: 'uncalibrated',
         fieldCoach: { currentTopic: '工作与新项目', topicStatus: 'developing', topicMessageIds: [id], initiative: '先接住她的新项目，再带入自己的具体经历。', nextAction: '顺着当前话题了解一处细节。', warmingLayer: 'none', reason: '她还在自然展开话题。' } };
@@ -52,17 +56,22 @@ try {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   const page = await context.newPage(); page.setDefaultTimeout(15_000);
   const pageErrors = []; page.on('pageerror', (error) => pageErrors.push(error.message));
+  const modelPosts = [];
+  page.on('request', (request) => { if (request.method() === 'POST' && /\/(classify|reply|coach-plan|image-read)$/.test(new URL(request.url()).pathname)) modelPosts.push(request.url()); });
   async function response(suffix, method, action) {
     const waiting = page.waitForResponse((r) => r.url().endsWith(suffix) && r.request().method() === method);
     await action(); const r = await waiting; const payload = await r.json(); assert.equal(r.status(), 200, JSON.stringify(payload)); return payload.data;
   }
   await page.goto(origin);
   await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#job-history,#job-list').count(), 0, 'Current operations have no diagnostic status archive in the UI');
   assert.equal(await page.locator('#auth').isVisible(), false);
   assert.equal(await page.locator('#demo-banner').isVisible(), true);
   assert.equal(await page.locator('.message-bubble').count(), 4);
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
-  assert.equal(classifications, 1, 'First complete context analyzes once');
+  assert.equal(classifications, 0, 'Opening the demo reads existing messages without automatically analyzing');
+  await response('/classify', 'POST', async () => { await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; }); await page.locator('#classify').click(); });
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  assert.equal(classifications, 1, 'Explicit first analysis runs once');
   assert.equal(replies, 0, 'Opening does not generate a reply');
   assert.equal(await page.locator('#direction-options button').count(), 3);
   assert.ok((await page.locator('[data-direction=down]').textContent()).includes('10%'));
@@ -97,12 +106,17 @@ try {
   const originalDetail = (await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data;
   const fixtureOther = originalDetail.messages.find((message) => message.speaker === 'other').id;
   const fixtureLast = originalDetail.messages.at(-1).id;
-  let coachScenario = null;
+  let coachScenario = null, replyScenario = null, glossaryEvidence = null;
   await page.route(`**/api/counterparts/${id}`, async (route) => {
-    if (route.request().method() !== 'GET' || !coachScenario) return route.continue();
+    if (route.request().method() !== 'GET' || (!coachScenario && !replyScenario)) return route.continue();
     const received = await route.fetch(); const body = await received.json();
-    body.data.classification = coachScenario;
-    body.data.heat = computeHeat(coachScenario);
+    body.data.classification = replyScenario ? null : coachScenario;
+    if (glossaryEvidence) body.data.messages.at(-1).text = glossaryEvidence;
+    body.data.heat = computeHeat(body.data.classification);
+    if (replyScenario) {
+      body.data.suggestions = [replyScenario]; body.data.currentSuggestionIds = [replyScenario.id]; body.data.directReply = replyScenario;
+      body.data.modelContext = { classificationAttempted: true, directReplyAttempted: true };
+    }
     await route.fulfill({ response: received, json: body });
   });
   function scenario(level, evidenceIds, obstacle = 'none') {
@@ -116,7 +130,7 @@ try {
   assert.equal(computeHeat(coachScenario).score, null);
   assert.equal(computeHeat(coachScenario).status, 'insufficient_evidence');
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'One message does not establish a numeric heat score');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '35–75°', 'One message has a provisional range without establishing an exact score');
   assert.ok((await page.locator('#field-coach-initiative').textContent()).includes('未知时不要推进'), 'Legacy conditions and negations remain intact');
   await page.locator('#field-coach-details > summary').click();
   assert.equal(await page.locator('#field-coach-full-guidance').isVisible(), true);
@@ -136,7 +150,46 @@ try {
   assert.equal(await page.locator('#field-coach-pitfall').textContent(), '别跳过她的真实意愿。');
   coachScenario = scenario('unknown', []);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步观察');
+  for (const action of ['wait', 'pause']) {
+    replyScenario = { id: randomUUID(), reply: '', action, reason: '合成已保存建议，不需要额外模型调用。', styleNote: '保留明确的留白或停止指引。',
+      workingFocus: { stage: 'unknown', reason: '没有额外阶段判断。', evidenceIds: [] },
+      guidance: { topicMove: null, relationMove: action, ownWordsGuide: '先自然留白，等她主动开启新内容。', reentryWhen: '她主动开启新内容时再自然接话。' } };
+    await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+    await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#field-coach-focus').textContent(), action === 'pause' ? '本轮重点：停止这类推进' : '本轮重点：自然留白', 'A saved non-reply action cannot fall back to generic information gathering');
+    assert.equal(await page.locator('#field-coach-initiative').textContent(), action === 'pause' ? '停止这类推进，尊重她的边界。' : replyScenario.guidance.ownWordsGuide);
+    assert.equal(await page.locator('#field-coach-temperature').textContent(), action === 'pause' ? '先停推进' : '初步观察');
+    assert.equal(await page.locator('#heat-status').textContent(), action === 'pause' ? '建议暂停' : '先留白', 'Inline status and field coach follow the same saved action');
+    assert.doesNotMatch(await page.locator('#field-coach-state').textContent(), /通用初步方向/u, 'An existing model instruction is not described as generic preliminary guidance');
+    assert.equal(classifications, 1); assert.equal(replies, 0);
+  }
+  replyScenario = null;
+  // Footnotes read the displayed coach prose, never the transcript or plan draft.
+  coachScenario = { ...scenario('positive', [fixtureOther, fixtureLast]), options: [], topicDecision: { mode: 'stay', reason: '继续当前话题。' },
+    fieldCoach: { currentTopic: '上堆到工作类别', topicStatus: 'developing', topicMessageIds: [fixtureLast], warmingLayer: 'none',
+      initiative: '先接住她的经历。', pitfall: '不要连续追问。', nextAction: '聊她刚提到的项目。', reason: '把这段交流当作一轮完整话题。' } };
+  glossaryEvidence = '聊天引用中的下切、平移、男对女、升温和阻力，不是教练的指导。';
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0, 'The persistent dictionary and toggle are removed');
+  assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false, 'No visible coach term means no footnotes');
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0);
+  await page.locator('#field-coach-plan').fill('我想聊男对女、升温、平移和下切。');
+  assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false, 'An unsubmitted plan never creates explanatory notes');
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0, 'Plan wording does not become coach guidance');
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms [data-coach-term=up]').waitFor();
+  assert.deepEqual(await page.locator('#coach-glossary-terms > details').evaluateAll((nodes) => nodes.map((node) => node.dataset.coachTerm)), ['up', 'round']);
+  assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=up] > summary').textContent(), '注 · 上堆', 'The footnote names the actual alias used in the prose');
+  assert.ok((await page.locator('#field-coach-evidence').textContent()).includes(glossaryEvidence));
+  await page.locator('#coach-glossary-terms [data-coach-term=up] > summary').click();
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0, 'Hidden guidance and the definition text cannot sustain their own footnotes');
+  await page.locator('#field-coach-details > summary').click();
+  await page.locator('#coach-glossary-terms [data-coach-term=up]').waitFor();
+  assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=up]').getAttribute('open'), null, 'A newly relevant note starts collapsed');
+  glossaryEvidence = null;
   await page.unroute(`**/api/counterparts/${id}`);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '约65°');
@@ -159,7 +212,7 @@ try {
   assert.equal((await (await context.request.get(`${origin}/api/counterparts/${id}`)).json()).data.messages.filter((message) => message.text === originalText).length, 1);
   await page.locator('.message-bubble').filter({ hasText: originalText }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '', 'Successful message recording clears the composer');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 2, 'New other message analyzes once');
   await response(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
@@ -184,7 +237,7 @@ try {
   assert.equal(followup.feedback.stage, 'raw_untrusted');
   assert.equal(followup.timing.fromSource, 'clipboard_copied');
   await page.locator('.message-bubble').filter({ hasText: followupText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.locator('#timing-note').filter({ hasText: '录入估计' }).waitFor();
   assert.equal(classifications, 3); assert.equal(replies, 1);
   const me = (await (await context.request.get(`${origin}/api/me`)).json()).data;
@@ -225,6 +278,7 @@ try {
   await failPage.locator('#message-form .form-error').waitFor({ state: 'visible' });
   await failPage.unroute('**/followup');
   await failPage.route('**/classify', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SESSION_EXPIRED', message: '合成会话结束。' } }) }));
+  await failPage.locator('#coach-panel > .coach-details > summary').click();
   await failPage.locator('#classify').click();
   await failPage.locator('#startup-retry').waitFor({ state: 'visible' });
   assert.equal(await failPage.locator('#auth').isVisible(), false);
@@ -237,7 +291,7 @@ try {
   assert.equal(classifications, 3); assert.equal(replies, 1); assert.deepEqual(pageErrors, []);
   // A completed request for another object cannot clear this object's draft or loading state.
   await page.locator('#add-counterpart').click();
-  await page.locator('#intake-alias').fill('虚构对象 B'); await page.locator('#intake-app').fill('虚构资料，喜欢电影。');
+  await page.locator('#intake-alias').fill('虚构对象 B'); await page.locator('#intake-channel').selectOption('app'); await page.locator('#intake-app').fill('虚构资料，喜欢电影。');
   await page.locator('#intake-background').fill('虚构跨对象并发验收。');
   const second = await response('/api/counterparts', 'POST', () => page.locator('#counterpart-form button[type=submit]').click());
   const secondId = second.counterpart.id;
@@ -254,19 +308,42 @@ try {
   assert.equal(await page.locator('#message-text').inputValue(), 'A 的未提交草稿');
   assert.equal(await page.locator('#coach-loading').isVisible(), false);
   await page.locator('#counterpart-select').selectOption(secondId);
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 4);
-  nextFailure = true;
+  const beforeFailedClassification = classifications;
+  const beforeAutomaticFailurePosts = modelPosts.length;
+  classificationFailuresRemaining = 2;
+  let failedAutomaticResponses = 0;
+  const automaticFailureFinished = page.waitForResponse((response) => response.url().endsWith(`/api/counterparts/${secondId}/classify`) && response.request().method() === 'POST' && ++failedAutomaticResponses === 2);
   await page.locator('#message-text').fill('这轮合成分析会失败。');
   await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  await page.locator('#coach-error').waitFor({ state: 'visible' });
-  assert.equal(classifications, 5);
+  await automaticFailureFinished;
+  await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
+  assert.equal(classifications, beforeFailedClassification + 2, 'Automatic analysis has one bounded fresh attempt before retaining preliminary guidance');
+  assert.equal(modelPosts.length, beforeAutomaticFailurePosts + 2);
+  assert.equal(classificationFailuresRemaining, 0);
+  assert.equal(await page.locator('#coach-error').isVisible(), false, 'Background automatic failure does not replace the conversation with a retry error');
+  assert.equal(await page.locator('#retry-coach').isVisible(), false);
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'A failed analysis keeps a usable preliminary direction without inventing a temperature');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息');
+  assert.match(await page.locator('#field-coach-initiative').textContent(), /初步方向.*尝试获得更多信息/u);
+  assert.match(await page.locator('#field-coach-heat-basis').textContent(), /通用初步方向/u);
+  assert.equal(await page.locator('#field-coach-update-badge').isVisible(), false, 'Failed analysis cannot claim that model instructions have updated');
+  const failedDetail = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
+  assert.equal(failedDetail.classification, null);
+  assert.equal(failedDetail.heat.score, null);
+  assert.equal(failedDetail.heat.preliminaryRange, null);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForTimeout(150);
-  assert.equal(classifications, 5, 'Failed current context does not auto-retry after reload');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
-  assert.equal(classifications, 6, 'Explicit reanalysis is allowed');
+  assert.equal(classifications, beforeFailedClassification + 2, 'Exhausted recovery for the current context does not restart after reload');
+  assert.equal(modelPosts.length, beforeAutomaticFailurePosts + 2, 'Reload after automatic failure sends no model POST, including cached replays');
+  assert.equal(await page.locator('#coach-error').isVisible(), false);
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息', 'Reload retains the general direction without silently rerunning a failed model');
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
+  assert.equal(classifications, beforeFailedClassification + 3, 'Explicit reanalysis is allowed');
+  const recoveredClassificationCalls = classifications;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator('#toggle-field-coach').click();
   assert.equal(await page.locator('#field-coach').isVisible(), true);
@@ -316,12 +393,96 @@ try {
   await page.locator('#message-text').fill('重要的未提交编辑草稿，修改时间不得擦掉。');
   await messageCard.locator('.message-menu > summary').click();
   await messageCard.getByRole('button', { name: '修改消息时间' }).click();
-  const reported = new Date(Date.now() - 3600000);
+  const timingEditor = messageCard.locator('.message-time-edit');
+  const hour = timingEditor.getByRole('textbox', { name: '小时', exact: true });
+  const minute = timingEditor.getByRole('textbox', { name: '分钟', exact: true });
+  const dateDisclosure = timingEditor.locator('details.message-time-date');
+  const date = dateDisclosure.locator('input[type=date]');
+  const recordedLocal = await page.evaluate((at) => {
+    const value = new Date(at);
+    return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  }, beforeTiming.recordedAt);
+  assert.equal(await minute.evaluate((input) => document.activeElement === input && input.selectionStart === 0 && input.selectionEnd === input.value.length), true, 'Time correction starts with the minute selected');
+  for (const input of [hour, minute]) {
+    assert.equal(await input.getAttribute('type'), 'text');
+    assert.equal(await input.getAttribute('inputmode'), 'numeric');
+    assert.equal(await input.getAttribute('maxlength'), '2');
+  }
+  assert.equal(await hour.inputValue(), recordedLocal.slice(11, 13));
+  assert.equal(await minute.inputValue(), recordedLocal.slice(14, 16));
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10));
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false, 'The date is secondary until explicitly expanded');
+  assert.equal(await date.isVisible(), false);
+  assert.equal(await timingEditor.getByRole('button', { name: '清除修改', exact: true }).isVisible(), false);
+  assert.equal((await timingEditor.textContent()).includes('未核验'), false);
+  const timeViewport = page.viewportSize(), timeTheme = await page.locator('html').getAttribute('data-theme');
+  for (const theme of ['day', 'night']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    for (const width of [1280, 320]) {
+      await page.setViewportSize({ width, height: 950 });
+      await timingEditor.scrollIntoViewIfNeeded();
+      await minute.focus(); await minute.evaluate((input) => input.select());
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${width}px time editor stays within the viewport`);
+      assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+      await page.screenshot({ path: join(evidenceDir, `time-edit-${width}-${theme}.png`), fullPage: true });
+    }
+  }
+  await page.setViewportSize(timeViewport);
+  if (await page.locator('html').getAttribute('data-theme') !== timeTheme) await page.locator('#theme-toggle').click();
+  const timingUrl = `${origin}/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`;
+  // At xx:00 the only different same-hour minute is in the future. Advance the
+  // isolated server clock two minutes only for that boundary, without sleeping.
+  const originalMinute = Number(recordedLocal.slice(14, 16));
+  if (originalMinute === 0) timingClockOffset = 120_000;
+  const correctedMinute = String(originalMinute > 0 ? originalMinute - 1 : 1).padStart(2, '0');
+  await minute.fill(correctedMinute);
+  const minuteOnly = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
+  assert.equal(minuteOnly.message.wechatTime.at, await page.evaluate((value) => new Date(value).toISOString(), `${recordedLocal.slice(0, 14)}${correctedMinute}`), 'Changing only minutes persists the original local year/month/day/hour');
+  assert.equal(minuteOnly.message.recordedAt, beforeTiming.recordedAt);
+  assert.equal(minuteOnly.message.wechatTime.source, 'user_reported');
+  await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await minute.inputValue(), correctedMinute);
+  assert.equal(await hour.inputValue(), recordedLocal.slice(11, 13));
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10));
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+  let invalidTimingRequests = 0;
+  const countInvalidTiming = (request) => { if (request.url() === timingUrl && request.method() === 'PATCH') invalidTimingRequests++; };
+  page.on('request', countInvalidTiming);
+  for (const [hours, minutes] of [['24', '03'], [recordedLocal.slice(11, 13), '60'], ['', '03'], [recordedLocal.slice(11, 13), '']]) {
+    await hour.fill(hours); await minute.fill(minutes);
+    await timingEditor.getByRole('button', { name: '保存时间', exact: true }).click();
+    await timingEditor.locator('.form-error').filter({ hasText: '0–23' }).waitFor({ state: 'visible' });
+    assert.equal(invalidTimingRequests, 0, 'An out-of-range or partially empty clock stays local');
+  }
+  page.off('request', countInvalidTiming);
+  const reported = new Date(Date.now() - 49 * 3600000);
   const reportedLocal = new Date(reported.getTime() - reported.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  await messageCard.locator('input[type=datetime-local]').fill(reportedLocal);
+  await hour.fill(reportedLocal.slice(11, 13)); await minute.fill(reportedLocal.slice(14, 16));
+  await dateDisclosure.locator('summary').click(); await date.fill(reportedLocal.slice(0, 10));
+  const timingFailure = deferred(), timingStarted = deferred();
+  await page.route(timingUrl, async (route) => { timingStarted.resolve(); await timingFailure.promise; await route.fulfill({ status: 503, contentType: 'application/json', json: { error: { code: 'SYNTHETIC_UNAVAILABLE', message: '合成时间保存失败，可稍后重试。' } } }); });
+  await timingEditor.getByRole('button', { name: '保存时间', exact: true }).click();
+  await timingStarted.promise;
+  try {
+    for (const input of [hour, minute, date]) assert.equal(await input.isDisabled(), true, 'Pending time save locks the submitted fields');
+    assert.equal(await timingEditor.locator('button[type=submit]').isDisabled(), true);
+    assert.equal(await page.locator('[data-edit-time]').evaluateAll((buttons) => buttons.length > 1 && buttons.every((button) => button.disabled)), true, 'Pending time save blocks another editor for this conversation');
+  } finally { timingFailure.resolve(); }
+  await timingEditor.locator('.form-error').waitFor({ state: 'visible' });
+  for (const input of [hour, minute, date]) assert.equal(await input.isDisabled(), false, 'Failed saves unlock the retained fields');
+  assert.equal(await timingEditor.getByRole('button', { name: '保存时间', exact: true }).isDisabled(), false);
+  assert.equal(await page.locator('[data-edit-time]').evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true);
+  assert.equal(await hour.inputValue(), reportedLocal.slice(11, 13));
+  assert.equal(await minute.inputValue(), reportedLocal.slice(14, 16));
+  assert.equal(await date.inputValue(), reportedLocal.slice(0, 10));
+  assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。', 'Failed timing changes retain unrelated composer input');
+  await page.unroute(timingUrl);
   const timingChange = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => messageCard.getByRole('button', { name: '保存时间' }).click());
   assert.equal(timingChange.message.recordedAt, beforeTiming.recordedAt);
   assert.equal(timingChange.message.wechatTime.source, 'user_reported');
+  assert.equal(timingChange.message.wechatTime.at, await page.evaluate((value) => new Date(value).toISOString(), reportedLocal));
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。');
   assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
@@ -330,10 +491,27 @@ try {
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.ok(!(await messageCard.locator('.message-label').textContent()).includes('录入'), 'Primary time uses the explicit annotation');
   assert.ok((await messageCard.locator('.message-label').getAttribute('title')).includes(beforeTiming.recordedAt));
-  assert.equal(classifications, 6, 'Changing metadata does not silently call the model');
-  assert.equal(await page.locator('#field-coach-temperature').textContent(), '待判断', 'Correcting time invalidates the previous displayed temperature');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', () => page.locator('#classify').click());
-  assert.equal(classifications, 7);
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await minute.inputValue(), reportedLocal.slice(14, 16), 'Reopening uses the saved correction');
+  assert.equal(await dateDisclosure.evaluate((element) => element.open), false);
+  const clearedTiming = await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '清除修改', exact: true }).click());
+  assert.equal(clearedTiming.message.wechatTime, null);
+  assert.equal(clearedTiming.message.recordedAt, beforeTiming.recordedAt);
+  await messageCard.locator('.message-label').filter({ hasText: '录入' }).waitFor();
+  assert.equal(await page.locator('#message-text').inputValue(), '重要的未提交编辑草稿，修改时间不得擦掉。');
+  // Keep the original journey's corrected-time context for its followup checks.
+  await messageCard.locator('.message-menu > summary').click();
+  await messageCard.getByRole('button', { name: '修改消息时间' }).click();
+  assert.equal(await date.inputValue(), recordedLocal.slice(0, 10), 'Clearing returns the editor default to the original recording date');
+  await hour.fill(reportedLocal.slice(11, 13)); await minute.fill(reportedLocal.slice(14, 16));
+  await dateDisclosure.locator('summary').click(); await date.fill(reportedLocal.slice(0, 10));
+  await response(`/api/counterparts/${secondId}/messages/${beforeTiming.id}/timing`, 'PATCH', () => timingEditor.getByRole('button', { name: '保存时间', exact: true }).click());
+  await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
+  assert.equal(classifications, recoveredClassificationCalls, 'Changing metadata does not silently call the model');
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'Correcting time invalidates the previous displayed temperature');
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
+  assert.equal(classifications, recoveredClassificationCalls + 1);
   await page.locator('#cancel-message-edit').click();
   const suggestedA = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
   assert.equal(suggestedA.pendingEligible, true);
@@ -343,24 +521,26 @@ try {
   await response(`/api/counterparts/${secondId}/messages`, 'POST', () => page.locator('#save-message').click());
   await page.locator('.message-bubble').filter({ hasText: manualB }).waitFor();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Manual self text supersedes the old AI pending bubble');
-  assert.equal(await page.locator('#suggestion-history').isVisible(), true, 'A single historical suggestion stays reachable');
-  async function viewHistoricalA() {
-    const history = page.locator(`[data-suggestion-id="${suggestedA.id}"]`);
-    if (!await history.isVisible()) await page.locator('#suggestion-history > summary').click();
-    await history.click();
-    await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
-  }
-  await viewHistoricalA();
-  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Archived replies have no browsing or copy UI');
+  const archivedCopyMe = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+  const oldCopy = await context.request.post(`${origin}/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, {
+    headers: { origin, 'x-csrf-token': archivedCopyMe.csrfToken }, data: { requestId: randomUUID(), copiedText: suggestedA.reply },
+  });
+  assert.equal(oldCopy.status(), 200, 'The existing account-owned receipt API remains compatible');
+  await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  await page.locator('#counterpart-select').selectOption(secondId);
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'A newer old-context copy receipt cannot revive archived advice');
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   const counterpartC = '这是对我实际 B 的后续 C。';
   await page.locator('#message-speaker').selectOption('other'); await page.locator('#message-text').fill(counterpartC);
   const cRequest = page.waitForRequest((r) => r.url().endsWith(`/api/counterparts/${secondId}/followup`) && r.method() === 'POST');
   const cResult = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal((await cRequest).postDataJSON().previousSuggestionId, undefined, 'Browsing old A does not select its feedback source');
+  assert.equal((await cRequest).postDataJSON().previousSuggestionId, undefined, 'An archived A copy cannot select the current feedback source');
   assert.equal(cResult.previousMessage, null); assert.equal(cResult.feedback, null);
   assert.equal(cResult.timing.fromSource, 'unknown');
   await page.locator('.message-bubble').filter({ hasText: counterpartC }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   const afterC = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
   assert.deepEqual(afterC.messages.slice(-2).map((message) => message.text), [manualB, counterpartC]);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeManual, 'No stale A feedback anchor is created');
@@ -370,39 +550,33 @@ try {
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Reload never restores superseded A as pending');
   const newAfterB = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
   assert.equal(newAfterB.pendingEligible, true, 'A new reply after B remains eligible');
-  await viewHistoricalA();
-  const copiedHistoricalText = '旧建议重新使用时，这个修改版本只按复制记录推定。';
-  await page.locator('#suggestion-text').fill(copiedHistoricalText);
+  await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
+  const copiedCurrentText = '本轮建议的修改版本，只按复制记录推定。';
+  await page.locator('#suggestion-text').fill(copiedCurrentText);
   await page.locator('#message-text').fill('复制失败也不能擦掉的草稿');
   await page.route('**/suggestions/*/copied', (route) => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SYNTHETIC_COPY_FAILURE', message: '合成复制记录故障。' } }) }));
   await page.locator('#copy-reply').click();
   await page.locator('#notice').filter({ hasText: '复制时间未保存' }).waitFor();
   assert.equal(await page.locator('#message-text').inputValue(), '复制失败也不能擦掉的草稿');
-  assert.ok((await page.locator('#suggestion-title').textContent()).includes('仅供查看'));
+  assert.equal(await page.locator('#suggestion-editor').isVisible(), true, 'Failed copy acknowledgment retains the current editable advice');
   await page.unroute('**/suggestions/*/copied');
-  const firstRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
+  const currentCopy = await response(`/api/counterparts/${secondId}/suggestions/${newAfterB.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
   await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
-  assert.equal(await page.locator('#suggestion-text').inputValue(), copiedHistoricalText, 'Reload restores the eligible edited copy');
-  await page.locator('#message-text').fill('历史建议新复制后的回应一。');
+  assert.equal(await page.locator('#suggestion-text').inputValue(), copiedCurrentText, 'Reload restores the eligible edited copy');
+  await page.locator('#message-text').fill('本轮建议复制后的回应。');
   const recopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal(recopyFollowup.previousMessage.suggestionId, suggestedA.id);
-  assert.equal(recopyFollowup.previousMessage.text, copiedHistoricalText);
+  assert.equal(recopyFollowup.previousMessage.suggestionId, newAfterB.id);
+  assert.equal(recopyFollowup.previousMessage.text, copiedCurrentText);
   assert.equal(recopyFollowup.timing.fromSource, 'clipboard_copied');
-  await page.locator('.message-bubble').filter({ hasText: '历史建议新复制后的回应一。' }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
-  await viewHistoricalA();
-  const secondRecopy = await response(`/api/counterparts/${secondId}/suggestions/${suggestedA.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
-  assert.notEqual(secondRecopy.copyReceipt.id, firstRecopy.copyReceipt.id);
-  await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
-  await page.locator('#message-text').fill('同一历史建议另一次新复制后的回应二。');
-  const secondRecopyFollowup = await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
-  assert.equal(secondRecopyFollowup.previousMessage.suggestionId, suggestedA.id);
-  assert.notEqual(secondRecopyFollowup.feedback.id, recopyFollowup.feedback.id, 'A different fresh copy can support another unverified followup');
-  await page.locator('.message-bubble').filter({ hasText: '同一历史建议另一次新复制后的回应二。' }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.locator('.message-bubble').filter({ hasText: '本轮建议复制后的回应。' }).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  const archived = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data.suggestions;
+  assert.ok(archived.some(({ id }) => id === suggestedA.id) && archived.some(({ id }) => id === newAfterB.id), 'Superseded and consumed suggestions remain account-owned backend records');
+  assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Consumed current advice does not become an archived copy surface');
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   // Direction feedback uses held HTTP fixtures after the existing durable journey.
   // These extra reply requests never reach even the synthetic provider or a real account.
   const beforeDirectionChecks = { classifications, replies, plans };
@@ -462,18 +636,19 @@ try {
     assert.equal(await page.locator('#suggestion-editor').isVisible(), false, 'The previous draft is hidden during generation');
     assert.equal(await page.locator('#suggestion-meta').isVisible(), false);
     assert.equal(await page.locator('#copy-reply').isDisabled(), true);
-    const historicalButtons = await page.locator('#suggestion-list button').all();
-    assert.ok(historicalButtons.length > 0);
-    for (const button of historicalButtons) assert.equal(await button.isDisabled(), true, 'History cannot replace a busy reply');
+    assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Generation has no archive selection that could replace the current reply');
     await assertSelectedDirection(direction);
   }
   async function beginDirection(direction, { resultDirection = direction, reply = sameReply, cached = false, status = 200, fromServer = false } = {}) {
     const arrived = deferred(), release = deferred();
     const suggestion = { ...newAfterB, id: `synthetic-direction-${directionRequests.length + 1}`, direction: resultDirection,
       reply, createdAt: new Date().toISOString(), pendingReplyText: null, pendingCopyReceiptId: null, pendingEligible: true };
-    const body = status === 200 ? { data: { suggestion, cached } } : { error: { code: 'SYNTHETIC_REPLY_FAILURE', message: '合成方向生成故障。' } };
+    const body = status === 200 ? { data: { suggestion, cached } } : { error: { message: '合成方向生成故障。' } };
     const queued = { arrived, release, status, body, suggestion, fromServer };
     replyQueue.push(queued);
+    // An unknown temporary HTTP failure may be the response to an accepted
+    // request, so recovery must replay the original receipt without a new model.
+    if (status === 503) replyQueue.push({ ...queued }, { ...queued });
     const received = page.waitForResponse((r) => r.url().endsWith(`/api/counterparts/${secondId}/reply`) && r.request().method() === 'POST');
     received.catch(() => {}); // Keep an earlier assertion failure visible if cleanup closes this held request.
     await page.locator(`[data-direction=${direction}]`).click();
@@ -496,12 +671,12 @@ try {
     if (cached) assert.ok(update.includes('已保存结果'), update);
     assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), true);
     await assertSelectedDirection(direction);
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+    await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   }
   async function assertStaticDirection(direction) {
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
     assert.ok((await page.locator('#suggestion-direction').textContent()).includes(directionLabels[direction]));
-    assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'Reading history or reloading has no fresh-switch announcement');
+    assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'Reloading the current advice has no fresh-switch announcement');
     assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
     await assertSelectedDirection(direction);
   }
@@ -519,6 +694,7 @@ try {
   directionFixtures.push(returnedDirection.suggestion);
   const retainedReplyDraft = '切换失败后必须保留的私有编辑草稿。';
   await page.locator('#suggestion-text').fill(retainedReplyDraft);
+  const beforeFailedDirection = directionRequests.length;
   const failedDirection = await beginDirection('up', { status: 503 });
   await failedDirection.complete();
   await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
@@ -526,21 +702,21 @@ try {
   assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft);
   assert.equal(await page.locator('#copy-reply').isDisabled(), false);
   await assertSelectedDirection('sideways');
-  const failedUpdate = await page.locator('#suggestion-update').textContent();
-  assert.ok(failedUpdate.includes('未取回') && failedUpdate.includes('新回复'), failedUpdate);
-  assert.equal(await page.locator('#suggestion-update').isVisible(), true);
+  assert.equal(directionRequests.length - beforeFailedDirection, 3, 'Unknown HTTP recovery stops after three requests');
+  const failedDirectionRequests = directionRequests.slice(beforeFailedDirection);
+  assert.ok(failedDirectionRequests.every(({ body }) => JSON.stringify(body) === JSON.stringify(failedDirectionRequests[0].body)), 'Unknown HTTP recovery reuses the same request receipt and body');
+  assert.equal(await page.locator('#suggestion-update').isVisible(), false, 'The current operation has one error message instead of duplicate feedback');
+  assert.equal(await page.locator('#coach-error').isVisible(), true);
+  assert.equal(await page.locator('#retry-coach').isVisible(), true);
+  assert.doesNotMatch(await page.locator('#coach-error').textContent(), /合成方向生成故障|SYNTHETIC|不会自动重试/);
   assert.equal(await page.locator('#suggestion-panel').evaluate((panel) => panel.classList.contains('reply-updated')), false);
-  const historyFirst = page.locator(`[data-suggestion-id="${firstDirection.suggestion.id}"]`);
-  if (!await historyFirst.isVisible()) await page.locator('#suggestion-history > summary').click();
-  await historyFirst.click(); await assertStaticDirection('down');
-  await page.locator(`[data-suggestion-id="${returnedDirection.suggestion.id}"]`).click();
-  await assertStaticDirection('sideways');
-  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'History preserves edits to each suggestion');
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0);
+  assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'Failed replacement keeps the current edited draft');
   staticDirectionFixtures = true;
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   await page.locator('#counterpart-select').selectOption(secondId);
   await assertStaticDirection('sideways');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A previous copy refresh cannot replace a newly accepted reply with its stale GET.
   const copyRefresh = { arrived: deferred(), release: deferred() };
   heldDirectionDetail = copyRefresh;
@@ -599,7 +775,7 @@ try {
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);
   await page.locator('#counterpart-select').selectOption(secondId);
   await assertStaticDirection('down');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A hidden draft is not evidence of having used a reply when a new other message arrives.
   const hiddenDraft = '尚未发送的隐藏旧草稿，不能被推定使用。';
   await page.locator('#suggestion-text').fill(hiddenDraft);
@@ -616,7 +792,7 @@ try {
   assert.equal(busyFollowup.previousMessage, null); assert.equal(busyFollowup.feedback, null);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
   await page.locator('.message-bubble').filter({ hasText: busyFollowupText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.locator('#message-text').fill('新上下文中的未提交草稿。');
   const sameObjectDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
   await staleContextReply.complete(); await sameObjectDirectoryRefresh;
@@ -643,18 +819,20 @@ try {
   assert.equal(delayedFollowup.previousMessage, null); assert.equal(delayedFollowup.feedback, null);
   const savedDuringHold = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
   assert.equal(savedDuringHold.messages.at(-1).text, delayedMessageText, 'New message is durably saved while its UI readback is held');
-  assert.ok(savedDuringHold.suggestions.some((item) => item.id === delayedStoredReply.suggestion.id), 'The completed old reply remains available as history');
+  assert.ok(savedDuringHold.suggestions.some((item) => item.id === delayedStoredReply.suggestion.id), 'The completed old reply remains a backend record');
   const delayedDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
   await delayedStoredReply.complete(); await delayedDirectoryRefresh;
   delayedReadback.release.resolve();
   await page.locator('.message-bubble').filter({ hasText: delayedMessageText }).waitFor();
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await page.screenshot({ path: join(evidenceDir, 'direction-held-readback-result.png'), fullPage: true });
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Old prepared reply never returns as pending after the new message readback');
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeBusyFollowup);
-  await page.locator('#message-text').fill('术语开关验证保留的未提交聊天草稿。');
+  await page.locator('#message-text').fill('脚注验证保留的未提交聊天草稿。');
   const finalDirectionReply = await beginDirection('down');
+  finalDirectionReply.suggestion.guidance = { topicMove: 'down', relationMove: 'receive',
+    ownWordsGuide: '男对女的表达可以轻一点；这次升温后先接住回应。', reentryWhen: '等她展开后，再接她提到的经历。' };
   await finalDirectionReply.complete(); await assertDirectionResult('down');
   await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
   async function assertReplyPaletteAndAlignment(theme) {
@@ -684,14 +862,16 @@ try {
     await assertReplyPaletteAndAlignment(theme);
     await page.screenshot({ path: join(evidenceDir, `direction-final-desktop-${theme}.png`), fullPage: true });
   }
-  // Coach terms explain only on demand. Toggling them preserves both local drafts.
-  const glossary = page.locator('#coach-glossary-toggle');
-  assert.equal(await glossary.isChecked(), true, 'Term explanations default to enabled');
-  assert.equal(await glossary.getAttribute('aria-controls'), 'coach-glossary-terms');
-  assert.equal(await page.locator('#coach-glossary-terms > details').count(), 7);
-  for (const term of await page.locator('#coach-glossary-terms > details').all()) {
-    assert.equal(await term.getAttribute('open'), null, 'Terms default to collapsed explanations');
+  // Only the current coach's terms appear as collapsed, unobtrusive footnotes.
+  const glossary = page.locator('#coach-glossary-terms');
+  if (await page.locator('#field-coach-details').getAttribute('open') !== null) await page.locator('#field-coach-details > summary').click();
+  await page.waitForFunction(() => document.querySelectorAll('#coach-glossary-terms > details').length === 3);
+  assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0);
+  assert.deepEqual(await glossary.locator(':scope > details').evaluateAll((nodes) => nodes.map((node) => node.dataset.coachTerm)), ['relationship', 'warming', 'obstacle']);
+  for (const term of await glossary.locator(':scope > details').all()) {
+    assert.equal(await term.getAttribute('open'), null, 'Relevant terms default to collapsed explanations');
     assert.equal(await term.locator('p').first().isVisible(), false);
+    assert.ok((await term.locator('summary').textContent()).startsWith('注 · '));
   }
   const strongCoachText = await page.evaluate(() => {
     const selectors = ['.coach-temperature-top > span', '#field-coach-temperature', '.coach-action-label'];
@@ -699,8 +879,9 @@ try {
   });
   assert.ok(strongCoachText[0].size >= 16 && strongCoachText[1].size >= 28 && strongCoachText[2].size >= 16);
   assert.ok(strongCoachText.every(({ weight }) => weight >= 600), 'Heat and action headings have clear visual emphasis');
-  const glossaryPlan = '术语操作不得擦掉的场外计划。';
+  const glossaryPlan = '脚注操作不得擦掉的场外计划，草稿中的下切和平移不触发说明。';
   await page.locator('#field-coach-plan').fill(glossaryPlan);
+  assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false);
   const glossaryComposer = await page.locator('#message-text').inputValue();
   const beforeGlossary = { classifications, replies, plans, directionRequests: directionRequests.length };
   await page.setViewportSize({ width: 320, height: 844 });
@@ -708,32 +889,33 @@ try {
     if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
     await assertReplyPaletteAndAlignment(theme);
     if (!await page.locator('#field-coach').isVisible()) await page.locator('#toggle-field-coach').click();
-    await glossary.focus(); await page.keyboard.press('Space');
-    assert.equal(await glossary.isChecked(), false); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false);
-    await page.keyboard.press('Space');
-    assert.equal(await glossary.isChecked(), true); assert.equal(await page.locator('#coach-glossary-terms').isVisible(), true);
-    const upSummary = page.locator('[data-coach-term=up] > summary');
-    await upSummary.focus(); await page.keyboard.press('Enter');
-    assert.equal(await page.locator('[data-coach-term=up] p').isVisible(), true, 'Keyboard Enter opens a term explanation');
-    await glossary.uncheck(); await glossary.check();
-    assert.equal(await page.locator('[data-coach-term=up]').getAttribute('open'), '', 'Disabling explanations preserves expanded terms');
-    await upSummary.click();
-    for (const name of ['up', 'down', 'sideways', 'relationship', 'warming']) {
-      const term = page.locator(`[data-coach-term=${name}]`);
+    const relationship = glossary.locator('[data-coach-term=relationship]');
+    await relationship.locator('summary').focus(); await page.keyboard.press('Enter');
+    assert.equal(await relationship.locator('p').isVisible(), true, 'Keyboard Enter opens the matching footnote');
+    assert.ok((await relationship.textContent()).includes('表达吸引、恋爱、约会或亲密意图'));
+    await page.locator('#field-coach-details > summary').click();
+    await glossary.locator('[data-coach-term=down]').waitFor();
+    assert.equal(await relationship.getAttribute('open'), '', 'Rendering expanded guidance preserves a still-relevant open note');
+    await page.locator('#field-coach-details > summary').click();
+    await glossary.locator('[data-coach-term=down]').waitFor({ state: 'detached' });
+    assert.equal(await relationship.getAttribute('open'), '', 'Collapsing guidance preserves relevant notes and removes hidden-only terms');
+    await relationship.locator('summary').click();
+    for (const name of ['relationship', 'warming', 'obstacle']) {
+      const term = glossary.locator(`[data-coach-term=${name}]`);
       const summary = term.locator(':scope > summary');
-      assert.ok((await summary.boundingBox()).height >= 44, 'Term summaries preserve touch targets');
+      assert.ok((await summary.boundingBox()).height >= 44, 'Small footnote labels preserve touch targets');
       await summary.click(); assert.equal(await term.locator('p').first().isVisible(), true);
       await summary.click(); assert.equal(await term.locator('p').first().isVisible(), false);
     }
-    assert.ok((await page.locator('.coach-glossary-toggle').boundingBox()).height >= 44);
     assert.equal(await page.locator('#message-text').inputValue(), glossaryComposer);
     assert.equal(await page.locator('#field-coach-plan').inputValue(), glossaryPlan);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Coach glossary fits 320px ${theme}`);
-    await page.locator('.coach-glossary').screenshot({ path: join(evidenceDir, `coach-glossary-320-${theme}.png`) });
-    await page.locator('[data-coach-term=warming] > summary').click();
-    assert.equal(await page.locator('.coach-glossary').evaluate((node) => node.scrollWidth > node.clientWidth + 1), false, `Expanded glossary wraps in ${theme}`);
-    await page.locator('[data-coach-term=warming]').screenshot({ path: join(evidenceDir, `coach-warming-320-${theme}.png`) });
-    await page.locator('[data-coach-term=warming] > summary').click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `Coach footnotes fit 320px ${theme}`);
+    await glossary.screenshot({ path: join(evidenceDir, `coach-glossary-320-${theme}.png`) });
+    await glossary.locator('[data-coach-term=warming] > summary').click();
+    assert.equal(await glossary.evaluate((node) => node.scrollWidth > node.clientWidth + 1), false, `Expanded footnotes wrap in ${theme}`);
+    assert.equal(await glossary.locator('[data-coach-term=warming] p').count(), 4, 'The original A/B/C explanation is retained in full');
+    await glossary.locator('[data-coach-term=warming]').screenshot({ path: join(evidenceDir, `coach-warming-320-${theme}.png`) });
+    await glossary.locator('[data-coach-term=warming] > summary').click();
     await page.locator('#close-field-coach').click();
   }
   assert.deepEqual({ classifications, replies, plans, directionRequests: directionRequests.length }, beforeGlossary, 'Term explanations never call a model');
@@ -751,17 +933,20 @@ try {
     await response(`/api/counterparts/${targetId}`, 'GET', () => page.locator('#counterpart-select').selectOption(targetId));
     await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   }
+  await glossary.locator('[data-coach-term=obstacle] > summary').click();
+  assert.equal(await glossary.locator('[data-coach-term=obstacle]').getAttribute('open'), '');
   await page.locator('#message-speaker').selectOption('self');
   await page.locator('#message-text').fill('B 的草稿，切换后仍需保留。');
   await selectConversation(id);
+  assert.ok(await glossary.locator(':scope > details').count() > 0);
+  assert.equal(await glossary.locator(':scope > details[open]').count(), 0, 'Switching counterparts resets footnote expansion');
   await page.locator('#message-speaker').selectOption('other');
   await page.locator('#message-text').fill('A 的草稿，和 B 分开。');
   await selectConversation(secondId);
   assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。');
   assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
-  if (!await page.locator('#job-history').getAttribute('open')) await page.locator('#job-history > summary').click();
-  await response(`/api/counterparts/${secondId}`, 'GET', () => page.getByRole('button', { name: '刷新保存状态', exact: true }).click());
-  assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。', 'Readback preserves the current draft');
+  await selectConversation(id); await selectConversation(secondId);
+  assert.equal(await page.locator('#message-text').inputValue(), 'B 的草稿，切换后仍需保留。', 'Returning to the conversation reads current data and preserves its draft');
   const editCard = page.locator('.message').filter({ has: page.locator('.message-menu') }).first();
   await editCard.locator('.message-menu > summary').click();
   await editCard.getByRole('button', { name: /^编辑/ }).click();
@@ -785,7 +970,7 @@ try {
   });
   await page.locator('#save-message').click(); await messageSavedPromise;
   await page.locator('#message-text').fill('保存期间接着写的下一句。');
-  await response(`/api/counterparts/${secondId}`, 'GET', () => page.getByRole('button', { name: '刷新保存状态', exact: true }).click());
+  await selectConversation(id); await selectConversation(secondId);
   assert.equal(await page.locator('#save-message').isDisabled(), true, 'Rendering a new detail keeps an in-flight submission locked');
   const savedMessageResponse = page.waitForResponse((r) => r.url().endsWith(`/api/counterparts/${secondId}/messages`) && r.request().method() === 'POST');
   releaseMessageSave(); await savedMessageResponse;
@@ -822,6 +1007,8 @@ try {
   assert.equal(await page.locator('#direct-reply').isDisabled(), true);
   assert.equal(await page.locator('#classify').isDisabled(), true);
   assert.equal(await page.locator('#field-coach-plan-submit').isDisabled(), true);
+  assert.equal(await page.locator('#field-coach-temperature').textContent(), '先录入一句');
+  assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：先录入一句');
   assert.ok((await page.locator('#classification-summary').textContent()).includes('先在下方粘贴对方的一条消息'));
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
   assert.deepEqual({ classifications, replies, plans }, beforeEmptyIntake, 'An empty conversation neither generates nor manufactures a failed attempt');
@@ -870,15 +1057,25 @@ try {
   assert.equal(await page.locator('#notice').isVisible(), false, 'A delayed failure cannot report against a different conversation');
   await page.unroute(failedConversationPath);
   await selectConversation(secondId);
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0);
   if (!await page.locator('#copy-reply').isVisible()) {
-    if (!await page.locator('#suggestion-history').getAttribute('open')) await page.locator('#suggestion-history > summary').click();
-    await page.locator('#suggestion-list .history-button').first().click();
+    // Obtain a fresh injected-model result for this context. The removed archive
+    // entry must never be used merely to make the copy-feedback check runnable.
+    const copyFeedbackMe = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+    const fresh = await context.request.post(`${origin}/api/counterparts/${secondId}/reply`, {
+      headers: { origin, 'x-csrf-token': copyFeedbackMe.csrfToken }, data: { requestId: randomUUID(), direction: 'down', topicChangeRequested: true },
+    });
+    assert.equal(fresh.status(), 200, JSON.stringify(await fresh.json()));
+    await page.reload();
+    await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+    await selectConversation(secondId);
+    await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   }
   await page.locator('#copy-reply').click();
-  await page.locator('#notice').filter({ hasText: '已复制' }).waitFor();
+  await page.locator('#copy-reply').filter({ hasText: '已复制' }).waitFor();
   await page.waitForFunction(() => !document.getElementById('copy-reply').disabled);
   const visibleFeedback = await page.evaluate(() => {
-    const notice = document.getElementById('notice').getBoundingClientRect();
+    const notice = document.getElementById('copy-reply').getBoundingClientRect();
     const toolbar = document.querySelector('.chat-toolbar').getBoundingClientRect();
     return { fullyVisible: notice.top >= toolbar.bottom - 1 && notice.bottom <= innerHeight, toolbarVisible: toolbar.top >= 0, shellScroll: document.getElementById('workspace').scrollTop };
   });
@@ -913,8 +1110,8 @@ try {
   const readA = (await (await context.request.get(`${origin}/api/counterparts/${savedA.id}`)).json()).data.counterpart;
   assert.equal(readA.alias, '异步保存对象 A');
   assert.deepEqual(pageErrors, []);
-  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'user-reported time override with preserved recording time and composer edit draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'historical copy eligibility and separate receipt reuse', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy and history', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'history and reload use static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'default enabled glossary with seven collapsed terms and keyboard toggle', 'on-demand term explanations preserve composer and plan drafts without model calls', '320px day and night glossary touch targets and wrapping'], pageErrors }, null, 2) + '\n');
-  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/history, late-result/copy/readback and followup isolation, reduced motion, glossary keyboard/drafts, 320px day/night. Zero paid calls.');
+  await writeFile(join(evidenceDir, 'result.json'), JSON.stringify({ passed: true, synthetic: true, actualProviderCalls: 0, browser: browser.version(), classifications, replies, plans, directionReplyFixtures: directionRequests.length, directionSavedMockReplies: serverDirectionReplies, checks: ['per-conversation unsent drafts and edit cancellation', 'late saves preserve newer input with submit locking', 'readback and network failure preserve unsubmitted wording', 'intake collapse retains drafts and explicit cancel clears them', 'empty conversation gives next step without model calls', 'direct entry', 'fictional label', 'opposite speaker sides', 'inline AI directions', 'lower-weight choice', 'editable pending reply', 'day/night and draft preservation', 'unknown-network followup replay with stable receipt', 'followup inferred receipt and raw isolation', 'clipboard-to-recording timing estimate', 'minute-first time editing with collapsed arbitrary date, retained failed save, explicit clearing and preserved provenance/composer draft', '390/320px layout and docked composer', 'theme and classification reuse after reload', 'cross-object pending request isolation', 'failed analysis durable no-auto-retry', 'keyboard menu/card focus', 'startup and expired-session failure recovery', 'field coach topic and explicit plan outside WeChat messages', 'mobile coach focus and per-object plan draft', 'manual self overrides old pending and feedback source', 'backend archive retention without stale-copy UI restoration', 'solid direction selection with visible check', 'held direction generation hides previous draft and metadata and disables copy', 'returned direction and identical-text cache switch announcement', 'short reply highlight with persistent status and reduced-motion rendering', 'failed direction restores selection and per-suggestion edited draft', 'current advice reload uses static direction markers', '320px day and night direction loading and results', 'late reply isolation after object switch and new followup context', 'busy hidden draft never supplies inferred followup evidence', 'copy stays locked and delayed copy GET cannot roll back a new direction', 'durable mock reply POST before new message GET rereads and preserves current context', 'green AI and self surfaces with matched right alignment', 'prominent field coach heat and action labels', 'contextual collapsed coach footnotes without a permanent dictionary or toggle', 'visible guidance alone drives footnotes, preserving relevant expansion and excluding transcript or plan drafts without model calls', '320px day and night footnote touch targets and wrapping'], pageErrors }, null, 2) + '\n');
+  console.log('Direct single-chat demo journey passed: retained original journeys, direction loading/success/failure/cache/current reload, late-result/copy/readback and followup isolation, reduced motion, contextual footnotes and keyboard/drafts, 320px day/night. Zero paid calls.');
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((done) => server.close(done)); }

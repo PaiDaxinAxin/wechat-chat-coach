@@ -35,6 +35,12 @@ function longMessages() {
   messages[0].text = '先说清楚，我不接受去家里，见面只去公共场所。';
   messages[1].text = '明白，就选方便的公共场所。';
   messages[24].text = '我今天夜班，可能隔半天才看消息，不是一直拿着手机。';
+  messages[24].annotation = { text: '线下她也提过会轮夜班，这是我的补充，不是这条消息的原文。', source: 'user_annotation', updatedAt: '2026-09-20T08:00:00.000Z' };
+  messages[24].annotationRevision = 1;
+  messages[24].annotationUpdatedAt = messages[24].annotation.updatedAt;
+  // Clearing a note removes its content but retains causal edit identity.
+  messages[25].annotationRevision = 2;
+  messages[25].annotationUpdatedAt = '2026-09-20T08:01:00.000Z';
   messages[121].text = '你安排徒步路线很细心，这点挺吸引我。';
   messages[122].text = '谢谢你记得，我也想听听你的旅行经历。';
   messages[240].text = '最近我会主动想起你，但我还没确定自己是否要谈恋爱。';
@@ -55,19 +61,21 @@ function classification(context) {
   const first = context.messages[0].id, interest = context.messages[240].id, agreed = context.messages[300].id;
   const unknown = { level: 'unknown', evidenceIds: [] };
   return {
-    status: 'ready', confidence: 'moderate', phase: 'ordinary',
+    status: 'ready', confidence: 'moderate', phase: 'ordinary', contextUpdates: { facts: [], meeting: null },
+    workingFocus: { stage: 'security', reason: '落实已确认安排。', evidenceIds: [agreed] },
+    topicDecision: { mode: 'stay', reason: '见面安排已确认，当前可以自然收尾。' },
     obstacle: { type: 'negative', evidenceIds: [first], reason: '此前拒绝私人场所的边界仍然有效。' },
     heat: {
       activeInteraction: { level: 'positive', evidenceIds: [interest] }, responseEngagement: unknown,
       personalInterest: { level: 'positive', evidenceIds: [interest] }, reciprocalFlirting: unknown,
       actionFollowThrough: { level: 'positive', evidenceIds: [agreed] },
     },
-    options: ['up', 'down', 'sideways'].map((topicMove, i) => ({ topicMove, relationAction: 'pause', weight: i === 0 ? 0.4 : 0.3, reason: '不继续私人场所升级，按已确认安排见面。', evidenceIds: [first, agreed] })),
+    options: [],
     uncertainties: ['有见面意愿不代表已确定恋爱，也不表示同意进一步亲密。'], recommendationKind: 'uncalibrated',
     fieldCoach: { currentTopic: '见面安排后的自然收尾', topicStatus: 'closing', topicMessageIds: [agreed, context.messages.at(-1).id], initiative: '保留已确认的公共场所安排。', nextAction: '暂时留白，临近见面再确认。', warmingLayer: 'none', reason: '完整记录仍包含未撤回的边界。' },
   };
 }
-const reply = { reply: '', action: 'wait', reason: '安排已确认，可以自然结束这个话题。', styleNote: '保留简洁表达。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先不发送，保留自然留白。', reentryWhen: '临近已确认的见面时再确认。' } };
+const reply = { contextUpdates: { facts: [], meeting: null }, workingFocus: { stage: 'unknown', reason: '以实际安排为准。', evidenceIds: [] }, reply: '', action: 'wait', reason: '安排已确认，可以自然结束这个话题。', styleNote: '保留简洁表达。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '先不发送，保留自然留白。', reentryWhen: '临近已确认的见面时再确认。' } };
 const plan = (context) => ({ verdict: 'suitable', reason: '公共场所见面符合之前的边界。', timingSuggestion: { status: 'wait', guidance: '临近已约好的见面时再确认。', evidenceIds: [context.messages[300].id] }, nextAction: '先按当前安排，留意新的实际变化。' });
 
 function response(value) {
@@ -90,7 +98,7 @@ function assertFullContext(actual, expectedMessages, expectedCounterpart = count
   assert.equal(other.recordedContext.completeWechatHistoryVerified, false);
 }
 
-test('classify, reply and field coach transmit all 320 messages, background, timing and exact full knowledge', async () => {
+test('classify, reply and field coach transmit all 320 messages, sourced annotations, background, timing and exact full knowledge', async () => {
   const knowledgeText = await readFile(DEFAULT_KNOWLEDGE_PATH, 'utf8');
   let calls = 0;
   for (const other of [counterpart, { ...counterpart, channel: 'offline', appProfile: '', offlineScene: '朋友组织徒步时认识，当面聊了四十分钟；此后才开始微信聊天。' }]) {

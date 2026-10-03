@@ -23,6 +23,14 @@ jobs:
       - run: npm run test:demo
       - run: npm run test:style
       - run: npm run test:a11y
+      - run: npm run test:topics
+      - run: npm run test:recovery
+      - run: npm run test:coach-updates
+      - run: npm run test:context-learning
+      - run: npm run test:directory
+      - run: npm run test:affordance
+      - run: node scripts/verify-ux-feedback.mjs
+      - run: node scripts/verify-ux-recovery.mjs
       - run: node scripts/verify-reply-guidance.mjs
       - run: node tests/verify-image-input.mjs
       - run: git diff --check

@@ -2,7 +2,7 @@
 
 This record covers the private personal-expression learning addition to the natural followup, time correction, immutable case and 场外教练 implementation on `PaiDaxinAxin/wechat-chat-coach`. The preceding delivered baseline is [PR #7](https://github.com/PaiDaxinAxin/wechat-chat-coach/pull/7), merged at `818d7b5`, with successful [PR CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36754688809) and [main CI](https://github.com/PaiDaxinAxin/wechat-chat-coach/actions/runs/36754981741). Checks below apply to this addition; that earlier CI does not validate later source changes.
 
-The owner deferred registration/email/public authentication delivery and declined company mail. The immediate access environment is the isolated local demo at `http://127.0.0.1:8788`, with separate private data and fictional seed records. Opening an eligible new context automatically attempts one direction analysis. Reload, theme changes and same-context replay do not repeat it; a failed attempt waits for explicit retry. No public entry is exposed or accepted.
+The owner deferred registration/email/public authentication delivery and declined company mail. The immediate access environment is the isolated local demo at `http://127.0.0.1:8788`, with separate private data and fictional seed records. Opening an eligible new context automatically attempts one direction analysis. Active actions may recover transient failures under the bounded UI recovery policy. Reload and theme changes do not restart persisted failed attempts; exhausted recovery offers explicit retry. No public entry is exposed or accepted.
 
 ## Requirement evidence
 

@@ -40,6 +40,7 @@ try {
         obstacle: { type: 'none', evidenceIds: [], reason: '虚构对方主动延续项目话题。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed,
           reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+        topicDecision: { mode: 'change', reason: '合成换题局面，用于三方向与并发回归。' },
         options: [['up', .6], ['down', .1], ['sideways', .3]].map(([topicMove, weight]) => ({ topicMove, weight,
           relationAction: 'continue', reason: '顺着虚构项目了解一处细节。', evidenceIds: [id] })),
         uncertainties: ['对方是否愿意见面未知。'], recommendationKind: 'uncalibrated',
@@ -56,7 +57,7 @@ try {
       report.mockCalls.plan++; assert.equal(options.knowledgeText, knowledge);
       return { verdict: 'suitable', reason: '先分享经历，再提问一处细节。',
         timingSuggestion: { status: 'after_response', guidance: '等对方展开当前话题后，再分享自己的经历。', evidenceIds: [context.messages.at(-1).id] },
-        nextAction: '先承接对方当前回应。' };
+        nextAction: '先承接对方当前回应，再考虑自然升温。' };
     },
   });
   await server.ensureDemoSeed();
@@ -107,9 +108,19 @@ try {
     }
     try {
       await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-      await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+      await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+      await page.locator('#classify').click();
+      await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
       assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
       await scan('conversation');
+      const note = page.locator('.message-annotation').first();
+      const beforeNoteRequests = modelRequests;
+      await note.locator('..').locator('.message-menu > summary').click();
+      await note.locator('..').getByRole('button', { name: /^(添加|编辑)批注$/ }).click();
+      await note.locator('textarea').fill('合成线下背景，属于本人补充，不是原话。');
+      await scan('message-annotation');
+      await note.getByRole('button', { name: '收起', exact: true }).click();
+      assert.equal(modelRequests, beforeNoteRequests, 'Reading and editing a note never invokes a model');
       const icons = await page.locator('.message-menu > summary').evaluateAll((nodes) => nodes.map((node) => {
         const rgb = (color) => color.match(/[\d.]+/g).map(Number);
         const luminance = (channels) => channels.slice(0, 3).map((value) => value / 255)
@@ -145,9 +156,9 @@ try {
       await page.waitForFunction(() => !document.getElementById('suggestion-panel').classList.contains('reply-updated'));
       await page.unroute(`**/api/counterparts/${id}/reply`);
       await scan('reply-ready');
-      await page.locator('#suggestion-history > summary').click();
+      assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'Current advice has no archive entry');
       await page.locator('.suggestion-details > summary').click();
-      await scan('reply-history-and-reason');
+      await scan('reply-reason');
       await openCoach();
       if (width === 320) {
         assert.equal(await page.evaluate(() => document.activeElement.id), 'field-coach-title');
@@ -179,11 +190,23 @@ try {
         report.keyboardChecks.push({ state: stateName('coach-dialog'), checks: ['initial title focus', 'Tab enters the close button', 'forward and reverse focus wrap', 'Escape restores trigger focus', 'breakpoint transition removes inert and dialog semantics'] });
       }
       await page.locator('#field-coach-details > summary').click();
-      await page.locator('[data-coach-term=warming] > summary').click();
+      assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0);
+      const coachNote = page.locator('#coach-glossary-terms [data-coach-term=up]');
+      await coachNote.locator('summary').focus(); await page.keyboard.press('Enter');
+      assert.equal(await coachNote.locator('summary').textContent(), '注 · 上切');
+      assert.equal(await coachNote.locator('p').first().isVisible(), true, 'A currently mentioned term opens from the keyboard');
       await page.locator('#field-coach-plan').fill('先分享自己的项目，再了解对方的经历。');
       await response(`/api/counterparts/${id}/coach-plan`, () => page.locator('#field-coach-plan-submit').click());
       await page.locator('#field-coach-plan-result').filter({ hasText: '先分享经历' }).waitFor();
-      await scan('coach-glossary-and-plan');
+      const planNote = page.locator('#field-coach-plan-notes [data-coach-term=warming]');
+      await planNote.waitFor();
+      assert.equal(await planNote.getAttribute('open'), null, 'Generated plan footnotes start collapsed');
+      assert.equal(await planNote.locator('summary').textContent(), '注 · 升温');
+      await planNote.locator('summary').click();
+      assert.equal(await planNote.locator('p').count(), 4, 'The full A/B/C explanation remains reachable');
+      assert.equal(await planNote.locator('p').first().isVisible(), true);
+      assert.equal(await page.locator('#coach-glossary-terms [data-coach-term=warming]').count(), 0, 'Plan advice has its own footnotes');
+      await scan('coach-footnotes-and-plan');
       await page.locator('.style-entry > summary').click();
       await page.locator('#open-style-preferences').click();
       await page.locator('#style-rule-text').waitFor({ state: 'visible' });
@@ -200,6 +223,7 @@ try {
       await page.locator('#add-counterpart').click(); await page.locator('#counterpart-form').waitFor({ state: 'visible' });
       await scan('counterpart-form');
       await page.locator('#intake-alias').fill(`虚构空聊-${width}-${theme}`);
+      await page.locator('#intake-channel').selectOption('app');
       await page.locator('#intake-app').fill('仅供隔离可访问性验收的虚构资料。');
       await page.locator('#intake-background').fill('尚未录入对方消息。');
       const requestsBeforeEmpty = modelRequests, callsBeforeEmpty = { ...report.mockCalls };
@@ -219,12 +243,13 @@ try {
       });
       const requestsBeforeProfileGap = modelRequests;
       await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-      await page.waitForFunction(() => document.getElementById('classification-summary').textContent.includes('我的画像'));
+      await page.waitForFunction(() => document.getElementById('coach-panel').getAttribute('aria-busy') === 'false');
       if (!await page.locator('#profile-background').isVisible()) await menuItem('[data-view=profile]');
-      assert.ok((await page.locator('#classification-summary').textContent()).includes('我的画像'));
-      assert.equal(await page.locator('#classify').isDisabled(), true); assert.equal(await page.locator('#direct-reply').isDisabled(), true);
-      await scan('profile-prerequisite');
-      assert.equal(modelRequests, requestsBeforeProfileGap, 'Missing-profile guidance never dispatches a model operation');
+      assert.equal(await page.locator('#profile-background').inputValue(), '');
+      assert.equal(await page.locator('#profile-background').evaluate((node) => node.required), false);
+      assert.equal(await page.locator('#classify').isDisabled(), false); assert.equal(await page.locator('#direct-reply').isDisabled(), false);
+      await scan('optional-profile');
+      assert.equal(modelRequests, requestsBeforeProfileGap, 'Viewing incomplete intake reuses the existing analysis');
       await page.unroute('**/api/me');
     } finally { await context.close(); }
   }

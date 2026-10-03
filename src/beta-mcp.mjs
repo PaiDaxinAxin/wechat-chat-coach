@@ -9,7 +9,7 @@ const RequestId = z.string().min(8).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const Context = { counterpartId: Id, requestId: RequestId.optional() };
 const SAFE_CODES = new Set([
   'NOT_FOUND', 'UNAUTHORIZED', 'FORBIDDEN', 'INPUT_INVALID', 'INVALID_INPUT',
-  'PROFILE_REQUIRED', 'CONTEXT_REQUIRED', 'CLASSIFICATION_QUOTA_EXHAUSTED',
+  'PROFILE_REQUIRED', 'CONTEXT_REQUIRED', 'CLASSIFICATION_QUOTA_EXHAUSTED', 'DAILY_REPLY_QUOTA_EXHAUSTED',
   'COUNTERPART_NOT_FOUND', 'SUGGESTION_NOT_FOUND', 'PROVIDER_BUDGET_EXHAUSTED',
   'REQUEST_ID_CONTEXT_CONFLICT', 'JOB_NOT_AVAILABLE', 'JOB_INTERRUPTED',
   'PROFILE_REQUIRES_SHORT_QUESTIONNAIRE', 'FULL_QUESTIONNAIRE_PAID_ONLY',
@@ -59,13 +59,13 @@ export function createAccountMcpServer({ accountId, invoke }) {
     inputSchema: z.strictObject({}), annotations: { ...annotations, readOnlyHint: true },
   }, operation('GET', () => '/api/counterparts'));
   server.registerTool('coach_classify', {
-    description: '分析当前账户保存的单个对象上下文，使用账户分类额度。返回上切、下切、平移相对建议权重，权重不是成功率。',
-    inputSchema: z.strictObject(Context), annotations,
-  }, operation('POST', (input) => `/api/counterparts/${encodeURIComponent(input.counterpartId)}/classify`, (input) => ({ requestId: input.requestId ?? randomUUID() })));
+    description: '分析当前账户保存的整体场面与工作阶段；需要换话题时才给三个相对建议权重。可显式要求换话题；权重不是成功率。',
+    inputSchema: z.strictObject({ ...Context, topicChangeRequested: z.boolean().optional() }), annotations,
+  }, operation('POST', (input) => `/api/counterparts/${encodeURIComponent(input.counterpartId)}/classify`, (input) => ({ requestId: input.requestId ?? randomUUID(), ...(input.topicChangeRequested === undefined ? {} : { topicChangeRequested: input.topicChangeRequested }) })));
   server.registerTool('coach_reply', {
     description: '服务端用完整私有体系和当前对象上下文生成短建议。可选任一方向；不导出知识。免费分类耗尽仍可直接生成基础回复。',
-    inputSchema: z.strictObject({ ...Context, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().min(1).max(1_000).optional() }), annotations,
-  }, operation('POST', (input) => `/api/counterparts/${encodeURIComponent(input.counterpartId)}/reply`, (input) => ({ requestId: input.requestId ?? randomUUID(), ...(input.direction ? { direction: input.direction } : {}), ...(input.intent ? { intent: input.intent } : {}) })));
+    inputSchema: z.strictObject({ ...Context, direction: z.enum(['up', 'down', 'sideways']).optional(), intent: z.string().trim().min(1).max(1_000).optional(), topicChangeRequested: z.boolean().optional() }), annotations,
+  }, operation('POST', (input) => `/api/counterparts/${encodeURIComponent(input.counterpartId)}/reply`, (input) => ({ requestId: input.requestId ?? randomUUID(), ...(input.direction ? { direction: input.direction } : {}), ...(input.intent ? { intent: input.intent } : {}), ...(input.topicChangeRequested === undefined ? {} : { topicChangeRequested: input.topicChangeRequested }) })));
   server.registerTool('feedback_submit', {
     description: '提交当前账户实际发送版本和后续观察，隔离为未经清理的反馈。不自动进入知识、模型上下文或训练。',
     inputSchema: z.strictObject({

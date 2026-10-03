@@ -7,7 +7,7 @@ The owner selected the following licenses on 2026-10-01:
 | Material | License |
 | --- | --- |
 | Source code, runtime prompts embedded in code, synthetic test fixtures, build/configuration files and engineering documentation, unless listed below | [MIT](LICENSE) |
-| Content in `knowledge/`, `docs/framework.md`, `docs/questionnaires.md` and `docs/heat-context.md` | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/), also identified in [knowledge/LICENSE.md](knowledge/LICENSE.md) |
+| Content in `knowledge/`, `docs/framework.md`, `docs/questionnaires.md`, `docs/heat-context.md` and `docs/game-4.0-interview.md` | [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/), also identified in [knowledge/LICENSE.md](knowledge/LICENSE.md) |
 
 Third-party dependencies retain their own licenses; this notice does not relicense them. Private user conversations, account records, API keys and deployment secrets are not distributed or licensed as part of this repository.
 

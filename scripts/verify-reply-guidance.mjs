@@ -21,6 +21,7 @@ try {
   let clock = Date.parse('2026-10-01T10:00:00.000Z');
   const responses = [
     { reply: '感觉你对这件事挺认真。哪个部分最有意思？', reason: '先真诚回应，再轻度表达欣赏。', action: 'reply', styleNote: '用自己的说法，不必照抄。', guidance: { topicMove: 'down', relationMove: 'light_approach', ownWordsGuide: '先说一个真实欣赏的点，再问具体细节。', reentryWhen: '她继续展开时，顺着新内容接话。' } },
+    { reply: '我也刚忙完一个项目，你觉得最有意思的是哪部分？', reason: '接住她的项目，再分享真实经历。', action: 'reply', styleNote: '自然交流。', guidance: { topicMove: 'sideways', relationMove: 'continue', ownWordsGuide: '接住她的话，再分享自己的真实经历。', reentryWhen: '她有新内容时继续。' } },
     { reply: '', reason: '这个话题已经自然收住，单句表情不等于低兴趣。', action: 'wait', styleNote: '不用为了维持聊天硬续一句。', guidance: { topicMove: null, relationMove: 'wait', ownWordsGuide: '本轮先不发送，保留自然留白。', reentryWhen: '她有新内容，或你有真实新话题时再判断。' } },
     { reply: '你平时怎么放松？', reason: '顺着生活话题自然了解。', action: 'reply', styleNote: '保持你的自然表达。' },
     { reply: '', reason: '对方已经明确拒绝，不继续同类推进。', action: 'pause', styleNote: '尊重边界。', guidance: { topicMove: null, relationMove: 'pause', ownWordsGuide: '停止这类推进，不再追问。', reentryWhen: '对方明确愿意恢复交流时，再判断是否接话。' } },
@@ -30,7 +31,7 @@ try {
       classifications++; assert.equal(options.knowledgeText, knowledgeText);
       const id = context.messages.findLast(({ speaker }) => speaker === 'other').id;
       const unknown = { level: 'unknown', evidenceIds: [] };
-      return { status: 'ready', confidence: 'limited', phase: 'ordinary', obstacle: { type: 'none', evidenceIds: [], reason: '当前没有明确阻力。' }, heat: Object.fromEntries(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough'].map((name) => [name, unknown])), options: ['up', 'down', 'sideways'].map((topicMove, index) => ({ topicMove, weight: index === 0 ? .6 : .2, relationAction: 'continue', reason: '自然了解当前话题。', evidenceIds: [id] })), uncertainties: ['仅作合成测试。'], recommendationKind: 'uncalibrated' };
+      return { status: 'ready', confidence: 'limited', phase: 'ordinary', obstacle: { type: 'none', evidenceIds: [], reason: '当前没有明确阻力。' }, topicDecision: { mode: 'change', reason: '合成换题局面。' }, heat: Object.fromEntries(['activeInteraction', 'responseEngagement', 'personalInterest', 'reciprocalFlirting', 'actionFollowThrough'].map((name) => [name, unknown])), options: ['up', 'down', 'sideways'].map((topicMove, index) => ({ topicMove, weight: index === 0 ? .6 : .2, relationAction: 'continue', reason: '自然了解当前话题。', evidenceIds: [id] })), uncertainties: ['仅作合成测试。'], recommendationKind: 'uncalibrated' };
     },
     replyFn: async (_input, options) => { assert.equal(options.knowledgeText, knowledgeText); return responses[replies++]; },
   });
@@ -46,7 +47,13 @@ try {
   async function perform(suffix, action) {
     const response = page.waitForResponse((r) => r.url().endsWith(suffix) && r.request().method() === 'POST');
     await action(); const received = await response, body = await received.json(); assert.equal(received.status(), 200);
-    if (body.data.suggestion) await page.waitForFunction((id) => [...document.querySelectorAll('[data-suggestion-id]')].some((button) => button.dataset.suggestionId === id), body.data.suggestion.id);
+    if (body.data.suggestion) await page.waitForFunction(({ reply, action }) => {
+      const panel = document.getElementById('suggestion-panel');
+      if (!panel.checkVisibility() || panel.getAttribute('aria-busy') !== 'false') return false;
+      return ['wait', 'pause'].includes(action)
+        ? document.getElementById('suggestion-title').textContent.includes(action === 'pause' ? '停止当前推进' : '暂时不回')
+        : document.getElementById('suggestion-text').value === reply && !document.getElementById('suggestion-text').disabled;
+    }, body.data.suggestion);
     return body.data;
   }
   async function detail() {
@@ -82,17 +89,28 @@ try {
       const complete = ready(); release(); await complete;
     } finally { release(); await page.unroute(url, handler); }
   }
-  await page.goto(origin); await ready();
+  await page.goto(origin); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
+  assert.equal(classifications, 0, 'Opening the saved conversation is read-only');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await perform('/classify', () => page.locator('#classify').click()); await ready();
   const id = await page.locator('#counterpart-select').inputValue();
   const firstReply = await perform('/reply', () => page.locator('[data-direction=down]').click());
   assert.equal(await page.locator('#reply-guidance').isVisible(), true);
   assert.equal(await page.locator('#suggestion-direction').textContent(), '下切');
-  assert.equal(await page.locator('#reply-relation').textContent(), '轻度靠近');
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 轻度靠近');
   assert.equal(await page.locator('#reply-own-words').textContent(), responses[0].guidance.ownWordsGuide);
   assert.equal(await page.locator('#reply-reentry').textContent(), responses[0].guidance.reentryWhen);
   await page.locator('#suggestion-text').fill(' '); assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   await page.locator('#suggestion-text').fill('本人改写，不表示已发送。'); assert.equal(await page.locator('#copy-reply').isDisabled(), false);
   await perform('/copied', () => page.locator('#copy-reply').click());
+  await reloadWithHeldDetail();
+  assert.equal(await page.locator('#suggestion-text').inputValue(), '本人改写，不表示已发送。', 'A single current edited copy survives reload');
+  assert.equal(replies, 1);
+  const newerReply = await perform('/reply', () => page.locator('[data-direction=sideways]').click());
+  await reloadWithHeldDetail();
+  assert.equal(await page.locator('#suggestion-text').inputValue(), newerReply.suggestion.reply, 'A copied reply cannot replace a newer current reply after reload');
+  assert.equal(await page.locator('#copy-reply').isDisabled(), false);
+  assert.equal(replies, 2);
   await ready(); const waitingReply = await perform('/reply', () => page.locator('[data-direction=up]').click());
   assert.equal(waitingReply.suggestion.createdAt, firstReply.suggestion.createdAt);
   assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
@@ -100,23 +118,23 @@ try {
   assert.equal(await page.locator('#suggestion-direction').isVisible(), false);
   assert.equal(await page.locator('#reply-wait-reason').isVisible(), true);
   assert.ok((await page.locator('#reply-wait-reason').textContent()).includes('单句表情不等于低兴趣'));
-  assert.equal(await page.locator('#reply-reentry').textContent(), responses[1].guidance.reentryWhen);
+  assert.equal(await page.locator('#reply-reentry').textContent(), responses[2].guidance.reentryWhen);
   await reloadWithHeldDetail();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), true);
   assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 暂时不回');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
-  assert.equal(replies, 2); assert.equal(classifications, 1, 'Reload uses durable attempts, not another model call');
+  assert.equal(replies, 3); assert.equal(classifications, 1, 'Reload uses durable attempts, not another model call');
   const before = await detail();
   await page.locator('#message-text').fill('合成下一句：刚忙完。');
   const followed = await perform('/followup', () => page.locator('#save-message').click());
   assert.equal(followed.previousMessage, null); assert.equal(followed.feedback, null, 'No-reply suggestions cannot become inferred sent messages');
-  await page.getByText('合成下一句：刚忙完。', { exact: true }).waitFor({ state: 'visible' });
+  await page.locator('#transcript').getByText('合成下一句：刚忙完。', { exact: true }).waitFor({ state: 'visible' });
   await ready();
   const after = await detail();
   assert.equal(after.messages.length, before.messages.length + 1);
   const legacyReply = await perform('/reply', () => page.locator('[data-direction=sideways]').click());
-  assert.equal(await page.locator('#reply-relation').textContent(), '这条旧建议未保存关系动作');
-  assert.ok((await page.locator('#reply-own-words').textContent()).includes('旧建议未保存'));
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 关系动作待判断');
+  assert.equal(await page.locator('#reply-own-words').textContent(), '可保留原意，用你的说法改写。');
   assert.equal(await page.locator('#suggestion-text').isVisible(), true); assert.equal(await page.locator('#copy-reply').isDisabled(), false);
   // Hold an already-recorded copy response until a newer pause has completed.
   // A late HTTP response is not evidence that the copy happened after the pause.
@@ -140,42 +158,42 @@ try {
     await ready(); pausedReply = await perform('/reply', () => page.locator('[data-direction=down]').click());
     assert.equal(pausedReply.suggestion.createdAt, legacyReply.suggestion.createdAt);
     releaseCopy(); await response;
-    await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制');
+    await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制回复');
   } finally { releaseCopy(); await page.unroute(copyUrl, copyHandler); }
-  assert.equal(await page.locator('#reply-relation').textContent(), '停止当前推进');
+  assert.equal(await page.locator('#reply-relation').textContent(), '待判断 · 停止当前推进');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
-  assert.equal(await page.locator('#reply-reentry').textContent(), responses[3].guidance.reentryWhen);
+  assert.equal(await page.locator('#reply-reentry').textContent(), responses[4].guidance.reentryWhen);
   await reloadWithHeldDetail();
   assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 先停止当前推进');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
-  assert.equal(replies, 4, 'Copied history cannot replace a later pause after reload');
+  assert.equal(replies, 5, 'An earlier copy cannot replace a later current pause after reload');
   const ordered = await detail();
-  assert.deepEqual(ordered.suggestions.map(({ id }) => id), [firstReply, waitingReply, legacyReply, pausedReply].map(({ suggestion }) => suggestion.id));
-  // Deliberate history reuse after the decision is still allowed. It uses a new
-  // server copy event, not the delayed response to the earlier copy request.
+  assert.deepEqual(ordered.suggestions.map(({ id }) => id), [firstReply, newerReply, waitingReply, legacyReply, pausedReply].map(({ suggestion }) => suggestion.id));
+  assert.equal(await page.locator('#suggestion-history,#suggestion-list').count(), 0, 'No archived advice selection remains in the UI');
+  // Existing receipt storage is compatible, but even a newer explicit API copy
+  // must not replace the current pause with an older sendable reply in the UI.
   clock += 1;
-  await page.locator('#suggestion-history > summary').click();
-  await page.locator(`[data-suggestion-id="${legacyReply.suggestion.id}"]`).click();
-  await perform('/copied', () => page.locator('#copy-reply').click());
-  await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制');
-  await page.reload(); await ready();
-  assert.equal(await page.locator('#suggestion-text').inputValue(), legacyReply.suggestion.reply);
-  assert.equal(await page.locator('#copy-reply').isDisabled(), false);
-  await page.locator('#suggestion-history > summary').click();
-  await page.locator(`[data-suggestion-id="${pausedReply.suggestion.id}"]`).click();
+  const me = (await (await context.request.get(`${origin}/api/me`)).json()).data;
+  const newerOldCopy = await context.request.post(copyUrl, { headers: { origin, 'x-csrf-token': me.csrfToken },
+    data: { requestId: 'newer-archived-api-copy', copiedText: legacyReply.suggestion.reply } });
+  assert.equal(newerOldCopy.status(), 200);
+  await reloadWithHeldDetail();
   assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 先停止当前推进');
+  assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
+  assert.equal(await page.locator('#copy-reply').isDisabled(), true);
+  assert.equal((await detail()).suggestions.length, ordered.suggestions.length, 'Archived data is retained without becoming selectable advice');
   const beforePause = await detail();
   await page.locator('#message-text').fill('合成下一句：暂停后新的内容。');
   const pauseFollowup = await perform('/followup', () => page.locator('#save-message').click());
   assert.equal(pauseFollowup.previousMessage, null); assert.equal(pauseFollowup.feedback, null);
-  await page.getByText('合成下一句：暂停后新的内容。', { exact: true }).waitFor({ state: 'visible' });
+  await page.locator('#transcript').getByText('合成下一句：暂停后新的内容。', { exact: true }).waitFor({ state: 'visible' });
   const afterPause = await detail();
   assert.equal(afterPause.messages.length, beforePause.messages.length + 1);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
-  assert.deepEqual(errors, []); assert.equal(replies, 4);
-  console.log(JSON.stringify({ status: 'passed', guidedReply: true, legacyFallback: true, heldStartupRead: true, sameTimestampInsertionOrder: true, lateCopyResponseDoesNotUndoPause: true, explicitLaterHistoryCopyCanRestore: true, copiedThenWaitAndPauseSurviveReload: true, copyDisabledForWaitAndPause: true, noInferredMessageFromWaitOrPause: true, mockReplies: replies, mockClassifications: classifications, paidCalls: 0 }));
+  assert.deepEqual(errors, []); assert.equal(replies, 5);
+  console.log(JSON.stringify({ status: 'passed', guidedReply: true, currentEditedCopySurvivesReload: true, copiedReplyCannotReplaceNewerReply: true, legacyFallback: true, heldStartupRead: true, sameTimestampInsertionOrder: true, lateCopyResponseDoesNotUndoPause: true, newerArchivedCopyCannotRestoreCurrentUI: true, backendArchiveRetained: true, noHistoryUI: true, copiedThenWaitAndPauseSurviveReload: true, copyDisabledForWaitAndPause: true, noInferredMessageFromWaitOrPause: true, mockReplies: replies, mockClassifications: classifications, paidCalls: 0 }));
 } finally {
   await browser?.close();
   if (server?.listening) { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }

@@ -26,6 +26,7 @@ try {
       const id = context.messages.at(-1).id, observed = { level: 'positive', evidenceIds: [id] };
       return { status: 'ready', confidence: 'moderate', phase: 'ordinary', obstacle: { type: 'none', evidenceIds: [], reason: '合成对话仍在展开。' },
         heat: { activeInteraction: observed, responseEngagement: observed, personalInterest: observed, reciprocalFlirting: { level: 'unknown', evidenceIds: [] }, actionFollowThrough: { level: 'unknown', evidenceIds: [] } },
+        topicDecision: { mode: 'change', reason: '合成换题局面，用于三方向与并发回归。' },
         options: [['up', .6], ['down', .1], ['sideways', .3]].map(([topicMove, weight]) => ({ topicMove, weight, relationAction: 'continue', reason: '顺着当前话题了解。', evidenceIds: [id] })),
         uncertainties: ['效果未知。'], recommendationKind: 'uncalibrated' };
     },
@@ -73,13 +74,17 @@ try {
   }
   const save = () => page.locator('#profile-form > button[type=submit]').click();
   await page.goto(origin); await login('style-owner');
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   const id = await page.locator('#counterpart-select').inputValue(), secondId = id === primary.id ? secondary.id : primary.id;
+  assert.equal(classifications, 0, 'Login only reads the saved conversation');
+  await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
+  await response(`/api/counterparts/${id}/classify`, 'POST', () => page.locator('#classify').click());
+  await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await response(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
   const original = await page.locator('#suggestion-text').inputValue(), ownVersion = '我最近也在做设计。你最投入的项目是什么？';
   await page.locator('#suggestion-text').fill(ownVersion);
-  await page.locator('.message').first().locator('summary').click(); await page.locator('.message').first().getByRole('button', { name: '编辑对方的消息', exact: true }).click();
+  await page.locator('.message').first().locator('.message-menu > summary').click(); await page.locator('.message').first().getByRole('button', { name: '编辑对方的消息', exact: true }).click();
   await page.locator('#message-speaker').selectOption('self'); await page.locator('#message-text').fill('尚未提交的本人原话');
   await page.locator('#field-coach-plan').fill('尚未提交的主导计划');
   await openPreferences();
@@ -120,7 +125,7 @@ try {
   await page.locator('#style-cancel-draft').click();
   // Adopted rules are account scoped and enter an explicit later call on another object.
   await page.locator('#counterpart-select').selectOption(secondId);
-  await page.waitForFunction(() => [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.waitForFunction((secondId) => document.getElementById('counterpart-select').value === secondId && document.getElementById('counterpart-workspace').checkVisibility() && !document.getElementById('direct-reply').disabled, secondId);
   await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('#direct-reply').click());
   assert.deepEqual(JSON.parse(contexts.at(-1).userProfile).confirmedPersonalStyle.rules.map(({ text }) => text), [candidateText]);
   await openPreferences();

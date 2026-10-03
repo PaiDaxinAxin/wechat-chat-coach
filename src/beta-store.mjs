@@ -94,6 +94,11 @@ export function createBetaStore({
       subject TEXT NOT NULL, day TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, reserved INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(subject,day)
     );
+    CREATE TABLE IF NOT EXISTS reply_daily_usage (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, day TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0), reserved INTEGER NOT NULL DEFAULT 0 CHECK(reserved >= 0),
+      PRIMARY KEY(user_id,day)
+    );
     CREATE TABLE IF NOT EXISTS model_jobs (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       counterpart_id TEXT NOT NULL REFERENCES counterparts(id) ON DELETE CASCADE,
@@ -158,8 +163,14 @@ export function createBetaStore({
   addColumn('messages', 'reply_interval_json', 'TEXT');
   addColumn('messages', 'wechat_time_json', 'TEXT');
   addColumn('messages', 'reply_to_message_id', 'TEXT');
+  addColumn('messages', 'annotation_json', 'TEXT');
+  addColumn('messages', 'annotation_updated_at', 'TEXT');
+  addColumn('messages', 'annotation_revision', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('reply_copy_receipts', 'annotation_revisions_json', 'TEXT');
   addColumn('model_jobs', 'context_snapshot_json', 'TEXT');
   addColumn('model_jobs', 'snapshot_hash', 'TEXT');
+  addColumn('model_jobs', 'reply_reservation', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('model_jobs', 'reply_day', 'TEXT');
   addColumn('suggestions', 'origin_job_id', 'TEXT REFERENCES model_jobs(id) ON DELETE CASCADE');
   addColumn('followup_receipts', 'previous_suggestion_id', 'TEXT');
   addColumn('followup_receipts', 'previous_reply_hash', 'TEXT');
@@ -180,6 +191,7 @@ export function createBetaStore({
   const run = (sql, ...arguments_) => db.prepare(sql).run(...arguments_);
   const timestamp = () => new Date(now()).toISOString();
   const day = () => timestamp().slice(0, 10);
+  const replyDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now()));
   const transaction = (callback) => {
     db.exec('BEGIN IMMEDIATE');
     try { const result = callback(); db.exec('COMMIT'); return result; }
@@ -189,7 +201,7 @@ export function createBetaStore({
   const user = (id) => { const row = get('SELECT * FROM users WHERE id=?', id); if (!row) throw new BetaError('ACCOUNT_NOT_FOUND', 404); return row; };
   const owner = (id) => { const row = user(id); if (row.role !== 'owner') throw new BetaError('OWNER_REQUIRED', 403); return row; };
   const counterpartRow = (userId, id) => { const row = get('SELECT * FROM counterparts WHERE id=? AND user_id=?', id, userId); if (!row) throw new BetaError('COUNTERPART_NOT_FOUND', 404); return row; };
-  const counterpartValue = (row) => ({ ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
+  const counterpartValue = (row) => ({ remark: '', ...parse(row.value_json), id: row.id, revision: row.revision, createdAt: row.created_at, updatedAt: row.updated_at });
   const messageValue = (row) => {
     if (!row) return null;
     const wechatTime = parse(row.wechat_time_json);
@@ -204,7 +216,7 @@ export function createBetaStore({
         replyInterval = { fromAt: sentTime.at, toAt: wechatTime.at, elapsedMs: valid ? delta : null, fromSource: 'user_reported_wechat_sent', toSource: 'user_reported_wechat_received', reliability: valid ? 'user_reported_interval' : 'unknown', interpretation: 'not_verified_wechat_latency' };
       }
     }
-    return { id: row.id, speaker: row.speaker, text: row.text, suggestionId: row.suggestion_id, provenance: row.provenance, recordedAt: row.created_at, wechatTime, replyInterval, createdAt: row.created_at, updatedAt: row.updated_at };
+    return { id: row.id, speaker: row.speaker, text: row.text, suggestionId: row.suggestion_id, provenance: row.provenance, recordedAt: row.created_at, wechatTime, replyInterval, createdAt: row.created_at, updatedAt: row.updated_at, ...(row.annotation_json ? { annotation: parse(row.annotation_json) } : {}), ...(row.annotation_revision ? { annotationRevision: row.annotation_revision, annotationUpdatedAt: row.annotation_updated_at } : {}) };
   };
   const touch = (id) => run('UPDATE counterparts SET revision=revision+1,updated_at=? WHERE id=?', timestamp(), id);
   const suggestionSource = (row) => {
@@ -221,13 +233,18 @@ export function createBetaStore({
     const baselineMessages = Array.isArray(baseline) ? new Map(baseline.map((message) => [message.id, message])) : null;
     const laterSelf = all("SELECT * FROM messages WHERE user_id=? AND counterpart_id=? AND speaker='self' ORDER BY seq", row.user_id, row.counterpart_id)
       .filter((message) => baselineMessages ? baselineMessages.get(message.id)?.speaker !== 'self' || baselineMessages.get(message.id)?.text !== message.text : message.updated_at >= row.created_at);
+    const changedAnnotations = all('SELECT * FROM messages WHERE user_id=? AND counterpart_id=? AND annotation_updated_at IS NOT NULL', row.user_id, row.counterpart_id)
+      .filter((message) => baselineMessages ? message.annotation_revision !== (baselineMessages.get(message.id)?.annotationRevision ?? 0) : message.annotation_revision > 0);
     if (copy === undefined) copy = replyText === undefined
-      ? get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id)
-      : get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id, replyText);
+      ? get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? ORDER BY rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id)
+      : get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY rowid DESC LIMIT 1', row.user_id, row.counterpart_id, row.id, replyText);
     const matchingCopy = copy && (replyText === undefined || copy.copied_text === replyText) ? copy : null;
-    const copyRestores = matchingCopy && laterSelf.every((message) => Date.parse(matchingCopy.copied_at) > Date.parse(message.updated_at));
-    const superseded = laterSelf.length > 0 && !copyRestores;
-    const manualSuperseded = superseded && laterSelf.some((message) => message.provenance !== 'inferred_from_followup' && (!matchingCopy || Date.parse(matchingCopy.copied_at) <= Date.parse(message.updated_at)));
+    const copiedAnnotationRevisions = parse(matchingCopy?.annotation_revisions_json);
+    // A captured revision proves copying followed the edit even when clocks move
+    // backwards. Request replay keeps its original receipt and cannot recapture it.
+    const copyRestores = matchingCopy && laterSelf.every((message) => Date.parse(matchingCopy.copied_at) > Date.parse(message.updated_at)) && changedAnnotations.every((message) => copiedAnnotationRevisions?.[message.id] === message.annotation_revision);
+    const superseded = (laterSelf.length > 0 || changedAnnotations.length > 0) && !copyRestores;
+    const manualSuperseded = superseded && (changedAnnotations.length > 0 || laterSelf.some((message) => message.provenance !== 'inferred_from_followup' && (!matchingCopy || Date.parse(matchingCopy.copied_at) <= Date.parse(message.updated_at))));
     const activeCopy = superseded ? null : matchingCopy;
     const text = replyText ?? activeCopy?.copied_text ?? source.suggestion.reply;
     const consumed = consumedSource(row.user_id, row.counterpart_id, row.id, text, matchingCopy);
@@ -249,24 +266,30 @@ export function createBetaStore({
   };
   const jobValue = (row) => row ? ({ id: row.id, userId: row.user_id, counterpartId: row.counterpart_id, operation: row.operation, requestId: row.request_id, contextHash: row.context_hash, knowledgeHash: row.knowledge_hash, state: row.state, result: parse(row.result_json), errorCode: row.error_code, createdAt: row.created_at, updatedAt: row.updated_at, workerId: row.worker_id, cacheOf: row.cache_of }) : null;
   const budget = (subject, forDay) => { run('INSERT OR IGNORE INTO provider_budget(subject,day) VALUES(?,?)', subject, forDay); return get('SELECT * FROM provider_budget WHERE subject=? AND day=?', subject, forDay); };
+  const replyBudget = (userId, forDay) => { run('INSERT OR IGNORE INTO reply_daily_usage(user_id,day) VALUES(?,?)', userId, forDay); return get('SELECT * FROM reply_daily_usage WHERE user_id=? AND day=?', userId, forDay); };
+  const limitedReplies = (account) => account.plan === 'free' && account.role !== 'owner';
   const providerLimit = (account) => account.plan === 'paid' ? paidProviderDailyLimit : freeProviderDailyLimit;
   const quota = (userId) => {
     const account = user(userId);
     const currentDay = day();
     const local = budget(userId, currentDay), global = budget('global', currentDay);
+    const currentReplyDay = replyDay(), replies = replyBudget(userId, currentReplyDay);
     return {
       classificationRemaining: account.plan === 'paid' ? null : Math.max(0, 3 - account.classification_used - account.classification_reserved),
       providerRemaining: Math.max(0, Math.min(providerLimit(account) - local.used - local.reserved, globalProviderDailyLimit - global.used - global.reserved)),
       providerDay: currentDay,
+      dailyReplyRemaining: limitedReplies(account) ? Math.max(0, 3 - replies.used - replies.reserved) : null,
+      replyDay: currentReplyDay, replyTimeZone: 'Asia/Shanghai',
     };
   };
   function releaseJob(row, code) {
     if (!row || !['reserved', 'running'].includes(row.state)) return;
     if (row.classification_reservation) run('UPDATE users SET classification_reserved=MAX(0,classification_reserved-1) WHERE id=?', row.user_id);
+    if (row.reply_reservation) run('UPDATE reply_daily_usage SET reserved=MAX(0,reserved-1) WHERE user_id=? AND day=?', row.user_id, row.reply_day);
     if (row.provider_reservation) {
       for (const subject of [row.user_id, 'global']) run('UPDATE provider_budget SET reserved=MAX(0,reserved-1) WHERE subject=? AND day=?', subject, row.budget_day);
     }
-    run("UPDATE model_jobs SET state='failed',error_code=?,classification_reservation=0,provider_reservation=0,updated_at=? WHERE id=?", code, timestamp(), row.id);
+    run("UPDATE model_jobs SET state='failed',error_code=?,classification_reservation=0,reply_reservation=0,provider_reservation=0,updated_at=? WHERE id=?", code, timestamp(), row.id);
     run("UPDATE model_jobs SET state='failed',error_code=?,updated_at=? WHERE cache_of=? AND state='linked'", code, timestamp(), row.id);
   }
 
@@ -492,12 +515,36 @@ export function createBetaStore({
         return messageValue(get('SELECT * FROM messages WHERE id=?', id));
       });
     },
-    getMeeting(userId, counterpartId) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM meetings WHERE user_id=? AND counterpart_id=?', userId, counterpartId); return row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' }; },
+    putMessageAnnotation(userId, counterpartId, id, annotationText) {
+      counterpartRow(userId, counterpartId);
+      if (typeof annotationText !== 'string' || annotationText.trim().length > 5_000) throw new BetaError('MESSAGE_ANNOTATION_INVALID');
+      const content = annotationText.trim();
+      return transaction(() => {
+        const row = get('SELECT * FROM messages WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId);
+        if (!row) throw new BetaError('MESSAGE_NOT_FOUND', 404);
+        if ((parse(row.annotation_json)?.text ?? '') !== content) {
+          const annotation = content ? { text: content, source: 'user_annotation', updatedAt: timestamp() } : null;
+          run('UPDATE messages SET annotation_json=?,annotation_updated_at=?,annotation_revision=annotation_revision+1 WHERE id=?', annotation ? json(annotation) : null, timestamp(), id);
+          touch(counterpartId); audit(userId, 'message_annotation_saved', id, { source: 'user_annotation', removed: !content });
+        }
+        return messageValue(get('SELECT * FROM messages WHERE id=?', id));
+      });
+    },
+    getMeetingState(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get('SELECT * FROM meetings WHERE user_id=? AND counterpart_id=?', userId, counterpartId);
+      const { _saveReceipt = null, _atSaveMessageIds = null, ...meeting } = row ? parse(row.value_json) : { status: 'none', time: '', place: '', note: '' };
+      return { meeting, updatedAt: row?.updated_at ?? null, receiptId: _saveReceipt, atSaveMessageIds: _atSaveMessageIds };
+    },
+    getMeeting(userId, counterpartId) { return this.getMeetingState(userId, counterpartId).meeting; },
     putMeeting(userId, counterpartId, value) {
       counterpartRow(userId, counterpartId);
-      run('INSERT INTO meetings VALUES(?,?,?,?) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json(value), timestamp());
-      audit(userId, 'meeting_saved', counterpartId, { status: value.status });
-      return value;
+      return transaction(() => {
+        const atSaveMessageIds = all('SELECT id FROM messages WHERE user_id=? AND counterpart_id=?', userId, counterpartId).map(({ id }) => id);
+        run('INSERT INTO meetings VALUES(?,?,?,?) ON CONFLICT(counterpart_id) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', counterpartId, userId, json({ ...value, _saveReceipt: randomUUID(), _atSaveMessageIds: atSaveMessageIds }), timestamp());
+        audit(userId, 'meeting_saved', counterpartId, { status: value.status });
+        return value;
+      });
     },
     listSuggestions(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM suggestions WHERE user_id=? AND counterpart_id=? ORDER BY rowid', userId, counterpartId).map(suggestionValue); },
     getSuggestion(userId, counterpartId, id) { counterpartRow(userId, counterpartId); const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', id, userId, counterpartId); if (!row) throw new BetaError('SUGGESTION_NOT_FOUND', 404); return suggestionValue(row); },
@@ -521,7 +568,8 @@ export function createBetaStore({
           return { copyReceipt: { id: existing.id, suggestionId, copiedAt: existing.copied_at, provenance: 'clipboard_copied' }, cached: true };
         }
         const id = randomUUID(), copiedAt = timestamp();
-        run('INSERT INTO reply_copy_receipts VALUES(?,?,?,?,?,?,?,?)', id, userId, counterpartId, suggestionId, requestId, payloadHash, text, copiedAt);
+        const annotationRevisions = Object.fromEntries(all('SELECT id,annotation_revision FROM messages WHERE user_id=? AND counterpart_id=? AND annotation_revision>0', userId, counterpartId).map((message) => [message.id, message.annotation_revision]));
+        run('INSERT INTO reply_copy_receipts(id,user_id,counterpart_id,suggestion_id,request_id,payload_hash,copied_text,copied_at,annotation_revisions_json) VALUES(?,?,?,?,?,?,?,?,?)', id, userId, counterpartId, suggestionId, requestId, payloadHash, text, copiedAt, json(annotationRevisions));
         audit(userId, 'reply_copy_reported', id, { suggestionId, provenance: 'clipboard_copied', sendingVerified: false });
         return { copyReceipt: { id, suggestionId, copiedAt, provenance: 'clipboard_copied' }, cached: false };
       });
@@ -546,7 +594,7 @@ export function createBetaStore({
           copy = get('SELECT * FROM reply_copy_receipts WHERE id=? AND user_id=? AND counterpart_id=?', previousCopyReceiptId, userId, counterpartId);
           if (!copy || copy.suggestion_id !== previousSuggestionId) throw new BetaError('COPY_RECEIPT_NOT_FOUND', 404);
           if (copy.copied_text !== previousReplyText) copy = null;
-        } else if (source && previousReplyText) copy = get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY copied_at DESC,rowid DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText);
+        } else if (source && previousReplyText) copy = get('SELECT * FROM reply_copy_receipts WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND copied_text=? ORDER BY rowid DESC LIMIT 1', userId, counterpartId, previousSuggestionId, previousReplyText);
         if (source) {
           const row = get('SELECT * FROM suggestions WHERE id=? AND user_id=? AND counterpart_id=?', previousSuggestionId, userId, counterpartId);
           const state = pendingState(row, source, { replyText: previousReplyText, copy });
@@ -593,6 +641,11 @@ export function createBetaStore({
     },
     findSentMessage(userId, counterpartId, suggestionId, actualSentText) { counterpartRow(userId, counterpartId); return messageValue(get("SELECT * FROM messages WHERE user_id=? AND counterpart_id=? AND suggestion_id=? AND speaker='self' AND text=? AND provenance='user_confirmed_record' ORDER BY seq DESC LIMIT 1", userId, counterpartId, suggestionId, actualSentText)); },
     latestSuccessful(userId, counterpartId, operation, contextHash) { counterpartRow(userId, counterpartId); return jobValue(get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation=? AND context_hash=? AND state='succeeded' ORDER BY updated_at DESC LIMIT 1", userId, counterpartId, operation, contextHash)); },
+    latestSuccessfulForContexts(userId, counterpartId, operation, contextHashes) {
+      counterpartRow(userId, counterpartId);
+      if (!Array.isArray(contextHashes) || contextHashes.length !== 2 || contextHashes.some((hash) => typeof hash !== 'string')) throw new BetaError('INPUT_INVALID');
+      return jobValue(get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation=? AND context_hash IN (?,?) AND state='succeeded' ORDER BY rowid DESC LIMIT 1", userId, counterpartId, operation, ...contextHashes));
+    },
     hasModelAttempt(userId, counterpartId, operation, contextHash) { counterpartRow(userId, counterpartId); return Boolean(get('SELECT id FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation=? AND context_hash=? LIMIT 1', userId, counterpartId, operation, contextHash)); },
     latestCoachPlan(userId, counterpartId, baseContextHash) {
       counterpartRow(userId, counterpartId);
@@ -601,7 +654,16 @@ export function createBetaStore({
       return { plan: parse(row.context_snapshot_json).request.plan, planAssessment: parse(row.result_json).planAssessment };
     },
     listJobs(userId, counterpartId) { counterpartRow(userId, counterpartId); return all('SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? ORDER BY created_at DESC LIMIT 30', userId, counterpartId).map(jobValue); },
-    previousClassification(userId, counterpartId) { counterpartRow(userId, counterpartId); return jobValue(get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY updated_at DESC LIMIT 1", userId, counterpartId)); },
+    previousClassification(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation='classify' AND state='succeeded' AND cache_of IS NULL ORDER BY rowid DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
+    latestContextUpdates(userId, counterpartId) {
+      counterpartRow(userId, counterpartId);
+      const row = get("SELECT * FROM model_jobs WHERE user_id=? AND counterpart_id=? AND operation IN ('classify','reply') AND state='succeeded' AND cache_of IS NULL AND (json_type(result_json,'$.classification.contextUpdates')='object' OR json_type(result_json,'$.suggestion.contextUpdates')='object') ORDER BY rowid DESC LIMIT 1", userId, counterpartId);
+      return row ? { ...jobValue(row), contextSnapshot: parse(row.context_snapshot_json) } : null;
+    },
     reserveJob({ userId, counterpartId, operation, requestId, contextHash, knowledgeHash, workerId, providerModel, contextSnapshot }) {
       counterpartRow(userId, counterpartId);
       return transaction(() => {
@@ -625,12 +687,18 @@ export function createBetaStore({
         }
         const account = user(userId), classReservation = operation === 'classify' && account.plan === 'free' ? 1 : 0;
         if (classReservation && account.classification_used + account.classification_reserved >= 3) throw new BetaError('CLASSIFICATION_QUOTA_EXHAUSTED', 402);
+        const forReplyDay = replyDay(), replyReservation = operation === 'reply' && limitedReplies(account) ? 1 : 0;
+        if (replyReservation) {
+          const replies = replyBudget(userId, forReplyDay);
+          if (replies.used + replies.reserved >= 3) throw new BetaError('DAILY_REPLY_QUOTA_EXHAUSTED', 402);
+        }
         const local = budget(userId, currentDay), global = budget('global', currentDay);
         if (local.used + local.reserved >= providerLimit(account) || global.used + global.reserved >= globalProviderDailyLimit) throw new BetaError('PROVIDER_BUDGET_EXHAUSTED', 429);
         if (classReservation) run('UPDATE users SET classification_reserved=classification_reserved+1 WHERE id=?', userId);
+        if (replyReservation) run('UPDATE reply_daily_usage SET reserved=reserved+1 WHERE user_id=? AND day=?', userId, forReplyDay);
         for (const subject of [userId, 'global']) run('UPDATE provider_budget SET reserved=reserved+1 WHERE subject=? AND day=?', subject, currentDay);
         const snapshotJson = contextSnapshot ? json(contextSnapshot) : null;
-        run('INSERT INTO model_jobs(id,user_id,counterpart_id,operation,request_id,context_hash,knowledge_hash,state,classification_reservation,provider_reservation,budget_day,worker_id,provider_model,created_at,updated_at,context_snapshot_json,snapshot_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, userId, counterpartId, operation, requestId, contextHash, knowledgeHash, 'reserved', classReservation, 1, currentDay, workerId, providerModel, createdAt, createdAt, snapshotJson, snapshotJson ? digest(snapshotJson) : null);
+        run('INSERT INTO model_jobs(id,user_id,counterpart_id,operation,request_id,context_hash,knowledge_hash,state,classification_reservation,provider_reservation,budget_day,worker_id,provider_model,created_at,updated_at,context_snapshot_json,snapshot_hash,reply_reservation,reply_day) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, userId, counterpartId, operation, requestId, contextHash, knowledgeHash, 'reserved', classReservation, 1, currentDay, workerId, providerModel, createdAt, createdAt, snapshotJson, snapshotJson ? digest(snapshotJson) : null, replyReservation, replyReservation ? forReplyDay : null);
         audit(userId, 'model_job_reserved', id, { operation, knowledgeHash, contextHash });
         return { job: jobValue(get('SELECT * FROM model_jobs WHERE id=?', id)), fresh: true, cached: false };
       });
@@ -648,8 +716,12 @@ export function createBetaStore({
         const row = get('SELECT * FROM model_jobs WHERE id=?', id);
         if (!row || row.state !== 'running') throw new BetaError('JOB_NOT_AVAILABLE', 409);
         if (row.classification_reservation) run('UPDATE users SET classification_reserved=MAX(0,classification_reserved-1),classification_used=classification_used+1 WHERE id=?', row.user_id);
+        if (row.reply_reservation) {
+          const sendable = typeof suggestion?.reply === 'string' && suggestion.reply.trim().length > 0 && !['wait', 'pause'].includes(suggestion.action);
+          run('UPDATE reply_daily_usage SET reserved=MAX(0,reserved-1),used=used+? WHERE user_id=? AND day=?', sendable ? 1 : 0, row.user_id, row.reply_day);
+        }
         if (suggestion) run('INSERT INTO suggestions(id,user_id,counterpart_id,value_json,context_hash,knowledge_hash,created_at,origin_job_id) VALUES(?,?,?,?,?,?,?,?)', suggestion.id, row.user_id, row.counterpart_id, json(suggestion), row.context_hash, row.knowledge_hash, timestamp(), id);
-        run("UPDATE model_jobs SET state='succeeded',result_json=?,classification_reservation=0,updated_at=? WHERE id=?", json(result), timestamp(), id);
+        run("UPDATE model_jobs SET state='succeeded',result_json=?,classification_reservation=0,reply_reservation=0,updated_at=? WHERE id=?", json(result), timestamp(), id);
         run("UPDATE model_jobs SET state='succeeded',result_json=?,updated_at=? WHERE cache_of=? AND state='linked'", json(result), timestamp(), id);
         audit(row.user_id, 'model_job_completed', id, { operation: row.operation, knowledgeHash: row.knowledge_hash });
         return jobValue(get('SELECT * FROM model_jobs WHERE id=?', id));

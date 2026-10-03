@@ -1,21 +1,25 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   meta: null, me: null, csrf: '', authMode: 'login', localDemo: false, counterparts: [], topThree: [],
-  selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null,
+  selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null, copyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
-  messageDrafts: new Map(), messageCalls: new Set(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
+  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
-  intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, replyRevision: 0,
-  activeInlineCard: null, inlineTrigger: null, bootLoading: false,
+  topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
+  intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, coachResultRevision: 0,
+  activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null, coachUpdate: null, meetingDrafts: new Map(),
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
+  directorySort: 'recent', directoryReadSerial: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
-const relationMoveNames = { continue: '普通交流', male_to_female: '男对女', light_approach: '轻度靠近', give_space: '拉开一点', receive: '承接', close_topic: '结束话题', clarify: '澄清', invite: '协商邀约', wait: '暂时不回', pause: '停止当前推进' };
+const relationMoveNames = { continue: '普通交流', deepen: '深入聊', push_pull: '轻松推拉', male_to_female: '男对女', light_approach: '轻度靠近', give_space: '拉开一点', receive: '承接', close_topic: '结束话题', clarify: '澄清', invite: '协商邀约', wait: '暂时不回', pause: '停止当前推进' };
+const focusNames = { value_display: '价值展示', emotion: '情绪拉升', security: '安全需求', unknown: '待判断' };
 const dimensionNames = { activeInteraction: '主动互动', responseEngagement: '回复参与', personalInterest: '对我的兴趣', reciprocalFlirting: '双向暧昧', actionFollowThrough: '行动兑现' };
 const levelNames = { unknown: '未知', negative: '有负向信号', passive: '被动回应', positive: '积极参与', repeated_positive: '持续积极' };
-const heatNames = { pause: '建议暂停', insufficient_evidence: '信息不足', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
+const heatNames = { pause: '建议暂停', insufficient_evidence: '初步观察', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
+const initialInformationDirection = '初步方向：接住这句，围绕她愿意聊的细节尝试获得更多信息。';
 const confidenceNames = { limited: '证据有限', moderate: '证据中等', strong: '证据较充分' };
 const channelNames = { app: '交友软件认识', offline: '线下认识', other: '其他渠道' };
 const topicStatusNames = { developing: '话题正在展开', repetitive: '话题有重复迹象', closing: '可以自然收尾', unknown: '话题阶段待判断' };
@@ -38,7 +42,9 @@ function el(tag, attributes = {}, ...children) {
   }
   return node;
 }
+let noticeTimer;
 function announce(message, kind = 'success') {
+  clearTimeout(noticeTimer);
   const notice = $('notice');
   notice.textContent = message;
   notice.className = `notice ${kind}`;
@@ -46,22 +52,24 @@ function announce(message, kind = 'success') {
   $('auth-status').textContent = message;
   $('auth-status').className = kind === 'error' ? 'form-error' : 'helper';
   $('auth-status').hidden = $('auth').hidden || !message;
+  if (message && kind === 'success' && $('auth').hidden) noticeTimer = setTimeout(() => announce(''), 5000);
 }
 async function api(path, { method = 'GET', body } = {}) {
+  const requestUserId = state.me?.user.id, requestToken = state.csrf;
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   if (method !== 'GET' && state.csrf && !['/api/login', '/api/register'].includes(path)) headers['x-csrf-token'] = state.csrf;
   let response;
   try { response = await fetch(path, { method, headers, credentials: 'same-origin', ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
-  catch { throw new Error('连接中断，请检查网络后重试；未收到结果时不要假定操作已经失败。'); }
+  catch { const error = new Error('连接中断，请稍后重试。'); error.code = 'NETWORK_ERROR'; throw error; }
   let payload;
   try { payload = await response.json(); }
-  catch { throw new Error('服务暂时没有返回有效结果，请稍后重试。'); }
+  catch { const error = new Error('暂时没有取到结果，请重试。'); error.code = 'INVALID_RESPONSE'; error.status = response.status; throw error; }
   if (!response.ok || payload.error) {
     const error = new Error(payload.error?.message || '操作未完成，请稍后重试。');
     error.code = payload.error?.code;
     error.status = response.status;
-    if (response.status === 401 && state.me) {
+    if (response.status === 401 && state.me?.user.id === requestUserId && state.csrf === requestToken && state.me) {
       clearSessionUI();
       if (state.localDemo) showStartup('演示会话已结束，请重新打开聊天后继续。不会自动调用模型。', { failed: true });
     }
@@ -92,6 +100,7 @@ async function perform(button, label, callback, scope) {
     if (button?.isConnected) {
       button.disabled = button.dataset.locked === 'true'; button.textContent = original;
       if (button.id === 'save-message') updateComposer();
+      if (button.id === 'copy-reply') updateReplyCopyState();
       if (button.id === 'retry-counterpart' && button.checkVisibility() && !button.disabled && document.activeElement === document.body
           && (!scope || state.me?.user.id === scope.userId && state.selectedId === scope.counterpartId)) button.focus({ preventScroll: true });
     }
@@ -100,6 +109,61 @@ async function perform(button, label, callback, scope) {
 function post(path, body) { return api(path, { method: 'POST', body }); }
 function put(path, body) { return api(path, { method: 'PUT', body }); }
 function counterpartPath(id = state.selectedId) { return `/api/counterparts/${encodeURIComponent(id)}`; }
+// Only model requests use automatic recovery. Ordinary writes keep their own
+// contracts; an uncertain model response always reuses the same request ID.
+function recoverableModelResponse(error) {
+  if (['NETWORK_ERROR', 'JOB_IN_PROGRESS'].includes(error.code)) return true;
+  if (error.code === 'MODEL_OPERATION_FAILED') return error.status !== 409;
+  return (!error.code || error.code === 'INVALID_RESPONSE') && (!error.status || [200, 408, 500, 502, 503, 504].includes(error.status));
+}
+function failedTransientModel(error) {
+  return ['PROVIDER_TIMEOUT', 'PROVIDER_UNREACHABLE', 'JOB_INTERRUPTED'].includes(error.code)
+    || /^PROVIDER_HTTP_(408|429|500|502|503|504)$/.test(error.code || '');
+}
+async function modelPost(path, body, request, isCurrent) {
+  const visit = state.conversationVisit;
+  const check = () => {
+    if (visit === state.conversationVisit && isCurrent()) return;
+    const error = new Error('操作已随对话更新。'); error.code = 'RECOVERY_CANCELLED'; error.displayed = true; throw error;
+  };
+  let restarted = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    check();
+    try { return await post(path, { ...body, requestId: request.id }); }
+    catch (error) {
+      check();
+      const uncertain = recoverableModelResponse(error);
+      const restart = failedTransientModel(error) && !restarted;
+      if (attempt === 2 || (!uncertain && !restart)) {
+        if (!uncertain && state.requestIds.get(request.key) === request.id) state.requestIds.delete(request.key);
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 600 : 1400));
+      check();
+      if (restart) {
+        restarted = true;
+        request.id = crypto.randomUUID();
+        state.requestIds.set(request.key, request.id);
+      }
+    }
+  }
+}
+function modelFailureMessage(error, fallback = '暂时没能给出建议，请重试。') {
+  const messages = {
+    DAILY_REPLY_QUOTA_EXHAUSTED: '今天的免费回复已用完，明天再来。',
+    CLASSIFICATION_QUOTA_EXHAUSTED: '深度分析体验已用完，仍可使用「给我建议」。',
+    PROVIDER_BUDGET_EXHAUSTED: '今天的使用额度已用完，明天再来。',
+    PROFILE_REQUIRED: '先补充自己的背景和聊天偏好。', FULL_PROFILE_REQUIRES_UPDATE: '先更新自己的聊天偏好，再继续。',
+    CONTEXT_REQUIRED: '先粘贴对方的一条消息。', CONTEXT_CHANGED: '对话已更新，请重新试一次。',
+    REQUEST_ID_CONTEXT_CONFLICT: '对话已更新，请重新试一次。',
+    UNAUTHORIZED: '请重新打开聊天。', CSRF_INVALID: '连接已失效，请刷新页面。', ORIGIN_FORBIDDEN: '当前无法连接，请刷新页面。',
+    RATE_LIMITED: '请稍等片刻再试。', JOB_IN_PROGRESS: '建议还在准备中，稍后重试即可。',
+  };
+  return messages[error.code] || fallback;
+}
+function canRetryModel(error) {
+  return ![401, 403].includes(error.status) && !['DAILY_REPLY_QUOTA_EXHAUSTED', 'CLASSIFICATION_QUOTA_EXHAUSTED', 'PROVIDER_BUDGET_EXHAUSTED', 'PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code);
+}
 const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'admin-view'];
 function closeInlineCards({ restoreFocus = false } = {}) {
   const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
@@ -133,6 +197,14 @@ function closeMenu(menu, { restoreFocus = false } = {}) {
 }
 function scrollToLatest() {
   requestAnimationFrame(() => { $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
+}
+function scrollToSuggestion() {
+  const context = currentContextKey(), visit = state.conversationVisit;
+  requestAnimationFrame(() => {
+    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden) return;
+    const thread = $('chat-thread');
+    thread.scrollTop += $('suggestion-panel').getBoundingClientRect().top - thread.getBoundingClientRect().top - 12;
+  });
 }
 function rememberComposer({ changed = false } = {}) {
   const id = state.selectedId;
@@ -191,6 +263,54 @@ function updateComposer() {
   $('message-image-description').textContent = state.composerImage?.interpretation?.description || '';
   $('message-image-uncertainty').textContent = state.composerImage?.interpretation?.uncertainty || '';
   for (const id of ['edit-counterpart', 'open-heat', 'open-meeting']) $(id).disabled = !ready;
+  updateNextStep();
+}
+function updateNextStep() {
+  const actions = { record: $('save-message'), advise: $('direct-reply'), copy: $('copy-reply') };
+  const hint = $('next-step');
+  let step = null, text = '', preparing = false;
+  if (state.selectedId && state.detail?.counterpart.id === state.selectedId) {
+    const hasContent = Boolean($('message-text').value.trim() || state.composerImage || state.editingMessageId);
+    const context = currentContextKey();
+    const busy = state.modelCalls.has(context) || state.planCalls.has(context)
+      || state.imageCalls.get(JSON.stringify([state.me?.user.id, state.selectedId]))?.context === context;
+    const suggestion = currentSuggestion(), reply = $('suggestion-text').value.trim();
+    const feedback = state.copyFeedback;
+    const acknowledged = feedback && feedback.userId === state.me?.user.id && feedback.counterpartId === state.selectedId
+      && feedback.visit === state.conversationVisit && feedback.suggestionId === suggestion?.id && feedback.text === $('suggestion-text').value;
+    const hasCopyReceipt = suggestion && (suggestion.pendingCopyReceiptId && suggestion.pendingReplyText?.trim() === reply
+      || state.copyReceipts.has(JSON.stringify([state.me?.user.id, state.selectedId, suggestion.id, reply])));
+    const copied = hasCopyReceipt || acknowledged;
+    const prerequisite = coachPrerequisite();
+    const quotaExhausted = state.me?.quota?.dailyReplyRemaining === 0;
+    const needsQuestionnaire = state.me?.requiresQuestionnaireUpdate || state.me?.profile?.requiresQuestionnaireUpdate;
+    if (hasContent) {
+      step = 'record';
+      text = `下一步：点「${actions.record.textContent}」或按 Enter`;
+    } else if (busy) {
+      preparing = true;
+      text = 'AI 正在准备，完成后这里会提示下一步';
+    } else if (isPendingSuggestion(suggestion) && reply && !hasCopyReceipt && !acknowledged) {
+      step = 'copy';
+      text = '下一步：改成你的说法，点「复制回复」后发到微信';
+    } else if (!prerequisite && !suggestion && !quotaExhausted && state.detail.messages?.at(-1)?.speaker === 'other') {
+      step = 'advise';
+      text = '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」';
+    } else {
+      step = 'record';
+      text = needsQuestionnaire ? prerequisite : !state.detail.messages?.some(({ speaker }) => speaker === 'other')
+        ? '下一步：把对方的一句原话贴到下方'
+        : copied ? '下一步：发到微信后，等对方回复，把原话贴到下方'
+          : isNoReplySuggestion(suggestion) ? '下一步：这轮先不回；对方再发消息时贴到下方'
+            : quotaExhausted && !suggestion && state.detail.messages?.at(-1)?.speaker === 'other'
+              ? '下一步：今日免费建议已用完；自己回复后，把发出的话记为「我已发送的消息」'
+              : `下一步：等对方回复，把原话贴到下方${quotaExhausted ? '（今日免费建议已用完）' : ''}`;
+    }
+  }
+  for (const [name, action] of Object.entries(actions)) action.classList.toggle('is-next', name === step);
+  if (hint.textContent !== text) hint.textContent = text;
+  hint.hidden = !text;
+  hint.classList.toggle('is-preparing', preparing);
 }
 async function attachMessageImage(file) {
   if (!file || $('add-message-image').disabled) return;
@@ -213,9 +333,10 @@ async function readComposerImage(scope) {
   if (state.imageCalls.has(callKey)) return;
   const key = JSON.stringify(['image-read', scope.userId, id, image.id, submitted.meaning.trim()]);
   if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
-  const call = { imageId: image.id }; state.imageCalls.set(callKey, call); updateComposer();
+  const context = currentContextKey(), call = { imageId: image.id, context }; state.imageCalls.set(callKey, call); updateComposer();
+  const request = { key, id: state.requestIds.get(key) };
   try {
-    const data = await post(`${counterpartPath(id)}/image-read`, { requestId: state.requestIds.get(key), image: image.dataUrl, explanation: submitted.meaning.trim() });
+    const data = await modelPost(`${counterpartPath(id)}/image-read`, { image: image.dataUrl, explanation: submitted.meaning.trim() }, request, () => state.me?.user.id === scope.userId && state.selectedId === id && currentContextKey() === context && state.imageCalls.get(callKey) === call && state.composerImage === image && $('message-meaning').value.trim() === submitted.meaning.trim());
     state.requestIds.delete(key);
     if (state.me?.user.id !== scope.userId) return;
     updateQuota(data.quota);
@@ -224,7 +345,7 @@ async function readComposerImage(scope) {
     const text = current.text === submitted.text ? [current.text.trim(), data.imageInterpretation.description].filter(Boolean).join('\n') : current.text;
     state.messageDrafts.set(id, { ...current, text, image: { ...image, interpretation: data.imageInterpretation } });
     if (state.selectedId === id) { const focusDraft = document.activeElement === $('save-message') || document.activeElement === document.body; restoreComposer(id); updateComposer(); if (focusDraft) $('message-text').focus({ preventScroll: true }); }
-  } catch (error) { if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(key); throw error; }
+  } catch (error) { if (error.code !== 'RECOVERY_CANCELLED') error.message = modelFailureMessage(error, '图片暂时没能读清，请重试。'); throw error; }
   finally { if (state.imageCalls.get(callKey) === call) state.imageCalls.delete(callKey); if (state.me?.user.id === scope.userId) updateComposer(); }
 }
 function composerRecordText(draft) {
@@ -290,13 +411,17 @@ function updateQuota(quota = state.me?.quota) {
   if (!quota || !state.me) return;
   state.me.quota = quota;
   const remaining = quota.classificationRemaining;
-  $('quota-summary').textContent = `${remaining === null ? state.localDemo ? 'Demo 方向分析' : '付费内测方向分析' : `方向分析试用剩余 ${remaining ?? '—'} / 3 次`} · 今日模型调用剩余 ${quota.providerRemaining ?? '—'} 次`;
+  $('quota-summary').hidden = !Number.isInteger(remaining);
+  $('quota-summary').textContent = Number.isInteger(remaining) ? `深度分析体验剩余 ${remaining} / 3 次` : '';
   const unavailable = state.me.user.plan !== 'paid' && remaining === 0;
   $('classify').hidden = unavailable;
-  $('classify-availability').textContent = unavailable
-    ? '三次方向分析试用已用完。你仍可直接生成回复；本轮不调用分类器，也不展示虚构权重。'
-    : '方向分析依据已保存的双方背景与当前对话；一次完整分析计一次，同一上下文或切换方向不重复计次。权重不是成功率。';
+  $('classify-availability').hidden = !unavailable;
+  $('classify-availability').textContent = unavailable ? '深度分析试用已用完，仍可使用「给我建议」。' : '';
+  const daily = quota.dailyReplyRemaining;
+  $('daily-reply-quota').hidden = !Number.isInteger(daily);
+  $('daily-reply-quota').textContent = Number.isInteger(daily) ? `今日免费 AI 回复剩余 ${daily} / 3 条 · 北京时间每日重置` : '';
   updateComposer();
+  if (state.detail) updateCoachBusy();
 }
 async function reloadMe({ expectedUserId } = {}) {
   const me = await api('/api/me');
@@ -317,18 +442,20 @@ function fillProfile() {
   const kind = profile.questionnaire?.kind === 'full' && state.me.user.plan === 'paid' ? 'full' : 'short';
   $('questionnaire-kind').value = kind;
   renderQuestionnaire(kind);
-  $('profile-saved').textContent = state.localDemo ? '这是虚构演示画像。修改只影响本机 Demo，后续 AI 会使用更新后的内容。' : profile.background ? '已保存的画像可随时修改。' : '完成画像后开始：当前风格和成长目标会分别进入辅助背景。';
+  $('profile-saved').textContent = state.localDemo ? '这是虚构演示画像。修改只影响本机 Demo，后续 AI 会使用更新后的内容。' : '可以先聊，资料和问卷以后再补。聊天里明确提到的信息会随分析自动整理。';
+  renderBackgroundContext();
 }
 function captureAnswers() {
   $('questionnaire').querySelectorAll('select[data-question-id]').forEach((select) => {
     if (select.value) state.questionnaireAnswers[select.dataset.questionId] = Number(select.value);
+    else delete state.questionnaireAnswers[select.dataset.questionId];
   });
 }
 function renderQuestionnaire(kind) {
   const questions = state.meta?.questionnaires?.[kind] || [];
   $('questionnaire').replaceChildren(...questions.map((question, index) => {
-    const select = el('select', { required: '', 'data-question-id': question.id, 'aria-label': question.text });
-    select.append(el('option', { value: '' }, '请选择'));
+    const select = el('select', { 'data-question-id': question.id, 'aria-label': question.text });
+    select.append(el('option', { value: '' }, '暂不填写'));
     for (let score = 1; score <= 5; score++) select.append(el('option', { value: score }, `${score} · ${['很不符合', '不太符合', '中间 / 视情境', '比较符合', '很符合'][score - 1]}`));
     select.value = state.questionnaireAnswers[question.id] ? String(state.questionnaireAnswers[question.id]) : '';
     return el('label', { class: 'question' }, el('span', {}, el('span', { class: 'question-number' }, String(index + 1).padStart(2, '0')), question.text), select);
@@ -342,9 +469,12 @@ async function enterWorkspace() {
   fillProfile();
   await loadStyleLearning();
   await loadCounterparts();
+  // A failed initial detail read has already selected its conversation. Retrying
+  // startup must read that selection again without starting model analysis.
+  if (state.selectedId && !state.detail && state.counterparts.some(({ id }) => id === state.selectedId)) await loadCounterpart(state.selectedId);
   const requiresUpdate = state.me.requiresQuestionnaireUpdate || state.me.profile?.requiresQuestionnaireUpdate;
-  showView(state.me.profile?.background && !requiresUpdate ? 'coach' : 'profile');
-  if (requiresUpdate) announce('当前账号已改为免费内测。请补全并保存精简问卷后继续辅助，原完整版答案在后台保留。', 'error');
+  showView(requiresUpdate ? 'profile' : 'coach');
+  if (requiresUpdate) announce('当前账号已改为免费内测。请保存精简问卷版本后继续，答案可以以后再补。', 'error');
 }
 const styleStatusNames = { candidate: '候选 · 尚未应用', adopted: '已采用 · 私有辅助规则', revoked: '已停用' };
 const styleTargetNames = { current_preference: '当前表达偏好', growth_goal: '愿意练习的方向' };
@@ -423,7 +553,8 @@ function renderStyleObservation() {
 function profileInput() {
   captureAnswers();
   const kind = $('questionnaire-kind').value;
-  return { background: $('profile-background').value.trim(), style: $('profile-style').value.trim(), growthGoals: $('profile-growth').value.trim(), relationshipGoal: $('profile-goal').value.trim(), questionnaire: { kind, answers: Object.fromEntries((state.meta.questionnaires[kind] || []).map((question) => [question.id, state.questionnaireAnswers[question.id]])) } };
+  const answers = Object.fromEntries((state.meta.questionnaires[kind] || []).filter((question) => state.questionnaireAnswers[question.id]).map((question) => [question.id, state.questionnaireAnswers[question.id]]));
+  return { background: $('profile-background').value.trim(), style: $('profile-style').value.trim(), growthGoals: $('profile-growth').value.trim(), relationshipGoal: $('profile-goal').value.trim(), questionnaire: Object.keys(answers).length ? { kind, answers } : null };
 }
 function styleDraftInput() {
   const learning = {};
@@ -435,7 +566,7 @@ function styleDraftInput() {
 }
 async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
   if (!$('profile-form').reportValidity()) return;
-  const userId = state.me?.user.id, counterpartId = state.selectedId, draftVersion = state.profileDraftVersion, hadProfile = Boolean(state.me?.profile?.background), actionHadFocus = document.activeElement === button;
+  const userId = state.me?.user.id, counterpartId = state.selectedId, draftVersion = state.profileDraftVersion, actionHadFocus = document.activeElement === button;
   const scope = { userId, counterpartId };
   await perform(button, '保存画像…', async () => {
     if (!state.styleLearning) throw new Error('请先重新读取规则，再保存画像。你的草稿仍保留。');
@@ -456,7 +587,7 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
     if (state.selectedId !== counterpartId) return;
     await reloadMe({ expectedUserId: userId });
     if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
-    if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: !hadProfile && !changes.review && !changes.ruleChange });
+    if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: false });
     if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
     if (includeDraft && state.profileDraftVersion === draftVersion) resetStyleDraft();
     if (!includeDraft && actionHadFocus && document.activeElement === document.body) {
@@ -471,37 +602,125 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
   }, scope);
 }
 function saveRuleAction(button, ruleChange) { return saveProfile(button, { ruleChange }); }
-async function loadCounterparts() {
-  const data = await api('/api/counterparts');
-  state.counterparts = data.counterparts || [];
-  state.topThree = data.topThree || [];
-  renderDirectory();
-  if (state.selectedId && !state.counterparts.some((item) => item.id === state.selectedId)) state.selectedId = null;
-  if (!state.selectedId && state.counterparts.length) await loadCounterpart(state.counterparts[0].id);
+const directorySortModes = new Set(['recent', 'heat_desc']);
+try {
+  const saved = localStorage.getItem('chat-coach-directory-sort');
+  if (directorySortModes.has(saved)) state.directorySort = saved;
+} catch { /* Sorting is also usable without browser storage. */ }
+function counterpartName(person) { return person?.remark || person?.alias || '聊天对象'; }
+function directoryHeat(person) {
+  const heat = person.directory?.heat;
+  if (heat?.kind === 'pause') return { text: '暂停', kind: 'pause', title: '暂停推进；尊重对方已经表达的边界。' };
+  if (!Number.isFinite(heat?.value)) return { text: '—', kind: 'unknown', title: '热度尚不明确，未知不代表低。' };
+  return { text: `${heat.value}°`, kind: heat.kind, title: `${heat.kind === 'preliminary' ? '初步估计；' : ''}热度参考，非成功率；距上次分析采用的互动每满24小时减1°。` };
+}
+function orderedCounterparts() {
+  const lastReply = (person) => Date.parse(person.directory?.lastReplyAt || '');
+  const value = (person) => state.directorySort === 'recent'
+    ? lastReply(person)
+    : person.directory?.heat?.kind === 'pause' ? null : person.directory?.heat?.value;
+  return [...state.counterparts].sort((a, b) => {
+    const left = value(a), right = value(b);
+    if (Number.isFinite(left) !== Number.isFinite(right)) return Number.isFinite(left) ? -1 : 1;
+    if (Number.isFinite(left) && left !== right) return right - left;
+    const aReply = lastReply(a), bReply = lastReply(b);
+    if (Number.isFinite(aReply) !== Number.isFinite(bReply)) return Number.isFinite(aReply) ? -1 : 1;
+    if (Number.isFinite(aReply) && aReply !== bReply) return bReply - aReply;
+    return a.id.localeCompare(b.id);
+  });
+}
+let directoryReads = 0;
+async function loadCounterparts({ selectIfNeeded = true } = {}) {
+  const userId = state.me?.user.id, token = state.csrf, serial = ++state.directoryReadSerial;
+  if (!userId) return;
+  directoryReads++;
+  try {
+    const data = await api('/api/counterparts');
+    if (state.me?.user.id !== userId || state.csrf !== token || serial !== state.directoryReadSerial) return;
+    state.counterparts = data.counterparts || [];
+    state.topThree = data.topThree || [];
+    renderDirectory();
+    // A refresh changes ordering and references, never the active conversation.
+    if (selectIfNeeded && !state.selectedId && state.counterparts.length) await loadCounterpart(orderedCounterparts()[0].id);
+  } finally { directoryReads--; }
 }
 function renderDirectory() {
-  $('counterpart-select').replaceChildren(...state.counterparts.map((person) => {
-    const rank = state.topThree.indexOf(person.id);
-    return el('option', { value: person.id }, `${person.alias}${rank >= 0 ? ` · 优先 ${rank + 1}` : ''}`);
-  }));
-  if (!state.counterparts.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
+  const people = orderedCounterparts(), list = $('counterpart-list');
+  const focused = list.contains(document.activeElement) ? document.activeElement : null;
+  $('directory-sort').value = $('directory-sort-compact').value = state.directorySort;
+  $('directory-empty').hidden = people.length > 0;
+  for (const row of [...list.children]) if (!people.some(({ id }) => id === row.dataset.counterpartId)) row.remove();
+  people.forEach((person, index) => {
+    let row = [...list.children].find((item) => item.dataset.counterpartId === person.id);
+    if (!row) {
+      row = el('li', { 'data-counterpart-id': person.id }, el('button', { type: 'button', class: 'counterpart-item', 'data-counterpart-id': person.id,
+        onclick: () => void selectCounterpart(person.id) },
+      el('span', { class: 'directory-avatar', 'aria-hidden': 'true' }),
+      el('span', { class: 'directory-person' }, el('span', { class: 'directory-name' }), el('span', { class: 'directory-preview' })),
+      el('span', { class: 'directory-heat' })));
+    }
+    const name = counterpartName(person), preview = person.directory?.lastReplyPreview || '';
+    const heat = directoryHeat(person), button = row.querySelector('button');
+    row.querySelector('.directory-avatar').textContent = Array.from(person.alias || name)[0];
+    row.querySelector('.directory-name').textContent = name;
+    row.querySelector('.directory-preview').textContent = person.remark ? `${person.alias}${preview ? ` · ${preview}` : ''}` : preview;
+    const heatNode = row.querySelector('.directory-heat');
+    heatNode.textContent = heat.text; heatNode.dataset.kind = heat.kind; heatNode.title = heat.title;
+    const lastReplyAt = person.directory?.lastReplyAt;
+    const replyTime = Number.isFinite(Date.parse(lastReplyAt || '')) ? new Date(lastReplyAt).toLocaleString('zh-CN') : '';
+    button.title = `${name}${person.remark ? `（${person.alias}）` : ''} · ${heat.title}${replyTime ? ` 最近回复：${replyTime}` : ''}`;
+    button.setAttribute('aria-label', `${name}${person.remark ? `，原名${person.alias}` : ''}，${heat.text === '—' ? '热度未知' : `热度参考${heat.text}`}。${heat.title}`);
+    if (person.id === state.selectedId) button.setAttribute('aria-current', 'true');
+    else button.removeAttribute('aria-current');
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+  });
+  if (focused?.isConnected && document.activeElement === document.body) focused.focus({ preventScroll: true });
+  if (focused && !focused.isConnected && document.activeElement === document.body) (list.querySelector('button[aria-current="true"]') || $('directory-add')).focus({ preventScroll: true });
+  if (focused?.isConnected && document.activeElement === focused) {
+    const bounds = list.getBoundingClientRect(), item = focused.getBoundingClientRect();
+    if (item.top < bounds.top) list.scrollTop -= bounds.top - item.top + 6;
+    else if (item.bottom > bounds.bottom) list.scrollTop += item.bottom - bounds.bottom + 6;
+  }
+  $('counterpart-select').replaceChildren(...people.map((person) => el('option', { value: person.id }, `${counterpartName(person)} · ${directoryHeat(person).text}`)));
+  if (!people.length) $('counterpart-select').append(el('option', { value: '' }, '添加一位对象'));
+  // Keep a selected conversation during an obsolete or externally changed list.
+  if (state.selectedId && !people.some(({ id }) => id === state.selectedId)) {
+    $('counterpart-select').append(el('option', { value: state.selectedId }, counterpartName(state.detail?.counterpart)));
+  }
   $('counterpart-select').value = state.selectedId || '';
+  const current = people.find(({ id }) => id === state.selectedId) || state.detail?.counterpart;
+  $('counterpart-title').textContent = current ? counterpartName(current) : '模拟微信';
 }
+async function selectCounterpart(id) {
+  if (!state.me || !id || id === state.selectedId) return;
+  const userId = state.me.user.id;
+  try { await loadCounterpart(id); }
+  catch (error) { if (!error.displayed && state.me?.user.id === userId && state.selectedId === id) announce(error.message, 'error'); }
+}
+async function refreshDirectoryReference() {
+  if (document.visibilityState !== 'visible' || !state.me || state.bootLoading || $('workspace').hidden || directoryReads) return;
+  try { await loadCounterparts({ selectIfNeeded: false }); }
+  catch { /* Reference refresh is quiet; the conversation and drafts stay usable. */ }
+}
+setInterval(() => void refreshDirectoryReference(), 60_000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void refreshDirectoryReference(); });
 function showCounterpartLoading(message = '', failed = false) {
   $('counterpart-loading').hidden = !message;
   $('counterpart-loading-message').textContent = message;
   $('retry-counterpart').hidden = !failed;
 }
-async function loadCounterpart(id, { autoAnalyze = true } = {}) {
+async function loadCounterpart(id, { autoAnalyze = false } = {}) {
   const serial = ++state.detailRequestSerial;
   const retryHadFocus = document.activeElement === $('retry-counterpart');
-  const replyRevision = state.replyRevision;
+  const coachResultRevision = state.coachResultRevision;
   const userId = state.me?.user.id;
   const previousId = state.detail?.counterpart.id;
-  rememberComposer();
+  // A second selection can arrive while the first object is still loading.
+  // Its disabled form still contains the previous object's text, not a new draft.
+  if (state.detail) rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  if (changed) { closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
+  if (changed) { state.conversationVisit++; state.coachUpdate = null; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
   if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
@@ -517,9 +736,9 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
     throw error;
   }
   if (state.selectedId !== id || state.me?.user.id !== userId || serial !== state.detailRequestSerial) return;
-  // A concurrent reply may have completed after this read's snapshot. Read the
-  // latest state instead of rolling back the reply or discarding incoming messages.
-  if (replyRevision !== state.replyRevision) return loadCounterpart(id, { autoAnalyze });
+  // A coaching result may have completed after this read's snapshot. Read the
+  // latest state instead of rolling back advice, learned facts or meeting progress.
+  if (coachResultRevision !== state.coachResultRevision) return loadCounterpart(id, { autoAnalyze });
   state.detail = detail;
   showCounterpartLoading();
   if (!state.planDrafts.has(planDraftKey()) && detail.latestCoachPlan) {
@@ -531,25 +750,23 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   if (changed) restoreComposer(id);
   $('empty-state').hidden = true;
   $('counterpart-workspace').hidden = false;
-  $('counterpart-title').textContent = '模拟微信';
-  $('counterpart-select').setAttribute('aria-label', `选择聊天对象，当前是${detail.counterpart.alias}`);
-  $('counterpart-channel').textContent = `${channelNames[detail.counterpart.channel] || '认识背景'} · 此前约 ${detail.counterpart.rounds ?? 0} 轮`;
+  $('counterpart-title').textContent = counterpartName(detail.counterpart);
+  $('counterpart-select').setAttribute('aria-label', `选择聊天对象，当前是${counterpartName(detail.counterpart)}`);
+  $('counterpart-channel').textContent = `${channelNames[detail.counterpart.channel] || '认识背景'} · ${detail.counterpart.rounds == null ? '此前轮数未填' : `此前约 ${detail.counterpart.rounds} 轮`}`;
   $('counterpart-background').textContent = detail.counterpart.background || '';
+  renderBackgroundContext();
   renderHeat(detail.heat);
   renderTranscript();
   renderTiming();
   renderClassification(detail.classification);
-  renderJobs(detail.jobs || []);
   const currentId = state.suggestion?.id;
   const suggestions = detail.suggestions || [];
-  const currentNoReply = (item) => isNoReplySuggestion(item) && (detail.currentSuggestionIds?.includes(item.id) || detail.directReply?.id === item.id);
-  let restored = suggestions.find((item) => item.id === currentId && (isPendingSuggestion(item) || currentNoReply(item))) || suggestions.findLast((item) => isPendingSuggestion(item) && item.pendingCopyReceiptId) || suggestions.findLast((item) => isPendingSuggestion(item) || currentNoReply(item)) || null;
-  const latestCurrent = suggestions.findLast((item) => detail.currentSuggestionIds?.includes(item.id) || detail.directReply?.id === item.id);
+  const currentNoReply = (item) => isNoReplySuggestion(item) && isCurrentSuggestion(item);
+  let restored = suggestions.find((item) => item.id === currentId && (isPendingSuggestion(item) || currentNoReply(item))) || suggestions.findLast((item) => isPendingSuggestion(item) || currentNoReply(item)) || null;
+  const latestCurrent = suggestions.findLast(isCurrentSuggestion);
   if (isNoReplySuggestion(latestCurrent) && restored && suggestions.indexOf(restored) < suggestions.indexOf(latestCurrent)) {
-    // An old clipboard receipt must not undo a later decision to wait. Only
-    // explicitly copying that history again after the decision restores use.
-    const copiedAfterDecision = isPendingSuggestion(restored) && restored.pendingCopyReceiptId && Date.parse(restored.pendingCopiedAt) > Date.parse(latestCurrent.createdAt);
-    if (!copiedAfterDecision) restored = latestCurrent;
+    // A previous clipboard receipt must not undo the current decision to wait.
+    restored = latestCurrent;
   }
   state.suggestion = restored;
   state.selectedDirection = state.modelCalls.get(currentContextKey())?.direction || state.suggestion?.direction || null;
@@ -557,30 +774,35 @@ async function loadCounterpart(id, { autoAnalyze = true } = {}) {
   fillMeeting(detail.meeting);
   updateComposer();
   if (retryHadFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
-  if (changed) scrollToLatest();
+  if (changed) {
+    if (currentSuggestion()) scrollToSuggestion();
+    else scrollToLatest();
+  }
   updateCoachBusy();
   renderFieldCoachPlan();
   if (autoAnalyze) maybeAutoCoach();
-}
-function renderJobs(jobs) {
-  let history = $('job-history');
-  if (!history) {
-    history = el('details', { id: 'job-history' }, el('summary', {}, '最近操作状态'), el('div', { id: 'job-list' }));
-    $('coach-panel').append(history);
-  }
-  history.hidden = !jobs.length;
-  const states = { reserved: '等待处理', running: '正在处理', linked: '关联已有操作', succeeded: '已完成', failed: '已失败' };
-  const errorNames = { JOB_INTERRUPTED: '服务重启中断，可重新尝试', PROVIDER_TIMEOUT: '模型超时，可重新尝试', INVALID_MODEL_OUTPUT: '结果未通过校验，可重新尝试', CONTEXT_CHANGED: '资料已变化，请按新背景重新尝试', CLASSIFICATION_QUOTA_EXHAUSTED: '方向试用已用完', PROVIDER_BUDGET_EXHAUSTED: '今日模型预算已用完' };
-  const refresh = el('button', { type: 'button', class: 'quiet-button', onclick: () => void perform(refresh, '读取状态…', async () => { const id = state.selectedId; await loadCounterpart(id, { autoAnalyze: false }); await reloadMe(); announce('已读取保存状态，没有调用模型。'); }) }, '刷新保存状态');
-  $('job-list').replaceChildren(...jobs.slice(0, 4).map((job) => el('p', { class: 'small muted' }, `${({ classify: '方向分析', reply: '回复生成', coach_plan: '场外教练评估', image_read: '图片识读' }[job.operation] || '模型操作')} · ${states[job.state] || '状态待确认'}${job.errorCode ? ` · ${errorNames[job.errorCode] || '操作未完成，可查看错误后重试'}` : ''}`)), refresh);
 }
 async function refreshCounterpart(id, { autoAnalyze = false } = {}) {
   await loadCounterparts();
   if (state.selectedId === id) await loadCounterpart(id, { autoAnalyze });
 }
+function renderHeatStatus(heat) {
+  const hasMessage = state.detail?.messages?.some(({ speaker }) => speaker === 'other');
+  const suggestion = currentSuggestion();
+  const analyzed = Boolean(state.detail?.classification || suggestion);
+  const paused = heat?.status === 'pause' || suggestion?.action === 'pause' || suggestion?.guidance?.relationMove === 'pause';
+  const quiet = suggestion && (isNoReplySuggestion(suggestion) || ['wait', 'close_topic', 'give_space'].includes(suggestion.guidance?.relationMove));
+  $('heat-status').textContent = paused ? '建议暂停' : quiet ? '先留白'
+    : heat?.status === 'insufficient_evidence' && heat.preliminaryRange ? heat.preliminaryRange.label
+    : heat?.status && heat.status !== 'insufficient_evidence' ? heatNames[heat.status] || '初步观察'
+      : !hasMessage ? '先录入一句' : analyzed ? '初步观察' : '初步方向';
+  $('heat-explanation').textContent = paused ? '停止这类推进，尊重对方边界。' : quiet ? '按当前建议留白，达到接话条件时再继续。'
+    : !analyzed && !Number.isFinite(heat?.score) && !heat?.preliminaryRange
+    ? hasMessage ? `${initialInformationDirection}这是通用指引，分析完成后会结合实际回应调整。` : '先录入对方的一句原话；少量内容也能开始，之后随新回应调整。'
+    : heat?.explanation || '先自然交流，结合认识背景和真实回应调整初步方向。';
+}
 function renderHeat(heat) {
-  $('heat-status').textContent = heatNames[heat?.status] || '信息不足';
-  $('heat-explanation').textContent = heat?.explanation || '补充认识背景和真实对话后再判断。未观察到，不等于负向。';
+  renderHeatStatus(heat);
   const dimensions = heat?.dimensions || state.detail?.classification?.heat || {};
   const known = Object.values(dimensions).filter((item) => item?.level && item.level !== 'unknown').length;
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
@@ -602,12 +824,22 @@ function renderHeat(heat) {
 }
 function renderTranscript() {
   const messages = state.detail?.messages || [];
+  const focusedNote = document.activeElement.closest?.('.message-annotation');
+  const focusedKey = focusedNote?.dataset.annotationKey;
+  const selection = focusedNote && document.activeElement.tagName === 'TEXTAREA' ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
   $('message-count').textContent = `${messages.length} 条记录`;
   $('transcript').replaceChildren(...messages.map((message) => {
     const controls = el('details', { class: 'message-menu chat-menu' });
     controls.append(el('summary', { 'aria-label': `${message.speaker === 'self' ? '我的' : '对方的'}消息操作` }, '⋯'), el('div', { class: 'chat-menu-items' },
+      el('button', { class: 'quiet-button', type: 'button', onclick: () => {
+        controls.open = false;
+        const note = controls.closest('.message').querySelector('.message-annotation');
+        state.annotationOpen.add(note.dataset.annotationKey);
+        note.hidden = false; note.open = true;
+        note.querySelector('textarea').focus();
+      } }, message.annotation?.text ? '编辑批注' : '添加批注'),
       el('button', { class: 'quiet-button', type: 'button', 'aria-label': `编辑${message.speaker === 'self' ? '我' : '对方'}的消息`, onclick: () => { controls.open = false; editMessage(message); } }, '编辑'),
-      el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
+      el('button', { class: 'quiet-button', type: 'button', 'aria-label': '修改消息时间', 'data-edit-time': '', disabled: state.timeCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])), onclick: () => { controls.open = false; editMessageTiming(message, controls); } }, '修改时间'),
       el('button', { class: 'quiet-button danger', type: 'button', 'aria-label': '删除这条消息', onclick: (event) => { closeMenu(controls, { restoreFocus: true }); void perform(event.currentTarget, '删除中…', () => deleteMessage(message)); } }, '删除')));
     const recordedAt = message.recordedAt || message.createdAt;
     const date = new Date(recordedAt);
@@ -615,35 +847,135 @@ function renderTranscript() {
     const reportedDate = new Date(message.wechatTime?.at);
     const reportedTime = message.wechatTime?.source === 'user_reported' && Number.isFinite(reportedDate.getTime()) ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(reportedDate) : '';
     const label = message.speaker === 'self' ? message.provenance === 'inferred_from_followup' ? '我 · 推定使用' : '我' : state.detail.counterpart.alias;
-    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `本人标注的微信时间 ${message.wechatTime.at}（未核验）；原软件录入时间 ${recordedAt}` : recordedAt ? `本软件录入时间 ${recordedAt}，不是微信实际收发时间` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls));
+    return el('article', { class: `message ${message.speaker === 'self' ? 'self' : 'other'}`, 'data-message-id': message.id }, el('span', { class: 'message-label', title: reportedTime ? `消息时间 ${message.wechatTime.at}；原录入时间 ${recordedAt}` : recordedAt ? `录入时间 ${recordedAt}` : '录入时间未知' }, `${label}${reportedTime ? ` · 标注 ${reportedTime}` : recordedTime ? ` · 录入 ${recordedTime}` : ''}`), el('div', { class: 'message-row' }, el('div', { class: 'message-bubble' }, message.text), controls), messageAnnotation(message));
   }));
   if (!messages.length) $('transcript').append(el('p', { class: 'helper' }, '还没有对话。按说话人逐条加入原文，也可以先补充此前背景。'));
+  if (focusedKey) {
+    const note = [...document.querySelectorAll('.message-annotation')].find((element) => element.dataset.annotationKey === focusedKey);
+    const input = note?.querySelector('textarea');
+    if (note?.open && input && document.activeElement === document.body) { input.focus({ preventScroll: true }); if (selection) input.setSelectionRange(...selection); }
+  }
+}
+function messageAnnotation(message) {
+  const id = state.selectedId, userId = state.me?.user.id;
+  const key = JSON.stringify([userId, id, message.id]);
+  const note = el('details', { class: 'message-annotation', 'data-annotation-key': key });
+  note.open = state.annotationOpen.has(key);
+  const updateVisibility = () => { note.hidden = !message.annotation?.text && !note.open && !state.annotationDrafts.has(key) && !state.annotationCalls.has(key) && !state.annotationErrors.has(key); };
+  updateVisibility();
+  const summary = el('summary', {}, message.annotation?.text ? '批注 · 已补背景' : '批注');
+  const input = el('textarea', { rows: '2', maxlength: '5000', 'aria-label': '这条消息的背景批注', placeholder: '如：这句话接着线下的话题；她当时是在开玩笑。我的补充，不是对方原话。' });
+  input.value = state.annotationDrafts.get(key)?.text ?? message.annotation?.text ?? '';
+  const form = el('form', { class: 'message-annotation-form' }, el('label', {}, '背景批注 · 本人补充', input));
+  const save = el('button', { class: 'quiet-button', type: 'submit', disabled: state.annotationCalls.has(key) }, state.annotationCalls.has(key) ? '保存批注…' : '保存批注');
+  save.dataset.locked = String(state.annotationCalls.has(key));
+  const close = el('button', { class: 'quiet-button', type: 'button', onclick: () => {
+    note.open = false; state.annotationOpen.delete(key); updateVisibility();
+    (message.annotation?.text ? summary : note.closest('.message').querySelector('.message-menu > summary')).focus({ preventScroll: true });
+  } }, '收起');
+  form.append(el('div', { class: 'button-row' }, save, close), el('p', { class: 'small muted' }, '只补充背景，不改原话；清空并保存可移除。'));
+  if (state.annotationErrors.has(key)) form.append(el('p', { class: 'form-error', role: 'alert' }, state.annotationErrors.get(key)));
+  input.addEventListener('input', () => state.annotationDrafts.set(key, { text: input.value }));
+  note.addEventListener('toggle', () => { if (note.isConnected && state.me?.user.id === userId && state.selectedId === id) { if (note.open) state.annotationOpen.add(key); else state.annotationOpen.delete(key); updateVisibility(); } });
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    if (state.annotationCalls.has(key)) return;
+    const submitted = state.annotationDrafts.get(key) || { text: input.value };
+    const hadFocus = form.contains(document.activeElement);
+    state.annotationErrors.delete(key);
+    state.annotationDrafts.set(key, submitted); state.annotationCalls.add(key); save.dataset.locked = 'true';
+    void perform(save, '保存批注…', async () => {
+      await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/annotation`, { method: 'PATCH', body: { annotationText: submitted.text } });
+      if (state.me?.user.id !== userId) return;
+      if (state.annotationDrafts.get(key) === submitted) state.annotationDrafts.delete(key);
+      await refreshCounterpart(id, { autoAnalyze: false });
+      if (state.me?.user.id === userId && state.selectedId === id) announce('背景批注已保存；后续建议会结合这段补充。');
+    }, { userId, counterpartId: id }).finally(() => {
+      const error = form.querySelector('.form-error');
+      if (state.me?.user.id === userId && error && !error.hidden) state.annotationErrors.set(key, error.textContent);
+      state.annotationCalls.delete(key); save.dataset.locked = 'false';
+      if (state.me?.user.id === userId && state.selectedId === id) {
+        renderTranscript();
+        if (hadFocus && document.activeElement === document.body) [...document.querySelectorAll('.message-annotation')].find((element) => element.dataset.annotationKey === key && element.open)?.querySelector('textarea').focus({ preventScroll: true });
+      }
+    });
+  });
+  note.append(summary, form);
+  return note;
 }
 function editMessageTiming(message, menu) {
   const id = state.selectedId, userId = state.me?.user.id;
+  const key = JSON.stringify([userId, id]);
+  if (state.timeCalls.has(key)) return;
   document.querySelectorAll('.message-time-edit').forEach((form) => form.remove());
-  const input = el('input', { type: 'datetime-local', 'aria-label': '本人补充的微信消息时间', step: '60' });
-  const existing = new Date(message.wechatTime?.at || message.recordedAt || message.createdAt);
-  if (Number.isFinite(existing.getTime())) {
-    const local = new Date(existing.getTime() - existing.getTimezoneOffset() * 60000);
-    input.value = local.toISOString().slice(0, 16);
-  }
-  const form = el('form', { class: 'message-time-edit message-time-editor' }, el('label', {}, '本人补充的微信时间（未核验）', input), el('p', { class: 'small muted' }, '原录入时间保留；留空可清除标注。'));
-  const save = el('button', { type: 'submit', class: 'quiet-button' }, '保存时间');
+  const recorded = new Date(message.wechatTime?.at || message.recordedAt || message.createdAt);
+  const existing = Number.isFinite(recorded.getTime()) ? recorded : new Date();
+  const localDate = (value) => `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+  const hour = el('input', { type: 'text', inputmode: 'numeric', maxlength: '2', pattern: '[0-9]{1,2}', 'aria-label': '小时', autocomplete: 'off' });
+  const minute = el('input', { type: 'text', inputmode: 'numeric', maxlength: '2', pattern: '[0-9]{1,2}', 'aria-label': '分钟', autocomplete: 'off' });
+  hour.value = String(existing.getHours()).padStart(2, '0');
+  minute.value = String(existing.getMinutes()).padStart(2, '0');
+  const date = el('input', { type: 'date', 'aria-label': '消息日期' });
+  date.value = localDate(existing);
+  const dateSummary = el('summary');
+  const showDate = () => {
+    const value = new Date(`${date.value}T12:00:00`);
+    dateSummary.textContent = Number.isFinite(value.getTime()) ? `日期 · ${new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', ...(value.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) }).format(value)} · 调整` : '选择日期';
+  };
+  date.addEventListener('input', showDate); showDate();
+  const pickDay = (offset) => { const value = new Date(); value.setDate(value.getDate() + offset); date.value = localDate(value); showDate(); };
+  const dateDetails = el('details', { class: 'message-time-date' }, dateSummary,
+    el('div', { class: 'button-row' }, el('button', { type: 'button', class: 'secondary', onclick: () => pickDay(0) }, '今天'), el('button', { type: 'button', class: 'secondary', onclick: () => pickDay(-1) }, '昨天')),
+    el('label', {}, '其他日期', date));
+  const form = el('form', { class: 'message-time-edit message-time-editor' },
+    el('fieldset', { class: 'message-time-fields' }, el('legend', {}, '消息时间'),
+      el('div', { class: 'message-time-clock' }, el('label', {}, '时', hour), el('span', { 'aria-hidden': 'true' }, ':'), el('label', {}, '分', minute))), dateDetails);
+  const save = el('button', { type: 'submit', class: 'primary' }, '保存时间');
   const cancel = el('button', { type: 'button', class: 'quiet-button', onclick: () => { form.remove(); menu.querySelector('summary').focus({ preventScroll: true }); } }, '收起');
-  form.append(el('div', { class: 'button-row' }, save, cancel));
+  let saving = false;
+  const persist = (button, clear = false) => {
+    if (saving || state.timeCalls.has(key)) return;
+    void perform(button, '保存时间…', async () => {
+      const hours = hour.value.trim(), minutes = minute.value.trim();
+      let actualWechatAt = null;
+      if (!clear && (hours || minutes)) {
+        if (!/^(?:[01]?[0-9]|2[0-3])$/.test(hours) || !/^[0-5]?[0-9]$/.test(minutes)) throw new Error('请填写 0–23 的小时和 0–59 的分钟。');
+        if (!date.value) throw new Error('请选择消息日期。');
+        const value = new Date(`${date.value}T${hours.padStart(2, '0')}:${minutes.padStart(2, '0')}:00`);
+        if (!Number.isFinite(value.getTime()) || localDate(value) !== date.value || value.getHours() !== Number(hours) || value.getMinutes() !== Number(minutes)) throw new Error('这个日期或时间无效，请调整后再保存。');
+        actualWechatAt = value.toISOString();
+      }
+      saving = true;
+      const call = {};
+      state.timeCalls.set(key, call);
+      document.querySelectorAll('[data-edit-time]').forEach((button) => { button.disabled = true; });
+      const fields = [...form.querySelectorAll('input, button')];
+      fields.forEach((field) => { field.disabled = true; });
+      try {
+        await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
+        if (state.selectedId !== id || state.me?.user.id !== userId) return;
+        const restoreFocus = form.contains(document.activeElement) || document.activeElement === document.body;
+        await refreshCounterpart(id, { autoAnalyze: false });
+        if (state.selectedId === id && state.me?.user.id === userId) {
+          announce(actualWechatAt ? '消息时间已更新，后续建议会按新时间判断。' : '已恢复录入时间。');
+          if (restoreFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
+        }
+      } finally {
+        saving = false; fields.forEach((field) => { field.disabled = false; });
+        if (state.timeCalls.get(key) === call) state.timeCalls.delete(key);
+        document.querySelectorAll('[data-edit-time]').forEach((button) => { button.disabled = state.timeCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])); });
+      }
+    }, { userId, counterpartId: id });
+  };
+  const clear = el('button', { type: 'button', class: 'quiet-button', onclick: () => persist(clear, true) }, '清除修改');
+  clear.hidden = !message.wechatTime;
+  form.append(el('div', { class: 'button-row' }, save, cancel, clear));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    void perform(save, '保存时间…', async () => {
-      const actualWechatAt = input.value ? new Date(input.value).toISOString() : null;
-      await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}/timing`, { method: 'PATCH', body: { actualWechatAt } });
-      if (state.selectedId !== id || state.me?.user.id !== userId) return;
-      await refreshCounterpart(id);
-      if (state.selectedId === id) { announce('时间标注已保存，原录入时间保留。方向判断已失效，可重新分析。'); $('message-text').focus({ preventScroll: true }); }
-    }, { userId, counterpartId: id });
+    persist(save);
   });
   menu.closest('.message').append(form);
-  input.focus({ preventScroll: true });
+  minute.focus({ preventScroll: true }); minute.select();
   form.scrollIntoView({ block: 'nearest', behavior: 'auto' });
 }
 function renderTiming() {
@@ -652,8 +984,8 @@ function renderTiming() {
   if (!timing) { $('timing-note').textContent = ''; return; }
   const elapsed = timing.elapsedMs;
   const elapsedText = Number.isFinite(elapsed) && elapsed >= 0 ? elapsed < 60000 ? '不足 1 分钟' : elapsed < 3600000 ? `约 ${Math.floor(elapsed / 60000)} 分钟` : `约 ${(elapsed / 3600000).toFixed(1)} 小时` : '未知';
-  const from = timing.fromSource === 'user_reported_wechat_sent' ? '本人标注的上一轮发送' : timing.fromSource === 'clipboard_copied' ? '上一轮复制' : timing.fromSource === 'suggestion_prepared' ? '上一轮建议生成' : '上一轮表达';
-  $('timing-note').textContent = `距${from}${elapsedText}（${timing.reliability === 'user_reported_interval' ? '本人补充的收发间隔，未核验' : timing.reliability === 'weak_preparation_estimate' ? '生成到录入的弱估计' : timing.reliability === 'unknown' ? '间隔未知' : '录入估计'}，非微信实际回复速度）。`;
+  const from = timing.fromSource === 'user_reported_wechat_sent' ? '上一条发送' : timing.fromSource === 'clipboard_copied' ? '上一轮复制' : timing.fromSource === 'suggestion_prepared' ? '上一轮建议生成' : '上一轮表达';
+  $('timing-note').textContent = timing.reliability === 'unknown' ? '当前回复间隔暂不明确。' : `距${from}${elapsedText}${timing.reliability === 'user_reported_interval' ? '' : timing.reliability === 'weak_preparation_estimate' ? ' · 生成到录入的估计' : ' · 录入估计'}。`;
 }
 function editMessage(message) {
   if (!state.editingMessageId) state.composerBeforeEdit = rememberComposer();
@@ -676,10 +1008,25 @@ function cancelMessageEdit() {
 }
 async function deleteMessage(message) {
   if (!confirm('删除这条对话记录？相关的旧判断将失效。')) return;
-  const id = state.selectedId;
-  await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}`, { method: 'DELETE' });
-  await refreshCounterpart(id);
-  announce('消息已删除，后续辅助将使用更新后的记录。');
+  const id = state.selectedId, userId = state.me?.user.id;
+  try {
+    await api(`${counterpartPath(id)}/messages/${encodeURIComponent(message.id)}`, { method: 'DELETE' });
+    if (state.me?.user.id !== userId) return;
+    const draft = state.messageDrafts.get(id);
+    if (draft?.editingId === message.id) {
+      if (draft.beforeEdit) state.messageDrafts.set(id, draft.beforeEdit);
+      else state.messageDrafts.delete(id);
+      if (state.selectedId === id) { restoreComposer(id); updateComposer(); }
+    }
+    // Ignore a detail snapshot captured before deletion, including a return to
+    // this conversation while the delete request was still in flight.
+    if (state.selectedId === id) state.detailRequestSerial++;
+    await refreshCounterpart(id);
+    if (state.me?.user.id === userId && state.selectedId === id) announce('消息已删除，后续辅助将使用更新后的记录。');
+  } catch (error) {
+    if (state.me?.user.id !== userId || state.selectedId !== id) error.displayed = true;
+    throw error;
+  }
 }
 function classificationUnavailable() {
   return state.me?.user.plan !== 'paid' && state.me?.quota?.classificationRemaining === 0;
@@ -688,33 +1035,45 @@ function renderClassification(classification) {
   renderFieldCoach(classification);
   const busy = state.modelCalls.get(currentContextKey());
   const options = new Map((classification?.options || []).map((option) => [option.topicMove, option]));
-  const available = options.size === 3;
+  const requested = state.topicChangeContexts.has(currentContextKey());
+  const changing = requested || classification?.topicDecision?.mode === 'change';
+  const available = classification?.topicDecision?.mode === 'change' && options.size === 3;
   const missing = coachPrerequisite();
-  $('classification-summary').textContent = missing || (available
-    ? `${confidenceNames[classification.confidence] || '证据有限'}${classification.status === 'needs_context' ? ' · 还需要更多背景' : ''}。建议占比是相对推荐，尚未校准；点任一方向生成。`
-    : classificationUnavailable() ? '方向分析试用已用完，直接给一句；本轮不展示虚构百分比。'
-      : busy?.type === 'classify' ? '正在分析三个方向…' : '等待方向分析；暂无建议占比。');
-  $('direction-options').replaceChildren(...['up', 'down', 'sideways'].map((direction) => {
+  $('classification-summary').textContent = missing || (busy?.type === 'classify' ? '正在结合完整对话看当前局面…'
+    : changing ? classification?.topicDecision?.reason || '选择一个她愿意聊的方向，尝试获得更多信息。'
+      : classification?.topicDecision?.reason || (classification || currentSuggestion() ? '按当前建议自然交流，随新回应调整。' : initialInformationDirection));
+  $('direction-options').hidden = !changing || Boolean(missing);
+  $('change-topic').setAttribute('aria-expanded', String(changing && !missing));
+  $('direction-options').replaceChildren(...(changing ? ['up', 'down', 'sideways'] : []).map((direction) => {
     const option = options.get(direction);
-    const button = el('button', { type: 'button', class: 'direction-option', disabled: !option || Boolean(busy) || Boolean(missing), 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}，${option ? `建议占比 ${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'}`, 'data-direction': direction,
-      onclick: () => void coachCall('reply', button, { direction }) },
+    const button = el('button', { type: 'button', class: 'direction-option', disabled: Boolean(busy) || Boolean(missing) || state.me?.quota?.dailyReplyRemaining === 0, 'aria-pressed': String(state.selectedDirection === direction), 'aria-label': `${directionNames[direction].split(' · ')[0]}${available ? `，建议占比 ${Math.round(option.weight * 100)}%` : ''}`, 'data-direction': direction,
+      onclick: () => void coachCall('reply', button, { direction, topicChangeRequested: true }) },
       el('span', { class: 'direction-name' }, directionNames[direction].split(' · ')[0], el('span', { class: 'direction-check', 'aria-hidden': 'true' }, '✓')),
-      el('span', { class: 'weight' }, option ? `${Math.round(option.weight * 100)}%` : busy?.type === 'classify' ? '分析中' : '待分析'));
-    button.title = option ? `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}` : directionNames[direction];
+      el('span', { class: 'weight' }, available ? `${Math.round(option.weight * 100)}%` : directionNames[direction].split(' · ')[1]));
+    button.title = available ? `${actionNames[option.relationAction] || '当前动作'} · ${option.reason}` : directionNames[direction];
     button.classList.toggle('selected', state.selectedDirection === direction);
     return button;
   }));
 }
-const fieldCoachViewport = window.matchMedia('(max-width: 1020px)');
+const fieldCoachViewport = window.matchMedia('(max-width: 1279px)');
+const compactDirectoryViewport = window.matchMedia('(max-width: 760px)');
 let fieldCoachFocusWithin = false;
+let directoryFocusWithin = false;
 document.addEventListener('focusin', (event) => {
   // Hiding a focused child can send a synthetic focusin to body before resize.
   // Keep the last real focus location; a composer or header focus still clears it.
-  if (event.target !== document.body && event.target !== document.documentElement) fieldCoachFocusWithin = $('field-coach').contains(event.target);
+  if (event.target !== document.body && event.target !== document.documentElement) {
+    fieldCoachFocusWithin = $('field-coach').contains(event.target);
+    directoryFocusWithin = $('counterpart-directory').contains(event.target);
+  }
+});
+compactDirectoryViewport.addEventListener('change', ({ matches }) => {
+  if (matches && directoryFocusWithin && (document.activeElement === document.body || $('counterpart-directory').contains(document.activeElement))) $('counterpart-select').focus({ preventScroll: true });
 });
 function setFieldCoachModal(open) {
   const modal = open && fieldCoachViewport.matches;
   $('workspace').inert = modal;
+  $('counterpart-directory').inert = modal;
   document.querySelector('.skip-link').inert = modal;
   $('field-coach-backdrop').hidden = !modal;
   if (modal) {
@@ -744,33 +1103,138 @@ fieldCoachViewport.addEventListener('change', ({ matches }) => {
   closeFieldCoach({ restoreFocus: matches && inside });
   if (!matches && inside && (lostFocus || !focused.checkVisibility())) $('field-coach-title').focus({ preventScroll: true });
 });
+function isCurrentSuggestion(item) {
+  return Boolean(item && (state.detail?.currentSuggestionIds?.includes(item.id) || state.detail?.directReply?.id === item.id));
+}
+function currentSuggestion() {
+  const item = state.suggestion;
+  return isCurrentSuggestion(item) && (isNoReplySuggestion(item) || isPendingSuggestion(item)) ? item : null;
+}
+function workingFocus() { return currentSuggestion()?.workingFocus || state.detail?.classification?.workingFocus || null; }
+function renderCoachUpdate() {
+  const update = state.coachUpdate;
+  const current = update?.context === currentContextKey() && update.visit === state.conversationVisit;
+  if (update && !current) state.coachUpdate = null;
+  $('coach-update-note').hidden = !current;
+  const text = current ? update.phase === 'updating' ? '场外教练正在更新…' : '场外教练的指示已更新' : '';
+  if ($('coach-update-text').textContent !== text) $('coach-update-text').textContent = text;
+  $('view-coach-update').hidden = !current || update.phase !== 'updated';
+  $('field-coach-update-badge').hidden = !current;
+  $('field-coach-update-badge').textContent = current ? update.phase === 'updating' ? '更新中' : '已更新' : '';
+  $('field-coach').classList.toggle('coach-updated', Boolean(current && update.highlight));
+}
+function markCoachUpdated(call, context) {
+  const update = { call, context, visit: state.conversationVisit, phase: 'updated', highlight: true };
+  state.coachUpdate = update;
+  renderCoachUpdate();
+  setTimeout(() => {
+    update.highlight = false;
+    if (state.coachUpdate === update) renderCoachUpdate();
+  }, 1800);
+}
+const coachTermAliases = [
+  ['up', ['上切', '上堆']], ['down', ['下切']], ['sideways', ['平移']],
+  ['relationship', ['男对女']], ['warming', ['升温']],
+  ['obstacle', ['阻力', '边界']], ['round', ['一轮']],
+];
+const coachNoteScopes = new WeakMap();
+function renderTermNotes(container, text, scope) {
+  const focused = container.contains(document.activeElement) ? document.activeElement : null;
+  const mentions = coachTermAliases.flatMap(([id, aliases]) => {
+    const match = aliases.map((word) => ({ word, index: text.indexOf(word) })).filter(({ index }) => index >= 0).sort((a, b) => a.index - b.index)[0];
+    return match ? [{ id, ...match }] : [];
+  }).sort((a, b) => a.index - b.index);
+  const changed = coachNoteScopes.get(container) !== scope;
+  coachNoteScopes.set(container, scope);
+  for (const note of [...container.children]) {
+    if (!changed && mentions.some(({ id }) => id === note.dataset.coachTerm)) continue;
+    if (note.contains(document.activeElement)) $('field-coach-title').focus({ preventScroll: true });
+    note.remove();
+  }
+  mentions.forEach(({ id, word }, index) => {
+    let note = container.querySelector(`[data-coach-term="${id}"]`);
+    if (!note) {
+      note = $('coach-term-definitions').content.querySelector(`[data-coach-term="${id}"]`).cloneNode(true);
+      const body = el('div', { class: 'coach-footnote-body' });
+      body.append(...note.querySelectorAll('p'));
+      note.append(body);
+    }
+    const summary = note.querySelector('summary');
+    const label = `注 · ${word}`;
+    if (summary.textContent !== label) summary.textContent = label;
+    // Keep surviving nodes in place so a regular render does not close a note
+    // or steal focus while the reader is using its disclosure.
+    if (container.children[index] !== note) container.insertBefore(note, container.children[index] || null);
+  });
+  container.hidden = mentions.length === 0;
+  // Moving an existing details node can blur its summary in Chromium. Restore
+  // only a surviving focus that fell to body, never a deliberate new target.
+  if (focused?.isConnected && document.activeElement === document.body) focused.focus({ preventScroll: true });
+}
+function renderCoachNotes() {
+  const ids = ['field-coach-heat-status', 'field-coach-focus', 'field-coach-initiative', 'field-coach-pitfall', 'field-coach-next'];
+  if ($('field-coach-details').open) ids.push('field-coach-topic', 'field-coach-state', 'field-coach-full-guidance');
+  renderTermNotes($('coach-glossary-terms'), ids.map((id) => $(id).textContent).join('\n'), currentContextKey());
+}
+function renderPlanNotes() {
+  const plan = $('field-coach-plan').value.trim();
+  const key = JSON.stringify([currentContextKey(), plan]);
+  const assessment = state.planResults.get(key)?.planAssessment;
+  const text = assessment && !state.planCalls.has(currentContextKey())
+    ? [...$('field-coach-plan-result').querySelectorAll(':scope > p, :scope > details[open] > p')].map((node) => node.textContent).join('\n') : '';
+  renderTermNotes($('field-coach-plan-notes'), text, key);
+}
 function renderFieldCoach(classification) {
+  renderCoachUpdate();
   const coach = classification?.fieldCoach;
-  const heat = classification ? state.detail?.heat : null;
-  const paused = heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
-  const insufficient = !classification || classification.status === 'needs_context' || !heat || heat.status === 'insufficient_evidence' || !Number.isFinite(heat.score);
-  // The server's existing five-dimension index stays authoritative. A rounded
-  // display does not create a new score, and uncertainty/refusal hides the number.
-  $('field-coach-temperature').textContent = paused ? '先停推进' : insufficient ? '待判断' : `约${Math.round(heat.score / 5) * 5}°`;
-  $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；未知维度不按零分计算。';
-  $('field-coach-heat-status').textContent = paused ? '已有明确负面阻力' : insufficient ? '信息不足' : heatNames[heat.status] || '结合当前互动判断';
+  const heat = state.detail?.heat;
+  renderHeatStatus(heat);
+  const suggestion = currentSuggestion();
+  const guidance = suggestion?.guidance;
+  const paused = suggestion?.action === 'pause' || guidance?.relationMove === 'pause' || heat?.status === 'pause' || classification?.obstacle?.type === 'negative';
+  const quiet = Boolean(suggestion && (isNoReplySuggestion(suggestion) || ['wait', 'close_topic', 'give_space'].includes(guidance?.relationMove)));
+  const range = heat?.preliminaryRange;
+  const scored = Number.isFinite(heat?.score);
+  const analyzing = state.modelCalls.has(currentContextKey());
+  const hasMessage = state.detail?.messages?.some(({ speaker }) => speaker === 'other');
+  const analyzed = Boolean(classification || suggestion);
+  // Only the server can derive a range from observed evidence. Loading is not a
+  // heat judgment; a single new message never erases a prior observed baseline.
+  $('field-coach-temperature').textContent = paused ? '先停推进' : scored ? `约${Math.round(heat.score / 5) * 5}°`
+    : range ? `${range.lower}–${range.upper}°` : analyzing ? '初步分析中' : !hasMessage ? '先录入一句' : analyzed ? '初步观察' : '初步方向';
+  $('field-coach-temperature').title = '0–100° 暂定互动指数，非成功率；首句范围会随背景与对话调整。';
+  $('field-coach-heat-status').textContent = paused ? '尊重边界，停止这类推进' : scored ? heatNames[heat.status] || '结合当前互动判断'
+    : range ? range.label : analyzing ? '正在结合背景和这句话' : !hasMessage ? '先录入对方的一句原话' : analyzed ? '先自然交流，随新回应调整' : '先接住这句，尝试获得更多信息';
   const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
-  $('field-coach-heat-basis').textContent = heat ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度` : '记录对方的新消息后再判断。';
-
+  $('field-coach-heat-basis').textContent = scored ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度`
+    : range ? '初步范围，会随完整背景与后续互动调整。' : !hasMessage ? '一条对方原话就能开始，背景可以边聊边补。'
+      : analyzed ? '初步观察，会随认识背景和后续回应调整。' : '通用初步方向，分析完成后会结合真实回应调整。';
+  const focus = workingFocus();
+  $('field-coach-focus').textContent = `本轮重点：${paused ? '停止这类推进' : focus?.stage && focus.stage !== 'unknown' ? focusNames[focus.stage] : quiet ? '自然留白' : suggestion ? '按当前建议继续' : hasMessage ? '尝试获得更多信息' : '先录入一句'}`;
+  $('field-coach-focus').title = focus?.reason || '';
+  const low = heat?.status === 'too_low' || (scored ? heat.score < 40 : range?.upper <= 45);
+  const high = scored && heat.score >= 65;
+  const defaultDirection = high ? '接住她主动展开的内容，分享一点自己的经历。' : initialInformationDirection;
+  const defaultPitfall = low ? '通用提醒：别连环追问、催回复，也别急着自证或升级。'
+    : high ? '通用提醒：别连续加码、反复试探，也别忽略她的边界。'
+      : '通用提醒：别连续追问、堆叠升温；先接住这句话。';
   const obstacle = classification?.obstacle?.type;
-  let action = coach?.initiative || '本轮主导建议待判断。';
-  let pitfall = coach?.pitfall || (coach ? '通用提醒：别连续追问，别同一话题反复升温。' : '本轮雷点待判断。');
+  let action = guidance?.ownWordsGuide || coach?.initiative || defaultDirection;
+  let pitfall = coach?.pitfall || defaultPitfall;
   if (paused) {
     action = '停止这类推进，尊重她的边界。';
     pitfall = '别继续这类升级，也别劝她接受。';
+  } else if (quiet) {
+    action = guidance?.ownWordsGuide || '自然留白，按当前建议的接话条件再继续。';
   } else if (heat?.status === 'too_low') {
     action = '先收住投入，等真实互动变化。';
-    pitfall = '别连发催促，别用更强暗示硬推进。';
+    pitfall = coach?.pitfall || '通用提醒：别连发催促，别用更强暗示硬推进。';
   } else if (obstacle === 'ambiguous') {
     action = '先弄清她的意思，轻松接住疑虑。';
     pitfall = '别把疑虑当调侃，也别继续加码。';
-  } else if (!classification) {
-    action = classificationUnavailable() ? '可以直接生成一句回复。' : '先记录对方的新消息。';
+  } else if (!hasMessage) {
+    action = '先录入对方的一句原话；认识背景可以边聊边补。';
+    pitfall = '通用提醒：保留原话，猜测和补充背景分开记录。';
   }
   // Keep historical advice intact, including later conditions and negations.
   // CSS bounds the preview; the full advice remains readable in the disclosure.
@@ -780,19 +1244,27 @@ function renderFieldCoach(classification) {
   const highest = options.length ? Math.max(...options.map(({ weight }) => weight)) : null;
   const recommended = options.filter(({ weight }) => weight === highest);
   $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
-    : !recommended.length ? '本轮方向待分析。'
+    : !hasMessage ? '录入后点「给我建议」，少量内容也可以开始。'
+    : guidance?.reentryWhen ? guidance.reentryWhen
+      : quiet ? '先自然留白，达到当前建议的接话条件再继续。'
+      : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '分享一点相关内容，再留一个好接的小问题；别连环追问。'
+    : !recommended.length ? '可以主动选择一个换题方向。'
       : `${recommended.length > 1 ? '并列可选' : '推荐'}${recommended.map(({ topicMove }) => directionNames[topicMove]?.split(' · ')[0] || '待判断').join(' / ')} · ${obstacle === 'ambiguous' ? '先澄清她的意思，暂不升级。' : recommended[0].reason}`;
 
-  $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '待判断'}`;
-  $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}` : '记录对方的新话后，结合完整对话判断。';
-  $('field-coach-full-guidance').replaceChildren(...(coach ? [['主导建议', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
+  $('field-coach-topic').textContent = `当前话题：${coach?.currentTopic || '从最近一句开始'}`;
+  $('field-coach-state').textContent = coach ? `${topicStatusNames[coach.topicStatus] || topicStatusNames.unknown}${coach.warmingLayer && coach.warmingLayer !== 'none' ? ` · 升温层次 ${coach.warmingLayer}` : ''}`
+    : paused ? '当前建议停止这类推进，尊重对方边界。' : quiet ? '按当前建议留白，达到接话条件时再继续。'
+      : suggestion ? '按当前回复建议继续，结合真实回应调整。' : hasMessage ? '当前显示通用初步方向，完整背景与后续回应会帮助调整。' : '先录入一句，就能开始结合认识背景给建议。';
+  $('field-coach-full-guidance').replaceChildren(...(coach ? [['后续对话的方向', coach.initiative], ['具体动作', coach.nextAction], ['雷点', coach.pitfall], ['判断', coach.reason]] : []).filter(([, text]) => text).map(([label, text]) => el('p', {}, `${label}：${text}`)));
   for (const option of options) $('field-coach-full-guidance').append(el('p', {}, `${directionNames[option.topicMove]?.split(' · ')[0] || '方向'}：${option.reason}`));
   const messages = new Map((state.detail?.messages || []).map((message) => [message.id, message]));
   const evidence = (coach?.topicMessageIds || []).map((id) => messages.get(id)).filter(Boolean);
   $('field-coach-evidence').textContent = evidence.length ? `依据 ${evidence.length} 条话题记录：${evidence.slice(-3).map((message) => `${message.speaker === 'self' ? '我' : '对方'}：${message.text}`).join(' / ')}` : '';
+  renderCoachNotes();
 }
 function planDraftKey() { return JSON.stringify([state.me?.user.id, state.selectedId]); }
 function renderFieldCoachPlan() {
+  updateNextStep();
   const key = planDraftKey();
   $('field-coach-plan').value = state.planDrafts.get(key) || '';
   const busy = state.planCalls.has(currentContextKey());
@@ -801,9 +1273,13 @@ function renderFieldCoachPlan() {
   $('field-coach-plan-submit').textContent = busy ? '教练正在看…' : '问场外教练';
   const result = state.planResults.get(JSON.stringify([currentContextKey(), $('field-coach-plan').value.trim()]));
   $('field-coach-plan-result').replaceChildren();
-  if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; return; }
-  if (!result) return;
-  if (result.error) { $('field-coach-plan-result').textContent = result.error; return; }
+  if (busy) { $('field-coach-plan-result').textContent = '正在结合完整话题看这个计划…'; renderPlanNotes(); return; }
+  if (!result) { renderPlanNotes(); return; }
+  if (result.error) {
+    $('field-coach-plan-result').append(el('p', {}, result.error));
+    if (result.retryable) $('field-coach-plan-result').append(el('button', { type: 'button', class: 'secondary', onclick: () => $('field-coach-plan-form').requestSubmit() }, '重试'));
+    renderPlanNotes(); return;
+  }
   const assessment = result.planAssessment;
   const details = el('details', { class: 'coach-details' }, el('summary', {}, '查看评估依据'),
     el('p', {}, `判断：${assessment.reason}`),
@@ -813,27 +1289,34 @@ function renderFieldCoachPlan() {
   $('field-coach-plan-result').append(el('p', { class: 'coach-plan-verdict' }, planVerdictNames[assessment.verdict] || '建议待判断'),
     el('p', { class: 'coach-plan-next' }, `下一步：${assessment.nextAction}`),
     el('p', { class: 'helper' }, `时机：${planTimingNames[assessment.timingSuggestion?.status] || planTimingNames.unknown}`), details);
+  details.addEventListener('toggle', renderPlanNotes);
+  renderPlanNotes();
 }
-function currentContextKey() { return JSON.stringify([state.me?.user.id, state.selectedId, state.detail?.counterpart, state.detail?.messages, state.detail?.meeting, state.me?.profile]); }
-function requestId(type, id, direction = '', intent = '') {
-  const contextKey = JSON.stringify([type, id, direction, intent, currentContextKey()]);
+function currentContextKey() { return JSON.stringify([state.me?.user.id, state.selectedId, state.detail?.counterpart, state.detail?.messages, state.detail?.manualMeeting ?? state.detail?.meeting, state.me?.profile]); }
+function requestId(type, id, direction = '', intent = '', topicChangeRequested = false) {
+  const contextKey = JSON.stringify([type, id, direction, intent, topicChangeRequested, currentContextKey()]);
   if (!state.requestIds.has(contextKey)) state.requestIds.set(contextKey, crypto.randomUUID());
   return { id: state.requestIds.get(contextKey), key: contextKey };
 }
 function updateCoachBusy() {
-  const busy = state.modelCalls.get(currentContextKey());
+  const context = currentContextKey();
+  if (state.coachErrorContext !== context && $('coach-error')) $('coach-error').hidden = true;
+  const busy = state.modelCalls.get(context);
   $('coach-loading').hidden = busy?.type !== 'classify';
-  if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整体系与当前背景分析三个方向…';
+  if (busy?.type === 'classify') $('coach-loading').textContent = '正在结合完整对话看当前局面…';
   $('coach-panel').setAttribute('aria-busy', String(Boolean(busy)));
   $('classify').disabled = Boolean(busy) || Boolean(coachPrerequisite());
-  $('direct-reply').disabled = Boolean(busy) || Boolean(coachPrerequisite());
+  $('direct-reply').disabled = Boolean(busy) || Boolean(coachPrerequisite()) || state.me?.quota?.dailyReplyRemaining === 0;
+  $('direct-reply').textContent = busy?.type === 'reply' ? '正在给建议…' : state.me?.quota?.dailyReplyRemaining === 0 ? '今日免费回复已用完' : '给我建议';
+  $('change-topic').disabled = Boolean(busy) || Boolean(coachPrerequisite());
   renderClassification(state.detail?.classification);
   renderSuggestion();
+  updateNextStep();
 }
 function coachPrerequisite() {
-  if (!state.me || !state.detail || !state.selectedId) return '先添加一位聊天对象，填写认识背景。';
-  if (!state.me.profile?.background || state.me.requiresQuestionnaireUpdate || state.me.profile.requiresQuestionnaireUpdate) return '先在「资料 → 我的画像」补全自己的背景和聊天偏好。';
-  if (!state.detail.messages?.some(({ speaker }) => speaker === 'other')) return '先在下方粘贴对方的一条消息，再为你推荐回复方向。';
+  if (!state.me || !state.detail || !state.selectedId) return '先添加一位聊天对象，填一个称呼即可。';
+  if (state.me.requiresQuestionnaireUpdate || state.me.profile?.requiresQuestionnaireUpdate) return '先在「资料 → 我的画像」保存精简问卷版本，答案可以以后再补。';
+  if (!state.detail.messages?.some(({ speaker }) => speaker === 'other')) return '先在下方粘贴对方的一条消息，再结合局面给建议。';
   return '';
 }
 function maybeAutoCoach() {
@@ -841,18 +1324,19 @@ function maybeAutoCoach() {
   if (state.detail.classification) return;
   const context = currentContextKey();
   if (state.autoAttempts.has(context) || state.modelCalls.has(context)) return;
-  const exhausted = classificationUnavailable();
-  const attempted = state.detail.modelContext?.[exhausted ? 'directReplyAttempted' : 'classificationAttempted'];
-  if (attempted || exhausted && state.detail.directReply) return;
+  if (classificationUnavailable() || state.detail.modelContext?.classificationAttempted) return;
   state.autoAttempts.add(context);
-  void coachCall(exhausted ? 'reply' : 'classify', null, { automatic: true });
+  void coachCall('classify', null, { automatic: true });
 }
-async function coachCall(type, button, { direction, automatic = false } = {}) {
+async function coachCall(type, button, { direction, automatic = false, topicChangeRequested = false } = {}) {
   if (button?.disabled || coachPrerequisite()) return;
   const id = state.selectedId, userId = state.me.user.id, inputContext = currentContextKey();
   if (state.modelCalls.has(inputContext)) return;
-  const call = { type, id, direction, previousDirection: state.selectedDirection };
+  if (topicChangeRequested) state.topicChangeContexts.add(inputContext);
+  topicChangeRequested = topicChangeRequested || type === 'reply' && state.topicChangeContexts.has(inputContext);
+  const call = { type, id, direction, previousDirection: state.selectedDirection, visit: state.conversationVisit };
   const focusReply = type === 'reply' && button && document.activeElement === button;
+  const focusTopicChange = type === 'classify' && topicChangeRequested && button && document.activeElement === button;
   if (type === 'reply') {
     if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value);
     state.replyFeedback = null;
@@ -860,30 +1344,35 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
   }
   state.autoAttempts.add(inputContext);
   state.modelCalls.set(inputContext, call);
+  state.coachUpdate = { call, context: inputContext, visit: call.visit, phase: 'updating' };
   closeInlineCards();
   const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
-  const request = requestId(type, id, direction, intent);
+  const request = requestId(type, id, direction, intent, topicChangeRequested);
   let localError = $('coach-error');
-  if (!localError) { localError = el('p', { id: 'coach-error', class: 'form-error', role: 'alert' }); $('coach-loading').after(localError); }
-  localError.hidden = true;
+  if (!localError) { localError = el('div', { id: 'coach-error', class: 'coach-failure', role: 'alert' }); $('coach-loading').after(localError); }
+  state.coachErrorContext = null;
+  localError.hidden = true; localError.replaceChildren();
   updateCoachBusy();
   if (type === 'reply' && !automatic) {
     $('suggestion-panel').scrollIntoView({ block: 'nearest' });
     if (focusReply) $('suggestion-panel').focus({ preventScroll: true });
   }
-  let replyAccepted = false;
+  let replyAccepted = false, classificationAccepted = false;
   try {
-    const data = await post(`${counterpartPath(id)}/${type}`, { requestId: request.id, ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) });
+    const data = await modelPost(`${counterpartPath(id)}/${type}`, { ...(topicChangeRequested ? { topicChangeRequested: true } : {}), ...(type === 'reply' ? { ...(direction ? { direction } : {}), ...(intent ? { intent } : {}) } : {}) }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit && state.modelCalls.get(inputContext) === call);
     state.requestIds.delete(request.key);
     if (state.me?.user.id !== userId) return;
     updateQuota(data.quota);
-    if (state.selectedId === id && currentContextKey() === inputContext) {
+    if (state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit) {
+      const changedResult = type === 'classify' ? JSON.stringify(state.detail.classification) !== JSON.stringify(data.classification) : state.suggestion?.id !== data.suggestion.id;
+      state.coachResultRevision++;
+      applyBackgroundContext(data);
       if (type === 'classify') {
+        classificationAccepted = true;
         state.detail.classification = data.classification; state.detail.heat = data.heat;
         renderHeat(data.heat);
       } else {
         replyAccepted = true;
-        state.replyRevision++;
         state.suggestion = data.suggestion;
         if (Array.isArray(state.detail.currentSuggestionIds) && !state.detail.currentSuggestionIds.includes(data.suggestion.id)) state.detail.currentSuggestionIds.push(data.suggestion.id);
         state.selectedDirection = data.suggestion.direction || null;
@@ -892,58 +1381,67 @@ async function coachCall(type, button, { direction, automatic = false } = {}) {
           text: `${name ? `已切换到${name}` : '回复已更新'}${data.cached ? ' · 使用已保存结果' : ''}` };
         const suggestions = state.detail.suggestions || (state.detail.suggestions = []);
         if (!suggestions.some((item) => item.id === data.suggestion.id)) suggestions.push(data.suggestion);
-        if (!direction && !intent) state.detail.directReply = data.suggestion;
-        renderSuggestion(); scrollToLatest();
+        if (!direction && !intent && !topicChangeRequested) state.detail.directReply = data.suggestion;
+        renderSuggestion();
       }
+      // A recovered, previously unseen result is an update even if the server
+      // returns it from its cache after a lost response.
+      if (!data.cached || changedResult) markCoachUpdated(call, inputContext);
       announce('');
     }
     try { await loadCounterparts(); }
-    catch {
-      if (state.selectedId === id && currentContextKey() === inputContext) announce('结果已取回，但对象列表暂未刷新。可稍后刷新保存状态。', 'error');
-    }
+    catch { /* The requested advice is ready; an ancillary list read does not block it. */ }
   } catch (error) {
-    if (state.me?.user.id !== userId) return;
-    const recoverExisting = !error.status || error.code === 'JOB_IN_PROGRESS';
-    if (!recoverExisting) state.requestIds.delete(request.key);
-    const retryMessage = `${error.message} ${recoverExisting ? '可点击按钮取回结果。' : '可手动重新尝试。'}不会自动重试。`;
-    if (state.selectedId === id && currentContextKey() === inputContext) {
+    if (error.code === 'RECOVERY_CANCELLED' || state.me?.user.id !== userId) return;
+    if (state.selectedId === id && currentContextKey() === inputContext && state.conversationVisit === call.visit) {
       if (type === 'reply' && !replyAccepted) {
         state.selectedDirection = call.previousDirection;
-        state.replyFeedback = { context: inputContext, suggestionId: state.suggestion?.id,
-          text: state.suggestion ? '未取回新回复，保留上一条；可手动重试。' : '未取回回复，可手动重试。', error: true };
+        state.replyFeedback = null;
       }
-      announce(''); localError.textContent = retryMessage; localError.hidden = false;
+      announce('');
+      // Background analysis can leave the initial guidance in place. A failed
+      // explicit request still needs a visible outcome and a recovery action.
+      if (!automatic) {
+        state.coachErrorContext = inputContext;
+        localError.replaceChildren(el('p', {}, modelFailureMessage(error)));
+        if (canRetryModel(error)) {
+          const retry = el('button', { id: 'retry-coach', type: 'button', class: 'secondary', onclick: () => {
+            if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === inputContext) void coachCall(type, retry, { direction, topicChangeRequested });
+          } }, '重试');
+          localError.append(retry);
+        }
+        localError.hidden = false;
+      }
     }
     try { await reloadMe(); } catch { /* Preserve the original recovery state. */ }
     if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
       try { await loadCounterpart(id, { autoAnalyze: false }); } catch { /* No automatic retry. */ }
     }
     if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
-    if (error.code === 'CLASSIFICATION_QUOTA_EXHAUSTED' && automatic && state.selectedId === id && currentContextKey() === inputContext) {
-      state.modelCalls.delete(inputContext); updateCoachBusy();
-      void coachCall('reply', null, { automatic: true });
-    }
-    if (state.selectedId === id) {
-      try { const detail = await api(counterpartPath(id)); if (state.selectedId === id) renderJobs(detail.jobs || []); } catch { /* Read only. */ }
-    }
   } finally {
     if (state.modelCalls.get(inputContext) === call) state.modelCalls.delete(inputContext);
-    if (state.selectedId === id && currentContextKey() === inputContext) updateCoachBusy();
+    if (state.coachUpdate?.call === call && state.coachUpdate.phase === 'updating') state.coachUpdate = null;
+    renderCoachUpdate();
+    // Returning to this conversation must release its busy controls even when
+    // the old visit's result is intentionally ignored.
+    if (state.selectedId === id && currentContextKey() === inputContext) {
+      updateCoachBusy();
+      // The complete editor/guidance appears only after the busy state clears.
+      if (replyAccepted) scrollToSuggestion();
+      if (classificationAccepted && focusTopicChange && (document.activeElement === button || document.activeElement === document.body)) {
+        $('direction-options').querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+        $('direction-options').scrollIntoView({ block: 'nearest' });
+      }
+    }
   }
 }
 function renderSuggestion() {
-  const suggestion = state.suggestion;
+  const suggestion = currentSuggestion();
+  state.suggestion = suggestion;
   const context = currentContextKey();
   const busy = state.modelCalls.get(context);
   const generating = busy?.type === 'reply';
   const feedback = state.replyFeedback?.context === context && state.replyFeedback.suggestionId === suggestion?.id ? state.replyFeedback : null;
-  const suggestions = state.detail?.suggestions || [];
-  $('suggestion-history').hidden = !suggestions.length;
-  $('suggestion-list').replaceChildren(...[...suggestions].reverse().map((item) => el('button', { type: 'button', class: 'history-button', disabled: generating, 'data-suggestion-id': item.id, onclick: () => {
-    if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value);
-    state.replyFeedback = null; state.selectedDirection = item.direction || null;
-    state.suggestion = item; renderClassification(state.detail?.classification); renderSuggestion();
-  } }, `${actionNames[item.action] || '回复'} · ${item.reply || '建议等待或暂停'}`)));
   $('suggestion-panel').hidden = !suggestion && !generating;
   $('suggestion-panel').setAttribute('aria-busy', String(generating));
   $('suggestion-panel').classList.toggle('reply-updated', !generating && Boolean(feedback?.highlight));
@@ -975,50 +1473,90 @@ function renderSuggestion() {
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
   $('suggestion-reason').textContent = suggestion.reason || '';
   $('suggestion-style').textContent = suggestion.styleNote || '';
-  $('reply-relation').textContent = suggestion.action === 'pause' ? relationMoveNames.pause : relationMoveNames[suggestion.guidance?.relationMove] || (noReply ? relationMoveNames[suggestion.action] : '这条旧建议未保存关系动作');
-  $('reply-own-words').textContent = suggestion.guidance?.ownWordsGuide || (noReply ? '本轮先不发送，不必硬续一句。' : '这条旧建议未保存表达指引，可保留原意，用你的说法改写。');
-  $('reply-reentry').textContent = suggestion.guidance?.reentryWhen || '这条旧建议未保存具体条件，不必按固定时长等待。';
+  $('reply-relation').textContent = `${focusNames[currentSuggestion()?.workingFocus?.stage] || focusNames.unknown} · ${suggestion.action === 'pause' ? relationMoveNames.pause : relationMoveNames[suggestion.guidance?.relationMove] || (noReply ? relationMoveNames[suggestion.action] : '关系动作待判断')}`;
+  $('reply-own-words').textContent = suggestion.guidance?.ownWordsGuide || (noReply ? '本轮先不发送，不必硬续一句。' : '可保留原意，用你的说法改写。');
+  $('reply-reentry').textContent = suggestion.guidance?.reentryWhen || '接话条件待判断，不必按固定时长等待。';
   $('reply-wait-reason').hidden = !noReply;
-  $('reply-wait-reason').textContent = noReply ? `现在不回的依据：${suggestion.reason || '这条旧建议未保存具体依据。'}` : '';
+  $('reply-wait-reason').textContent = noReply ? `现在不回的依据：${suggestion.reason || '具体依据待判断。'}` : '';
   updateReplyCopyState();
-  updateSentState(); updateComposer();
+  updateSentState(); updateComposer(); renderFieldCoach(state.detail?.classification);
+  updateNextStep();
 }
 function isNoReplySuggestion(suggestion) { return ['wait', 'pause'].includes(suggestion?.action); }
 function updateReplyCopyState() {
   const generating = state.modelCalls.get(currentContextKey())?.type === 'reply';
-  const disabled = generating || state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId])) || !state.suggestion || isNoReplySuggestion(state.suggestion) || !$('suggestion-text').value.trim();
+  const copying = state.copyCalls.has(JSON.stringify([state.me?.user.id, state.selectedId]));
+  const disabled = generating || copying || !isPendingSuggestion(state.suggestion) || !$('suggestion-text').value.trim();
+  const feedback = state.copyFeedback;
+  const copied = feedback && feedback.userId === state.me?.user.id && feedback.counterpartId === state.selectedId
+    && feedback.visit === state.conversationVisit && feedback.suggestionId === state.suggestion?.id && feedback.text === $('suggestion-text').value;
+  $('copy-reply').hidden = generating || !state.suggestion || isNoReplySuggestion(state.suggestion);
+  $('copy-reply').textContent = copied ? '已复制' : copying ? '复制中…' : '复制回复';
   $('copy-reply').disabled = disabled;
   $('copy-reply').dataset.locked = String(disabled);
+  updateNextStep();
+}
+function showCopyFeedback(feedback) {
+  if (feedback.userId !== state.me?.user.id || feedback.counterpartId !== state.selectedId
+      || feedback.visit !== state.conversationVisit || feedback.suggestionId !== state.suggestion?.id
+      || feedback.text !== $('suggestion-text').value) return;
+  state.copyFeedback = feedback;
+  updateReplyCopyState();
+  setTimeout(() => {
+    if (state.copyFeedback !== feedback) return;
+    state.copyFeedback = null;
+    updateReplyCopyState();
+  }, 3000);
 }
 function isPendingSuggestion(suggestion) {
-  if (isNoReplySuggestion(suggestion)) return false;
-  if (suggestion?.pendingEligible !== true) return false;
-  if (!Array.isArray(state.detail?.currentSuggestionIds) || state.detail.currentSuggestionIds.includes(suggestion.id)) return true;
-  const incoming = state.detail.messages.findLast(({ speaker }) => speaker === 'other');
-  // Explicitly copying history after the latest incoming message can restore
-  // use. A copy made before that message must not revive an old-context draft.
-  const copiedAt = Date.parse(suggestion.pendingCopiedAt);
-  const incomingAt = Date.parse(incoming?.updatedAt || incoming?.recordedAt || incoming?.createdAt);
-  return Boolean(suggestion.pendingCopyReceiptId) && Number.isFinite(copiedAt) && Number.isFinite(incomingAt) && copiedAt > incomingAt;
+  return isCurrentSuggestion(suggestion) && !isNoReplySuggestion(suggestion) && suggestion.pendingEligible === true;
 }
 function updateSentState() {
   if (!state.suggestion) return;
   if (isNoReplySuggestion(state.suggestion)) {
-    const current = state.detail?.currentSuggestionIds?.includes(state.suggestion.id) || state.detail?.directReply?.id === state.suggestion.id;
-    $('suggestion-title').textContent = current ? state.suggestion.action === 'pause' ? 'AI 建议 · 先停止当前推进' : 'AI 建议 · 暂时不回' : '历史节奏建议 · 仅供查看';
-    $('sent-state').textContent = current ? '这是节奏建议，不是待发消息；出现上述接话条件后再判断。' : '这条节奏建议属于过去的背景，当前情况需要重新判断。';
+    $('suggestion-title').textContent = state.suggestion.action === 'pause' ? 'AI 建议 · 先停止当前推进' : 'AI 建议 · 暂时不回';
+    $('sent-state').textContent = '这是节奏建议，不是待发消息；出现上述接话条件后再判断。';
     return;
   }
-  const eligible = isPendingSuggestion(state.suggestion);
-  $('suggestion-title').textContent = eligible ? '我 · AI 建议' : '历史 AI 建议 · 仅供查看';
-  $('sent-state').textContent = eligible ? '修改后自行发到微信；粘贴对方下一句即可继续。系统不会自动确认你发过这段话。' : '这条历史建议不会默认关联续聊。若重新复制使用，复制记录仍不等于已确认发送。';
+  $('suggestion-title').textContent = '我 · AI 建议';
+  $('sent-state').textContent = '可按你的习惯修改，再复制到微信。';
+}
+const backgroundFieldNames = { background: '背景', work: '工作', location: '所在地', interests: '兴趣', availability: '时间安排', met: '认识经历', preference: '偏好', relationship_goal: '关系目标' };
+function renderBackgroundContext() {
+  const facts = state.detail?.backgroundContext?.facts || [];
+  const selected = state.detail?.counterpart?.id === state.selectedId;
+  for (const [id, matches] of [
+    ['profile-chat-facts', (fact) => selected && fact.subject === 'self'],
+    ['counterpart-chat-facts', (fact) => selected && state.editingCounterpartId === state.selectedId && fact.subject !== 'self'],
+  ]) {
+    const container = $(id), relevant = facts.filter(matches);
+    container.hidden = relevant.length === 0;
+    container.replaceChildren();
+    if (!relevant.length) continue;
+    container.append(el('p', { class: 'small muted' }, id === 'profile-chat-facts' ? `和${state.detail.counterpart.alias}聊天时提到的背景` : '聊天中已补充'),
+      el('ul', { class: 'chat-fact-list' }, relevant.map((fact) => el('li', {},
+        el('span', { class: 'chat-fact-label' }, `${fact.subject === 'relationship' ? '双方' : backgroundFieldNames[fact.field] || '背景'} · `), fact.value))));
+  }
+}
+function applyBackgroundContext(data) {
+  if (!state.detail) return;
+  if (Object.hasOwn(data, 'backgroundContext')) state.detail.backgroundContext = data.backgroundContext;
+  if (Object.hasOwn(data, 'manualMeeting')) state.detail.manualMeeting = data.manualMeeting;
+  if (Object.hasOwn(data, 'meeting')) { state.detail.meeting = data.meeting; fillMeeting(data.meeting); }
+  renderBackgroundContext();
+}
+function meetingDraftKey() { return JSON.stringify([state.me?.user.id, state.selectedId]); }
+function readMeetingForm() {
+  return { status: $('meeting-kind').value, time: $('meeting-time').value.trim(), place: $('meeting-place').value.trim(), note: $('meeting-note').value.trim() };
 }
 function fillMeeting(meeting) {
+  // Keep an unfinished correction when analysis completes or objects switch.
+  meeting = state.meetingDrafts.get(meetingDraftKey()) || meeting;
   $('meeting-kind').value = meeting?.status || 'none';
   $('meeting-time').value = meeting?.time || '';
   $('meeting-place').value = meeting?.place || '';
   $('meeting-note').value = meeting?.note || '';
-  $('meeting-status').textContent = meetingNames[meeting?.status || 'none'];
+  $('meeting-status').textContent = `${meetingNames[meeting?.status || 'none']} · 随聊天自动整理，可直接修改`;
   updateMeetingRequirements();
 }
 function updateMeetingRequirements() {
@@ -1030,11 +1568,9 @@ function updateIntakeChannel() {
   const channel = $('intake-channel').value;
   $('app-profile-field').hidden = channel !== 'app';
   $('offline-scene-field').hidden = channel !== 'offline';
-  $('intake-app').required = channel === 'app';
-  $('intake-offline').required = channel === 'offline';
 }
 function readIntakeForm() {
-  return { alias: $('intake-alias').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
+  return { alias: $('intake-alias').value, remark: $('intake-remark').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
 }
 function openCounterpart(person = null) {
   state.intakeInstance++;
@@ -1042,19 +1578,20 @@ function openCounterpart(person = null) {
   const draft = state.intakeDrafts.get(state.editingCounterpartId || 'new') || person;
   $('counterpart-form').reset();
   $('counterpart-dialog-title').textContent = person ? '编辑认识背景' : '添加聊天对象';
-  for (const [id, key] of [['intake-alias', 'alias'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'app' : '');
-  $('intake-rounds').value = draft?.rounds ?? 0;
+  for (const [id, key] of [['intake-alias', 'alias'], ['intake-remark', 'remark'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'other' : '');
+  $('intake-rounds').value = draft?.rounds ?? '';
   const error = $('counterpart-form').querySelector('.form-error');
   if (error) error.hidden = true;
   updateIntakeChannel();
+  renderBackgroundContext();
   $('delete-counterpart').hidden = !person;
   openInlineCard('counterpart-dialog');
   $('intake-alias').focus();
 }
-async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。') {
+async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。', isCurrent = () => true) {
   if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return false; }
-  try { await navigator.clipboard.writeText(text); announce(confirmation); return true; }
-  catch { announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
+  try { await navigator.clipboard.writeText(text); if (confirmation && isCurrent()) announce(confirmation); return true; }
+  catch { if (isCurrent()) announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
 }
 async function loadAdmin() {
   if (state.localDemo || state.me.user.role !== 'owner') return;
@@ -1145,21 +1682,25 @@ $('auth-form').addEventListener('submit', (event) => {
   });
 });
 function clearSessionUI() {
+  state.directoryReadSerial++;
+  state.conversationVisit++; state.coachErrorContext = null; state.coachUpdate = null;
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
-  state.messageDrafts.clear(); state.messageCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
+  state.messageDrafts.clear(); state.messageCalls.clear(); state.timeCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
   state.composerImage = null; state.imageCalls.clear(); state.imageSelectionSerial++;
-  state.intakeDrafts.clear();
+  state.intakeDrafts.clear(); state.meetingDrafts.clear();
+  state.topicChangeContexts.clear(); state.annotationDrafts.clear(); state.annotationOpen.clear(); state.annotationCalls.clear(); state.annotationErrors.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.copyCalls.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
   $('workspace').hidden = true; $('account-bar').hidden = true; $('auth').hidden = state.localDemo;
   $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
   $('profile-form').reset(); $('intent').value = ''; $('suggestion-text').value = '';
-  for (const id of ['counterpart-select', 'transcript', 'direction-options', 'suggestion-list', 'questionnaire', 'admin-feedback-list', 'admin-users']) $(id).replaceChildren();
+  for (const id of ['counterpart-select', 'counterpart-list', 'transcript', 'direction-options', 'questionnaire', 'admin-feedback-list', 'admin-users', 'profile-chat-facts', 'counterpart-chat-facts']) $(id).replaceChildren();
+  $('counterpart-select').setAttribute('aria-label', '选择聊天对象');
   for (const id of ['counterpart-background', 'suggestion-reason', 'suggestion-style', 'classification-summary']) $(id).textContent = '';
   $('counterpart-title').textContent = '模拟微信';
   $('generated-invite').value = ''; $('invite-result').hidden = true;
-  $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('job-history')?.remove(); $('coach-error')?.remove();
+  $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('coach-error')?.remove();
   document.querySelectorAll('form .form-error').forEach((node) => node.remove());
   closeInlineCards(); closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
   showCounterpartLoading();
@@ -1192,21 +1733,22 @@ document.addEventListener('keydown', (event) => {
   if (menus.length) menus.forEach((menu) => closeMenu(menu, { restoreFocus: true }));
   else if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
 });
-$('toggle-field-coach').addEventListener('click', () => {
-  const open = $('field-coach').dataset.open !== 'true';
-  if (!open) { closeFieldCoach({ restoreFocus: true }); return; }
-  $('field-coach').dataset.open = String(open);
-  $('toggle-field-coach').setAttribute('aria-expanded', String(open));
-  setFieldCoachModal(open);
+function openFieldCoach() {
+  $('field-coach').dataset.open = 'true';
+  $('toggle-field-coach').setAttribute('aria-expanded', 'true');
+  setFieldCoachModal(true);
   $('field-coach').scrollTop = 0;
   $('field-coach-title').focus({ preventScroll: true });
+}
+$('toggle-field-coach').addEventListener('click', () => {
+  if ($('field-coach').dataset.open === 'true') closeFieldCoach({ restoreFocus: true });
+  else openFieldCoach();
 });
+$('view-coach-update').addEventListener('click', openFieldCoach);
 $('close-field-coach').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
 $('field-coach-backdrop').addEventListener('click', () => closeFieldCoach({ restoreFocus: true }));
-$('coach-glossary-toggle').addEventListener('change', (event) => {
-  $('coach-glossary-terms').hidden = !event.currentTarget.checked;
-});
-$('field-coach-plan').addEventListener('input', () => { state.planDrafts.set(planDraftKey(), $('field-coach-plan').value); $('field-coach-plan-result').replaceChildren(); });
+$('field-coach-details').addEventListener('toggle', renderCoachNotes);
+$('field-coach-plan').addEventListener('input', () => { state.planDrafts.set(planDraftKey(), $('field-coach-plan').value); $('field-coach-plan-result').replaceChildren(); renderPlanNotes(); });
 $('field-coach-plan-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const id = state.selectedId, userId = state.me?.user.id, context = currentContextKey(), plan = $('field-coach-plan').value.trim();
@@ -1214,19 +1756,18 @@ $('field-coach-plan-form').addEventListener('submit', (event) => {
   if (!plan) { $('field-coach-plan-result').textContent = '先写下你打算怎么主导这个话题。'; $('field-coach-plan').focus(); return; }
   const resultKey = JSON.stringify([context, plan]);
   const request = requestId('coach-plan', id, '', plan);
-  state.planCalls.set(context, true); renderFieldCoachPlan();
+  const call = {}; state.planCalls.set(context, call); renderFieldCoachPlan();
   void (async () => {
     try {
-      const data = await post(`${counterpartPath(id)}/coach-plan`, { requestId: request.id, plan });
+      const data = await modelPost(`${counterpartPath(id)}/coach-plan`, { plan }, request, () => state.me?.user.id === userId && state.selectedId === id && currentContextKey() === context && state.planCalls.get(context) === call && $('field-coach-plan').value.trim() === plan);
       state.requestIds.delete(request.key);
       if (state.me?.user.id !== userId) return;
       state.planResults.set(resultKey, data); updateQuota(data.quota);
     } catch (error) {
-      if (state.me?.user.id !== userId) return;
-      if (error.status && error.code !== 'JOB_IN_PROGRESS') state.requestIds.delete(request.key);
-      state.planResults.set(resultKey, { error: `${error.message} 可手动再问；不会自动重试。` });
+      if (error.code === 'RECOVERY_CANCELLED' || state.me?.user.id !== userId) return;
+      state.planResults.set(resultKey, { error: modelFailureMessage(error, '暂时没能看完这个计划，请重试。'), retryable: canRetryModel(error) });
     } finally {
-      state.planCalls.delete(context);
+      if (state.planCalls.get(context) === call) state.planCalls.delete(context);
       if (state.me?.user.id === userId && state.selectedId === id && currentContextKey() === context) renderFieldCoachPlan();
     }
   })();
@@ -1235,10 +1776,16 @@ $('counterpart-select').addEventListener('change', async (event) => {
   const id = event.target.value;
   if (!id || id === state.selectedId) return;
   event.target.disabled = true;
-  try { await loadCounterpart(id); }
-  catch (error) { if (!error.displayed) announce(error.message, 'error'); }
+  try { await selectCounterpart(id); }
   finally { event.target.disabled = false; }
 });
+for (const id of ['directory-sort', 'directory-sort-compact']) $(id).addEventListener('change', (event) => {
+  if (!directorySortModes.has(event.target.value)) return;
+  state.directorySort = event.target.value;
+  try { localStorage.setItem('chat-coach-directory-sort', state.directorySort); } catch { /* Keep the selected order for this page. */ }
+  renderDirectory();
+});
+$('directory-add').addEventListener('click', () => openCounterpart());
 $('retry-counterpart').addEventListener('click', () => {
   const scope = { userId: state.me?.user.id, counterpartId: state.selectedId };
   void perform($('retry-counterpart'), '读取中…', async () => {
@@ -1272,7 +1819,7 @@ $('counterpart-form').addEventListener('submit', (event) => {
   void perform(event.submitter, '保存中…', async () => {
     const editingId = state.editingCounterpartId, selectedId = state.selectedId, userId = state.me?.user.id, key = editingId || 'new', instance = state.intakeInstance;
     const submitted = readIntakeForm(); state.intakeDrafts.set(key, submitted);
-    const input = { alias: $('intake-alias').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: Number($('intake-rounds').value) };
+    const input = { alias: $('intake-alias').value.trim(), remark: $('intake-remark').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: $('intake-rounds').value === '' ? null : Number($('intake-rounds').value) };
     const data = editingId ? await put(counterpartPath(editingId), input) : await post('/api/counterparts', input);
     if (state.me?.user.id !== userId) return;
     // A reopened intake is a new editing session, even when both target "new".
@@ -1290,22 +1837,45 @@ $('counterpart-form').addEventListener('submit', (event) => {
     announce(newerDraft ? '提交的背景已保存，刚补充的内容仍保留在表单里。' : '认识背景已保存。');
   });
 });
-$('delete-counterpart').addEventListener('click', () => void perform($('delete-counterpart'), '删除中…', async () => {
-  if (!confirm('删除这个对象及其关联的私有记录？此操作不能撤销。')) return;
-  const id = state.selectedId;
-  await api(counterpartPath(id), { method: 'DELETE' });
-  for (const suggestion of state.detail?.suggestions || []) state.suggestionDrafts.delete(suggestion.id);
-  state.intentDrafts.delete(id); state.requestIds.clear();
-  state.messageDrafts.delete(id);
-  state.intakeDrafts.delete(id);
-  state.selectedId = null; state.detail = null; state.suggestion = null;
-  $('suggestion-text').value = ''; $('intent').value = '';
-  for (const element of ['transcript', 'direction-options', 'suggestion-list', 'heat-dimensions']) $(element).replaceChildren();
-  $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
-  $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
-  closeInlineCards(); updateComposer();
-  await loadCounterparts(); announce('对象及其关联记录已删除。');
-}));
+function isCounterpartStateKey(key, userId, id) {
+  let parts;
+  try { parts = JSON.parse(key); } catch { return false; }
+  if (!Array.isArray(parts)) return false;
+  if (parts[0] === userId && parts[1] === id || parts[1] === userId && parts[2] === id) return true;
+  // Model request IDs wrap a context key; plan results pair one with a plan.
+  if (parts.length === 6 && parts[1] === id && ['classify', 'reply', 'coach-plan'].includes(parts[0])) return isCounterpartStateKey(parts[5], userId, id);
+  return parts.length === 2 && typeof parts[0] === 'string' && isCounterpartStateKey(parts[0], userId, id);
+}
+$('delete-counterpart').addEventListener('click', () => {
+  const id = state.editingCounterpartId, userId = state.me?.user.id;
+  const scope = { userId, counterpartId: id };
+  const suggestionIds = state.detail?.counterpart.id === id ? (state.detail.suggestions || []).map(({ id }) => id) : [];
+  void perform($('delete-counterpart'), '删除中…', async () => {
+    if (!id || !userId || !confirm('删除这个对象及其关联的私有记录？此操作不能撤销。')) return;
+    await api(counterpartPath(id), { method: 'DELETE' });
+    if (state.me?.user.id !== userId) return;
+    for (const suggestionId of suggestionIds) state.suggestionDrafts.delete(suggestionId);
+    for (const drafts of [state.intentDrafts, state.messageDrafts, state.intakeDrafts]) drafts.delete(id);
+    for (const entries of [state.requestIds, state.messageCalls, state.timeCalls, state.imageCalls, state.topicChangeContexts, state.annotationDrafts, state.annotationOpen, state.annotationCalls, state.annotationErrors, state.meetingDrafts, state.planDrafts, state.planResults, state.planCalls, state.copyReceipts, state.copyCalls, state.autoAttempts, state.modelCalls]) {
+      for (const key of entries.keys()) if (isCounterpartStateKey(key, userId, id)) entries.delete(key);
+    }
+    state.counterparts = state.counterparts.filter((person) => person.id !== id);
+    state.directoryReadSerial++;
+    if (state.selectedId !== id) { await loadCounterparts({ selectIfNeeded: false }); return; }
+    // Retire in-flight reads before clearing the selected conversation. A late
+    // pre-delete response must not restore it or take over the next selection.
+    state.detailRequestSerial++; state.conversationVisit++;
+    state.selectedId = null; state.detail = null; state.suggestion = null; state.coachUpdate = null; state.replyFeedback = null;
+    restoreComposer(null);
+    $('suggestion-text').value = ''; $('intent').value = '';
+    for (const element of ['transcript', 'direction-options', 'heat-dimensions']) $(element).replaceChildren();
+    $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
+    $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
+    closeInlineCards(); updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
+    await loadCounterparts();
+    if (state.me?.user.id === userId) announce('对象及其关联记录已删除。');
+  }, scope);
+});
 $('cancel-message-edit').addEventListener('click', cancelMessageEdit);
 $('add-message-image').addEventListener('click', () => $('message-image-file').click());
 $('message-image-file').addEventListener('change', (event) => { void attachMessageImage(event.target.files?.[0]); event.target.value = ''; });
@@ -1313,7 +1883,7 @@ $('remove-message-image').addEventListener('click', () => { state.composerImage 
 $('message-meaning').addEventListener('input', () => rememberComposer({ changed: true }));
 $('message-text').addEventListener('paste', (event) => { const file = [...(event.clipboardData?.items || [])].find((item) => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile(); if (file && !$('add-message-image').disabled) { event.preventDefault(); void attachMessageImage(file); } });
 $('message-speaker').addEventListener('change', () => { rememberComposer({ changed: true }); updateComposer(); });
-$('message-text').addEventListener('input', () => rememberComposer({ changed: true }));
+$('message-text').addEventListener('input', () => { rememberComposer({ changed: true }); updateNextStep(); });
 $('message-text').addEventListener('keydown', (event) => {
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
   event.preventDefault();
@@ -1351,7 +1921,7 @@ $('message-form').addEventListener('submit', (event) => {
       if (state.me?.user.id !== userId) return;
       finishComposerSubmission(id, submitted);
       if (state.selectedId !== id) return;
-      await refreshCounterpart(id, { autoAnalyze: !editing && body.speaker === 'other' });
+      await refreshCounterpart(id, { autoAnalyze: !editing });
       if (state.selectedId !== id) return;
       closeInlineCards(); scrollToLatest();
       announce(body.speaker === 'other' && !editing ? '对方的新消息已记录。' : '原话已记录。');
@@ -1360,15 +1930,23 @@ $('message-form').addEventListener('submit', (event) => {
 });
 $('classify').addEventListener('click', () => void coachCall('classify', $('classify')));
 $('direct-reply').addEventListener('click', () => void coachCall('reply', $('direct-reply')));
-$('suggestion-text').addEventListener('input', () => { if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
+$('change-topic').addEventListener('click', () => {
+  if ($('change-topic').disabled || coachPrerequisite()) return;
+  state.topicChangeContexts.add(currentContextKey());
+  if (classificationUnavailable()) { renderClassification(state.detail?.classification); $('direction-options').querySelector('button')?.focus({ preventScroll: true }); }
+  else void coachCall('classify', $('change-topic'), { topicChangeRequested: true });
+});
+$('suggestion-text').addEventListener('input', () => { state.copyFeedback = null; if (state.suggestion) state.suggestionDrafts.set(state.suggestion.id, $('suggestion-text').value); updateReplyCopyState(); updateSentState(); });
 $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '复制中…', async () => {
   const id = state.selectedId, userId = state.me?.user.id, suggestionId = state.suggestion?.id, copiedText = $('suggestion-text').value;
-  if (!id || !suggestionId || !copiedText.trim() || isNoReplySuggestion(state.suggestion)) return;
+  if (!id || !suggestionId || !copiedText.trim() || !isPendingSuggestion(state.suggestion)) return;
   const copyCall = JSON.stringify([userId, id]);
+  const feedback = { userId, counterpartId: id, suggestionId, text: copiedText, visit: state.conversationVisit };
   state.copyCalls.add(copyCall);
   try {
-    const copied = await copyText(copiedText);
+    const copied = await copyText(copiedText, '', () => state.me?.user.id === userId && state.selectedId === id && state.conversationVisit === feedback.visit);
     if (!copied) return;
+    showCopyFeedback(feedback);
     const key = JSON.stringify(['copy', userId, id, suggestionId, copiedText]);
     if (!state.requestIds.has(key)) state.requestIds.set(key, crypto.randomUUID());
     const data = await post(`${counterpartPath(id)}/suggestions/${encodeURIComponent(suggestionId)}/copied`, { copiedText, requestId: state.requestIds.get(key) });
@@ -1383,17 +1961,20 @@ $('copy-reply').addEventListener('click', () => void perform($('copy-reply'), '�
   }
 }));
 $('meeting-kind').addEventListener('change', updateMeetingRequirements);
+for (const type of ['input', 'change']) $('meeting-form').addEventListener(type, () => state.meetingDrafts.set(meetingDraftKey(), readMeetingForm()));
 $('meeting-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  const id = state.selectedId, userId = state.me?.user.id, key = meetingDraftKey();
+  const submitted = readMeetingForm(); state.meetingDrafts.set(key, submitted);
   void perform(event.submitter, '保存安排…', async () => {
-    const id = state.selectedId;
-    const data = await put(`${counterpartPath(id)}/meeting`, { status: $('meeting-kind').value, time: $('meeting-time').value.trim(), place: $('meeting-place').value.trim(), note: $('meeting-note').value.trim() });
-    if (state.selectedId === id) {
-      state.detail.meeting = data.meeting; fillMeeting(data.meeting);
+    const data = await put(`${counterpartPath(id)}/meeting`, submitted);
+    if (state.meetingDrafts.get(key) === submitted) state.meetingDrafts.delete(key);
+    if (state.me?.user.id === userId && state.selectedId === id) {
+      state.detail.manualMeeting = data.meeting; state.detail.meeting = data.meeting; fillMeeting(data.meeting);
       await refreshCounterpart(id);
-      if (state.selectedId === id) announce('见面安排已记录，确认状态应以双方实际约定为准。');
+      if (state.me?.user.id === userId && state.selectedId === id) announce('安排已修改。');
     }
-  });
+  }, { userId, counterpartId: id });
 });
 $('reload-admin').addEventListener('click', () => void perform($('reload-admin'), '读取中…', loadAdmin));
 $('invite-form').addEventListener('submit', (event) => {

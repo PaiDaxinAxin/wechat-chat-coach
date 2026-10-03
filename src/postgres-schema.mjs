@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS users (
       subject TEXT NOT NULL, day TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, reserved INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY(subject,day)
     );
+    CREATE TABLE IF NOT EXISTS reply_daily_usage (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, day TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0), reserved INTEGER NOT NULL DEFAULT 0 CHECK(reserved >= 0),
+      PRIMARY KEY(user_id,day)
+    );
     CREATE TABLE IF NOT EXISTS model_jobs (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       counterpart_id TEXT NOT NULL REFERENCES counterparts(id) ON DELETE CASCADE,
@@ -110,6 +115,10 @@ CREATE TABLE IF NOT EXISTS users (
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_interval_json TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS wechat_time_json TEXT;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS annotation_json TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS annotation_updated_at TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS annotation_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE reply_copy_receipts ADD COLUMN IF NOT EXISTS annotation_revisions_json TEXT;
 ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS context_snapshot_json TEXT;
 ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS snapshot_hash TEXT;
 ALTER TABLE suggestions ADD COLUMN IF NOT EXISTS origin_job_id TEXT REFERENCES model_jobs(id) ON DELETE CASCADE;
@@ -121,6 +130,8 @@ ALTER TABLE followup_receipts ADD COLUMN IF NOT EXISTS copy_receipt_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS style_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active_style_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS lease_expires_at BIGINT;
+ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS reply_reservation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE model_jobs ADD COLUMN IF NOT EXISTS reply_day TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS model_pending_context ON model_jobs(user_id,counterpart_id,operation,context_hash) WHERE state IN ('reserved','running');
 CREATE INDEX IF NOT EXISTS model_expired_lease ON model_jobs(lease_expires_at) WHERE state IN ('reserved','running');
 CREATE TABLE IF NOT EXISTS rate_limits(key TEXT PRIMARY KEY,count INTEGER NOT NULL,reset_at BIGINT NOT NULL);

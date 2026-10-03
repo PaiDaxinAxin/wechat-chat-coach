@@ -8,6 +8,10 @@ The owner treats external feedback as dirty data. Receipt does not establish tru
 
 An authenticated user's own expression preferences are separate from evidence about another person's reaction. The private style-learning path stores the user's original/edited expression comparison and self-reported fit, reason and willingness to try. It accepts no outcome, feedback or proof fields and cannot import raw external feedback. A user may explicitly adopt an abstract preference for current expression or future practice, with stated conditions and limits; unadopted cases and proposals never enter the model context. Adoption changes only that account's private preferences, not the game knowledge or model weights. A reply being recorded remains unassessed; it cannot establish success or automatically produce a rule. Any later use of external outcome data still follows the admission and owner-review path below.
 
+## Message annotations
+
+An account-owned message annotation is a separate `user_annotation` explanation, not raw outcome feedback or an adopted global rule. It may explain the user's reading of a phrase, sticker or situation. Preserve original text, speaker, provenance and timing; include the labeled note in subsequent complete chat contexts and leave earlier model snapshots unchanged. Editing or clearing it makes no provider call. It does not prove the counterpart's intention, change an inferred sending record into verified delivery, establish success, or grant consent for knowledge, evaluation, publication or training. Contradictions between the note and source conversation remain visible and uncertain; an interpretation cannot override an explicit boundary. Any later improvement use of this material must satisfy the same admission, purpose and owner-review requirements as other service records.
+
 ## Admission path
 
 `raw_untrusted → clean_candidate or quarantined → owner review → approved_candidate or rejected → explicitly authorized use`

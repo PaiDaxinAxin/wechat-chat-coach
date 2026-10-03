@@ -80,8 +80,10 @@ test('Postgres relational store preserves contracts across independent instances
     const id = await context(user), otherId = await context(other);
     assert.equal((await peer.getProfile(user.id)).style, profile().style);
     assert.equal((await peer.listCounterparts(user.id)).length, 1);
-    await store.putCounterpart(user.id, { ...counterpart(), alias: 'Updated fictional peer' }, id);
+    assert.equal((await peer.getCounterpart(user.id, id)).remark, '', 'Legacy rows default to an empty remark');
+    await store.putCounterpart(user.id, { ...counterpart(), alias: 'Updated fictional peer', remark: 'Bookshop friend' }, id);
     assert.equal((await peer.getCounterpart(user.id, id)).revision, 3);
+    assert.equal((await peer.getCounterpart(user.id, id)).remark, 'Bookshop friend');
     const msg = await store.putMessage(user.id, id, { speaker: 'self', text: 'A draft.' });
     await peer.putMessage(user.id, id, { speaker: 'self', text: 'Edited draft.' }, msg.id);
     assert.equal((await store.listMessages(user.id, id)).at(-1).text, 'Edited draft.');
@@ -257,6 +259,157 @@ test('Postgres relational store preserves contracts across independent instances
     assert.equal(await store.getAppliedPersonalStyle(user.id), undefined);
     await assert.rejects(pool.query('UPDATE chat_coach.style_reviews SET value_json=$1 WHERE id=$2', ['{}', review.id]), /IMMUTABLE_STYLE_REVIEW/);
     await assert.rejects(pool.query('UPDATE chat_coach.style_rules SET value_json=$1 WHERE id=$2', ['{}', candidate.id]), /IMMUTABLE_STYLE_RULE/);
+  });
+
+  await t.test('free daily reply reservations stay atomic across objects and instances, release once and preserve request-day accounting', async () => {
+    const user = await account(), ids = await Promise.all(Array.from({ length: 4 }, () => context(user)));
+    const attempts = await Promise.allSettled(ids.map((id, index) => (index % 2 ? peer : store).reserveJob({ userId: user.id, counterpartId: id, operation: 'reply', requestId: randomUUID(), contextHash: randomUUID(), knowledgeHash: 'synthetic', workerId: 'fixture', providerModel: 'fixture-model' })));
+    const accepted = attempts.filter(({ status }) => status === 'fulfilled').map(({ value }) => value);
+    assert.equal(accepted.length, 3);
+    assert.equal(attempts.find(({ status }) => status === 'rejected').reason.code, 'DAILY_REPLY_QUOTA_EXHAUSTED');
+    assert.equal((await peer.quota(user.id)).dailyReplyRemaining, 0);
+    for (const reserved of accepted.slice(0, 2)) {
+      await store.markJobRunning(reserved.job.id);
+      const suggestion = { id: randomUUID(), action: 'reply', reply: 'Synthetic sendable reply.' };
+      await peer.completeJob(reserved.job.id, { suggestion }, suggestion);
+    }
+    await store.markJobRunning(accepted[2].job.id);
+    await peer.failJob(accepted[2].job.id, 'SYNTHETIC_FAILED'); await store.failJob(accepted[2].job.id, 'SYNTHETIC_FAILED');
+    assert.equal((await peer.quota(user.id)).dailyReplyRemaining, 1);
+    const cached = await reservation(user, ids.find((id) => id === accepted[0].job.counterpartId), 'reply', { contextHash: accepted[0].job.contextHash });
+    assert.equal(cached.fresh, false); assert.equal((await peer.quota(user.id)).dailyReplyRemaining, 1);
+    const requestDayUser = await account(), requestDayId = await context(requestDayUser), originalClock = clock;
+    clock = Date.parse('2026-01-03T15:59:59Z');
+    try {
+      const reserved = await reservation(requestDayUser, requestDayId);
+      assert.equal((await peer.quota(requestDayUser.id)).replyDay, '2026-01-03');
+      advance(2_000);
+      assert.equal((await peer.quota(requestDayUser.id)).replyDay, '2026-01-04');
+      assert.equal((await peer.quota(requestDayUser.id)).dailyReplyRemaining, 3);
+      await store.markJobRunning(reserved.job.id);
+      const suggestion = { id: randomUUID(), action: 'reply', reply: 'A reply crossing midnight.' };
+      await peer.completeJob(reserved.job.id, { suggestion }, suggestion);
+      assert.equal((await peer.quota(requestDayUser.id)).dailyReplyRemaining, 3);
+      advance(-2_000); assert.equal((await store.quota(requestDayUser.id)).dailyReplyRemaining, 2);
+      advance(2_000);
+      const expires = await reservation(requestDayUser, requestDayId); await store.markJobRunning(expires.job.id);
+      advance(60_001); assert.equal(await peer.recoverExpiredJobs(), 1);
+      assert.equal((await store.quota(requestDayUser.id)).dailyReplyRemaining, 3);
+      assert.equal((await store.quota(requestDayUser.id)).replyTimeZone, 'Asia/Shanghai');
+    } finally { clock = originalClock; }
+  });
+
+  await t.test('message annotations retain original facts and immutable source, including same-clock clear and deliberate copy recovery', async () => {
+    const user = await account('paid'), stranger = await account(), id = await context(user), message = (await store.listMessages(user.id, id))[0];
+    const suggestion = await suggested(user, id), immutable = (await peer.getSuggestionCase(user.id, id, suggestion.id)).snapshot;
+    await store.recordReplyCopy(user.id, id, suggestion.id, { requestId: randomUUID() });
+    const annotated = await peer.putMessageAnnotation(user.id, id, message.id, '这是本人提供的线下背景。🙂');
+    const { annotation, annotationRevision, annotationUpdatedAt, ...facts } = annotated;
+    assert.deepEqual(facts, message); assert.equal(annotation.source, 'user_annotation'); assert.equal(annotationRevision, 1);
+    await assert.rejects(peer.putMessageAnnotation(stranger.id, id, message.id, '越权'), { code: 'COUNTERPART_NOT_FOUND' });
+    assert.equal((await store.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+    const cleared = await store.putMessageAnnotation(user.id, id, message.id, '');
+    assert.equal(cleared.annotation, undefined); assert.equal(cleared.annotationRevision, 2); assert.equal(cleared.annotationUpdatedAt, annotationUpdatedAt);
+    assert.equal((await peer.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+    const newSuggestion = await suggested(user, id);
+    assert.equal(newSuggestion.pendingEligible, true, 'a new snapshot captures the cleared receipt even at the same timestamp');
+    assert.deepEqual((await peer.getSuggestionCase(user.id, id, suggestion.id)).snapshot, immutable);
+    const stale = await peer.recordFollowup(user.id, id, { requestId: randomUUID(), text: 'New recorded other message.', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply });
+    assert.equal(stale.previousMessage, null); assert.equal(stale.feedback, null);
+    advance(1); await store.recordReplyCopy(user.id, id, suggestion.id, { requestId: randomUUID() });
+    assert.equal((await peer.getSuggestion(user.id, id, suggestion.id)).pendingEligible, true);
+    const row = (await pool.query('SELECT annotation_json,annotation_revision FROM chat_coach.messages WHERE id=$1', [message.id])).rows[0];
+    assert.equal(row.annotation_json, null); assert.equal(row.annotation_revision, 2);
+  });
+
+  await t.test('copy receipts capture annotation versions across clock regressions, replay and legacy recovery', async () => {
+    const originalClock = clock;
+    try {
+      const user = await account('paid'), id = await context(user), message = (await store.listMessages(user.id, id))[0];
+      const suggestion = await suggested(user, id);
+      advance(1_000);
+      const oldInput = { requestId: randomUUID() };
+      const old = await store.recordReplyCopy(user.id, id, suggestion.id, oldInput);
+      advance(-5_000);
+      await peer.putMessageAnnotation(user.id, id, message.id, 'First user annotation.');
+      assert.equal((await store.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+      assert.equal((await peer.recordReplyCopy(user.id, id, suggestion.id, oldInput)).cached, true);
+      assert.equal((await store.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+      await store.putMessageAnnotation(user.id, id, message.id, '');
+      const afterClear = { requestId: randomUUID() };
+      const copied = await peer.recordReplyCopy(user.id, id, suggestion.id, afterClear);
+      assert.ok(copied.copyReceipt.copiedAt < old.copyReceipt.copiedAt);
+      assert.equal((await store.getSuggestion(user.id, id, suggestion.id)).pendingCopyReceiptId, copied.copyReceipt.id);
+      advance(-5_000);
+      await store.putMessageAnnotation(user.id, id, message.id, 'A subsequent annotation.');
+      assert.equal((await peer.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+      assert.equal((await peer.recordReplyCopy(user.id, id, suggestion.id, afterClear)).cached, true);
+      assert.equal((await peer.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+      const stale = await store.recordFollowup(user.id, id, { requestId: randomUUID(), text: 'A new other record.', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply, previousCopyReceiptId: copied.copyReceipt.id });
+      assert.equal(stale.previousMessage, null); assert.equal(stale.feedback, null);
+      const fresh = await peer.recordReplyCopy(user.id, id, suggestion.id, { requestId: randomUUID() });
+      assert.equal((await store.getSuggestion(user.id, id, suggestion.id)).pendingCopyReceiptId, fresh.copyReceipt.id);
+      const captured = (await pool.query('SELECT annotation_revisions_json FROM chat_coach.reply_copy_receipts WHERE id=$1', [fresh.copyReceipt.id])).rows[0];
+      assert.deepEqual(JSON.parse(captured.annotation_revisions_json), { [message.id]: 3 });
+      await pool.query('UPDATE chat_coach.reply_copy_receipts SET annotation_revisions_json=NULL WHERE id=$1', [fresh.copyReceipt.id]);
+      assert.equal((await peer.getSuggestion(user.id, id, suggestion.id)).pendingEligible, false);
+      const restored = await store.recordReplyCopy(user.id, id, suggestion.id, { requestId: randomUUID() });
+      const followup = { requestId: randomUUID(), text: 'Another recorded reply.', previousSuggestionId: suggestion.id, previousReplyText: suggestion.reply, previousCopyReceiptId: restored.copyReceipt.id };
+      const accepted = await peer.recordFollowup(user.id, id, followup);
+      assert.equal(accepted.previousMessage.provenance, 'inferred_from_followup');
+      assert.equal((await store.recordFollowup(user.id, id, followup)).previousMessage.id, accepted.previousMessage.id);
+      assert.equal((await pool.query('SELECT annotation_revisions_json FROM chat_coach.reply_copy_receipts WHERE id=$1', [old.copyReceipt.id])).rows[0].annotation_revisions_json, '{}');
+    } finally { clock = originalClock; }
+  });
+
+  await t.test('current job selection across topic request modes uses durable order for ties and clock regressions', async () => {
+    const user = await account('paid'), id = await context(user), hashes = [randomUUID(), randomUUID()];
+    for (let index = 0; index < 2; index++) {
+      if (index) advance(-1);
+      const reserved = await reservation(user, id, 'classify', { contextHash: hashes[index] });
+      await store.markJobRunning(reserved.job.id); await peer.completeJob(reserved.job.id, { ordinal: index, heat: { status: index ? 'pause' : 'potential' } });
+    }
+    assert.equal((await peer.latestSuccessfulForContexts(user.id, id, 'classify', hashes)).result.ordinal, 1);
+    const previous = await peer.previousClassification(user.id, id);
+    assert.equal(previous.result.heat.status, 'pause');
+    assert.equal(previous.contextSnapshot.knowledge.hash, 'private-knowledge-hash');
+    assert.ok(!(await peer.listJobs(user.id, id)).some((job) => 'contextSnapshot' in job));
+    const tied = await reservation(user, id, 'classify');
+    await store.markJobRunning(tied.job.id); await peer.completeJob(tied.job.id, { ordinal: 2, heat: { status: 'pause' } });
+    assert.equal((await store.previousClassification(user.id, id)).id, tied.job.id, 'The later durable observation wins a same-clock tie');
+    await assert.rejects(peer.latestSuccessfulForContexts(owner.id, id, 'classify', hashes), { code: 'COUNTERPART_NOT_FOUND' });
+  });
+
+  await t.test('private extraction readback uses durable non-cache order and manual saves keep a stable cutoff without leaking receipts', async () => {
+    const user = await account('paid'), other = await account(), id = await context(user);
+    const message = (await store.listMessages(user.id, id))[0];
+    const extracted = { facts: [{ subject: 'other', field: 'availability', value: 'Today', evidence: [{ messageId: message.id, quote: message.text, source: 'text' }] }], meeting: null };
+    const first = await reservation(user, id, 'classify');
+    await store.markJobRunning(first.job.id);
+    await peer.completeJob(first.job.id, { classification: { contextUpdates: extracted } });
+    advance(-1_000);
+    const second = await reservation(user, id, 'reply');
+    await peer.markJobRunning(second.job.id);
+    await store.completeJob(second.job.id, { suggestion: { contextUpdates: extracted } });
+    assert.equal((await peer.latestContextUpdates(user.id, id)).id, second.job.id);
+    assert.deepEqual((await peer.latestContextUpdates(user.id, id)).contextSnapshot.modelInput.messages, (await store.listMessages(user.id, id)));
+    const legacy = await reservation(user, id, 'reply');
+    await store.markJobRunning(legacy.job.id); await peer.completeJob(legacy.job.id, { suggestion: { reply: 'Legacy reply.' } });
+    assert.equal((await store.latestContextUpdates(user.id, id)).id, second.job.id, 'A legacy reply without new output does not fabricate an extraction');
+    const cached = await peer.reserveJob({ userId: user.id, counterpartId: id, operation: 'reply', requestId: randomUUID(), contextHash: second.job.contextHash, knowledgeHash: second.job.knowledgeHash, workerId: 'test-worker', providerModel: 'fixture-model' });
+    assert.equal(cached.cached, true);
+    assert.equal((await peer.latestContextUpdates(user.id, id)).id, second.job.id);
+    const none = { status: 'none', time: '', place: '', note: '' };
+    await store.putMeeting(user.id, id, none);
+    const initial = await peer.getMeetingState(user.id, id);
+    await peer.putMeeting(user.id, id, none);
+    const again = await store.getMeetingState(user.id, id);
+    assert.equal(initial.updatedAt, again.updatedAt); assert.notEqual(initial.receiptId, again.receiptId);
+    assert.deepEqual(again.atSaveMessageIds, [message.id]);
+    assert.deepEqual(await peer.getMeeting(user.id, id), none);
+    assert.ok(!(await peer.listJobs(user.id, id)).some((job) => 'contextSnapshot' in job));
+    await assert.rejects(peer.latestContextUpdates(other.id, id), { code: 'COUNTERPART_NOT_FOUND' });
+    await assert.rejects(peer.getMeetingState(other.id, id), { code: 'COUNTERPART_NOT_FOUND' });
   });
 
   await t.test('feedback cleaning, deduplication and owner approval remain traceable and isolated', async () => {
