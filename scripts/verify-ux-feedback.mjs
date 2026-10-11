@@ -64,6 +64,14 @@ try {
     await action(); const response = await pending, payload = await response.json();
     assert.equal(response.status(), 200, JSON.stringify(payload)); return payload.data;
   }
+  async function copySettled(page) {
+    // Clipboard success precedes receipt persistence and its conversation read.
+    // The copy control becomes available only after the complete action settles.
+    await page.waitForFunction(() => {
+      const button = document.getElementById('copy-reply');
+      return button.textContent === '已复制' && !button.disabled;
+    });
+  }
   async function idle(page) {
     await page.waitForFunction(() => document.getElementById('suggestion-panel').getAttribute('aria-busy') === 'false' && !document.getElementById('direct-reply').disabled);
   }
@@ -127,7 +135,7 @@ try {
   const beforeCopy = report.modelCalls.reply;
   const copyRequest = page.waitForRequest((request) => request.url().endsWith('/copied'));
   const receipt = await perform(page, '/copied', () => page.locator('#copy-reply').click());
-  await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '已复制');
+  await copySettled(page);
   assert.equal(await page.evaluate(() => window.fixtureClipboard.text), edited);
   assert.equal((await copyRequest).postDataJSON().copiedText, edited);
   assert.ok(receipt.copyReceipt.id);
@@ -136,12 +144,27 @@ try {
   assert.equal(report.modelCalls.reply, beforeCopy, 'Copying never invokes a model');
   await page.clock.fastForward(6000);
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复', 'Success feedback expires');
-  await perform(page, '/copied', () => page.locator('#copy-reply').click());
-  await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '已复制');
+  // Reproduce the CI timing: the POST has returned and the clipboard says
+  // copied, while its follow-up detail read still keeps the action in flight.
+  const copyReadGate = deferred(), copyReadStarted = deferred();
+  const copyReadUrl = `${origin}/api/counterparts/${id}`;
+  const holdCopyRead = async (route) => {
+    const response = await route.fetch(); copyReadStarted.resolve();
+    await copyReadGate.promise; await route.fulfill({ response });
+  };
+  await page.route(copyReadUrl, holdCopyRead);
+  const copyReadResponse = page.waitForResponse((response) => response.url() === copyReadUrl && response.request().method() === 'GET');
+  try {
+    await perform(page, '/copied', () => page.locator('#copy-reply').click());
+    await copyReadStarted.promise;
+    assert.equal(await page.locator('#copy-reply').textContent(), '已复制');
+    assert.equal(await page.locator('#copy-reply').isDisabled(), true, 'Clipboard success alone does not mean receipt readback has settled');
+  } finally { copyReadGate.resolve(); await copyReadResponse; await page.unroute(copyReadUrl, holdCopyRead); }
+  await copySettled(page);
   await page.locator('#suggestion-text').fill('这是刚修改的新版本。');
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复', 'Editing does not inherit a prior successful copy');
   await perform(page, '/copied', () => page.locator('#copy-reply').click());
-  await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '已复制');
+  await copySettled(page);
   await reply(page, '生成一个新的建议版本');
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复', 'A new suggestion does not inherit copied feedback');
   report.cases.push('Edited text copied, drafts preserved, no model side effect, feedback expires or clears on edit/new reply');
