@@ -1,3 +1,4 @@
+import { switchConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -57,10 +58,10 @@ function measureControl(node) {
     borderContrast: parseFloat(visual.borderTopWidth) > 0 && !['none', 'hidden'].includes(visual.borderTopStyle)
       ? contrast(composite(rgb(visual.borderTopColor), parent), parent) : 0,
     fillContrast: contrast(fill, parent), textContrast: contrast(composite(rgb(style.color), fill), fill),
-    disclosure: chevron && rgb(style.color).slice(0, 3).every((v, i) => v === accent[i]),
+    disclosure: chevron && contrast(composite(rgb(style.color), fill), fill) >= 4.5,
     opacity: Number(style.opacity), width: rect.width, height: rect.height, fontSize: parseFloat(style.fontSize),
     onCoach: Boolean(node.closest('.coach-card')),
-    coachContrast: contrast(fill, rgb(root.getPropertyValue('--color-coach').trim())),
+    coachContrast: contrast(fill, background(node.closest('.coach-card') || node.parentElement)),
     outline: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth), outlineOffset: parseFloat(style.outlineOffset),
     transform: style.transform,
     tokens: Object.fromEntries(['control-line', 'hover', 'press', 'accent-strong', 'disabled-text'].map((key) => [key, root.getPropertyValue(`--color-${key}`).trim()])),
@@ -112,7 +113,7 @@ try {
     const page = await context.newPage(); page.setDefaultTimeout(15_000);
     page.on('pageerror', (error) => report.pageErrors.push(error.message));
     async function select(id) {
-      await page.locator('#counterpart-select').selectOption(id);
+      await switchConversation(page, id);
       await page.waitForFunction((selected) => document.getElementById('counterpart-select').value === selected
         && !document.getElementById('counterpart-workspace').hidden && !document.getElementById('message-text').disabled, id);
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -133,8 +134,17 @@ try {
     await page.waitForFunction(() => document.getElementById('startup-status').hidden);
     assert.equal(await page.locator('html').getAttribute('data-theme'), theme);
     assert.equal(await page.evaluate(() => matchMedia('(hover:hover) and (pointer:fine)').matches), !touch);
+    assert.equal(await page.locator('#counterpart-select').isVisible(), touch, 'Only narrow screens duplicate the directory with a compact selector');
+    assert.equal(await page.locator('#add-counterpart').isVisible(), touch, 'Only narrow screens need the header add entry');
+    assert.equal(await page.locator('#counterpart-directory').isVisible(), !touch);
+    assert.equal((await page.locator('#counterpart-title').boundingBox()).width > 1, !touch, 'The toolbar shows the person once, without duplicate labels');
+    assert.equal(await page.locator('#coach-context-details').getAttribute('open'), null, 'Analysis metadata is secondary to the message and reply');
+    assert.equal(await page.locator('#field-coach-plan-details').getAttribute('open'), null, 'Coach planning starts collapsed');
+    assert.equal(await page.locator('#field-coach-plan-form').isVisible(), false);
+    assert.equal(await page.locator('#chat-thread .auxiliary-page, #chat-thread #profile-form, #chat-thread #meeting-form, #chat-thread #invite-form').count(), 0, 'Background/account forms never occupy the conversation');
+
     await select(blank.id);
-    await step('save-message', '下一步：把对方的一句原话贴到下方');
+    await step('save-message', '先记录对方的一句原话');
     assert.equal(await page.locator('#direct-reply').isDisabled(), true);
     const disabled = await page.locator('#direct-reply').evaluate(measureControl);
     assert.equal(disabled.opacity, 1); assert.ok(disabled.textContrast >= 3, JSON.stringify(disabled));
@@ -145,7 +155,7 @@ try {
       for (const bg of ['surface', 'coach']) assert.ok(disabled.contrasts[bg].disabledText >= 3, `${theme} disabled label / ${bg}`);
     }
     await select(person.id);
-    await step('direct-reply', '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」');
+    await step('direct-reply', '点「给我建议」，准备下一句');
     if (!touch) {
       const geometry = await page.locator('#message-form').evaluate((form) => {
         const style = getComputedStyle(form), help = getComputedStyle(form.querySelector('.composer-hint'));
@@ -185,7 +195,7 @@ try {
       const selected = page.locator(`.counterpart-item[data-counterpart-id="${person.id}"]`);
       assert.equal(await selected.getAttribute('aria-current'), 'true');
       assert.equal(await selected.evaluate((node) => getComputedStyle(node).borderInlineStartWidth), '3px');
-      const advice = page.locator('#direct-reply'); await advice.focus();
+      const advice = page.locator('#direct-reply'); await page.keyboard.press('Tab'); await advice.focus();
       const focused = await advice.evaluate(measureControl);
       assert.equal(focused.outline, 'solid'); assert.equal(focused.outlineWidth, 2); assert.ok(focused.outlineOffset >= 2);
       await advice.hover(); const beforePress = await advice.evaluate(measureControl);
@@ -196,16 +206,16 @@ try {
       await page.mouse.move(0, 0); await page.mouse.up();
     }
     await page.locator('#message-text').fill('新输入的对方原话');
-    await step('save-message', '下一步：点「记录消息」或按 Enter');
+    await step('save-message', '点「记录消息」或按 Enter');
     await page.locator('#message-speaker').selectOption('self');
-    await step('save-message', '下一步：点「记录已发送」或按 Enter');
+    await step('save-message', '点「记录已发送」或按 Enter');
     await page.locator('#message-text').fill(''); await page.locator('#message-speaker').selectOption('other');
-    await step('direct-reply', '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」');
+    await step('direct-reply', '点「给我建议」，准备下一句');
     const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1sAAAAASUVORK5CYII=', 'base64');
     await page.locator('#message-image-file').setInputFiles({ name: 'synthetic.png', mimeType: 'image/png', buffer: image });
-    await step('save-message', '下一步：点「识读图片」或按 Enter');
+    await step('save-message', '点「识读图片」或按 Enter');
     await page.locator('#remove-message-image').click();
-    await step('direct-reply', '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」');
+    await step('direct-reply', '点「给我建议」，准备下一句');
     assert.equal(report.mockReplies, repliesBefore, 'Affordances, input, images and readback have no model side effects');
     const row = page.locator(`[data-message-id="${messages[0].id}"]`), note = row.locator('.message-annotation');
     await row.locator('.message-menu > summary').click();
@@ -245,27 +255,27 @@ try {
     assert.equal(await note.locator('summary').isVisible(), true);
     assert.equal(await page.locator('.message-annotation:visible').count(), 1);
     await post('/reply', () => page.locator('#direct-reply').click());
-    await step('copy-reply', '下一步：改成你的说法，点「复制回复」后发到微信');
+    await step('copy-reply', '建议已备好，复制后发到微信');
     await post('/copied', () => page.locator('#copy-reply').click());
-    await step('save-message', '下一步：发到微信后，等对方回复，把原话贴到下方');
+    await step('save-message', '发到微信后，粘贴对方的新回复');
     await page.waitForFunction(() => document.getElementById('copy-reply').textContent === '复制回复');
-    await step('save-message', '下一步：发到微信后，等对方回复，把原话贴到下方');
+    await step('save-message', '发到微信后，粘贴对方的新回复');
     await page.locator('#suggestion-text').fill('刚改写，还没有复制的新版本。');
-    await step('copy-reply', '下一步：改成你的说法，点「复制回复」后发到微信');
+    await step('copy-reply', '建议已备好，复制后发到微信');
     const intent = page.locator('#intent'); await intent.evaluate((node) => { node.closest('details').open = true; });
     await intent.fill('合成慢响应：换一种表达。');
     replyGate = deferred();
     const slow = post('/reply', () => page.locator('#direct-reply').click());
-    await step(null, 'AI 正在准备，完成后这里会提示下一步');
+    await step(null, 'AI 正在准备建议…');
     await page.locator('#message-text').fill('AI 准备期间也可以录入原话');
-    await step('save-message', '下一步：点「记录消息」或按 Enter');
+    await step('save-message', '点「记录消息」或按 Enter');
     await page.locator('#message-text').fill('');
-    await step(null, 'AI 正在准备，完成后这里会提示下一步');
+    await step(null, 'AI 正在准备建议…');
     replyGate.resolve(); await slow; replyGate = null;
-    await step('copy-reply', '下一步：改成你的说法，点「复制回复」后发到微信');
+    await step('copy-reply', '建议已备好，复制后发到微信');
     await intent.evaluate((node) => { node.closest('details').open = false; });
     await select(blank.id); await select(person.id); // remove transient arrival/update cues
-    await step('copy-reply', '下一步：改成你的说法，点「复制回复」后发到微信');
+    await step('copy-reply', '建议已备好，复制后发到微信');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, 'No horizontal overflow');
     assert.equal(await page.locator('[style], style').count(), 0, 'CSP: no inline styles');
     assert.deepEqual(await page.evaluate(() => Object.keys(localStorage).sort()), ['chat-coach-theme'], 'No added storage keys');
@@ -287,10 +297,10 @@ try {
     assert.ok((await page.locator('#daily-reply-quota').textContent()).includes('0 / 3'));
     assert.equal(await page.locator('#direct-reply').isDisabled(), true);
     assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
-    await step('save-message', '下一步：今日免费建议已用完；自己回复后，把发出的话记为「我已发送的消息」');
+    await step('save-message', '今日免费建议已用完，可继续记录聊天');
     server.betaStore.putMessage(seed.user.id, blank.id, { speaker: 'self', text: '虚构已发送：我想去江边走走。' });
     await select(person.id); await select(blank.id);
-    await step('save-message', '下一步：等对方回复，把原话贴到下方（今日免费建议已用完）');
+    await step('save-message', '粘贴对方的新回复（今日免费建议已用完）');
     assert.equal(report.mockReplies, repliesBeforeQuota, 'Quota guidance and seeded self/other messages add no model calls');
     report.cases.push(`${label}: exhausted quota with no suggestion, other/self next-step text and record highlighted without model calls`);
     await context.close();

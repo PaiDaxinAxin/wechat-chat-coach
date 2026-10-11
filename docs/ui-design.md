@@ -12,7 +12,7 @@ The personal project's visual values have one implementation home, `web/styles.c
 
 - One conversation surface: counterpart messages on the left, self messages and editable pending replies on the right. AI analysis, direction choices and next-step advice are identified as advice within the thread.
 - A small header selects the counterpart and opens supplementary actions. No always-visible directory, heat dashboard or questionnaire. The companion field coach follows the owner’s later explicit addition.
-- Personal profile, counterpart background and meeting arrangements open only when needed, inside the same conversation. Follow-up messages automatically form raw feedback for the preceding draft. Unknown observations remain unknown; lower-weight directions remain selectable.
+- Personal profile, questionnaires, expression preferences, counterpart background, meeting arrangements, interaction evidence and owner administration open on separate pages, following the owner's 2026-10-11 corrections below. Message-specific annotations and time edits remain attached to their messages. Follow-up messages automatically form raw feedback for the preceding draft. Unknown observations remain unknown; lower-weight directions remain selectable.
 - The composer records pasted messages and continues the previous round without separate sent-confirmation or feedback buttons. Eligible complete contexts automatically obtain three direction weights once; a direction click generates that reply. Generated and inferred texts retain their source status; the software does not send messages to WeChat.
 - Day/night switching preserves the current conversation and unsaved drafts. Only the theme preference belongs in browser local storage; private profiles, chats, tokens and API credentials do not.
 - Local demo stays explicitly fictional and loopback-only, with separate private data. Its automatic session never becomes a public authentication bypass. Public access and personal email delivery remain deferred.
@@ -142,3 +142,21 @@ Exactly one action in record → advice → copy is highlighted, or none while t
 Message annotations open through `⋯ → 添加批注 / 编辑批注`, with focus in the existing editor. Empty closed annotations stay hidden; saved background retains the `批注 · 已补背景` disclosure. Draft, pending-save, error and focus recovery remain intact.
 
 `npm run test:affordance` checks rest/hover contrast, disabled labels, the single-highlighted loop and annotation focus/save behavior in day/night at 1440×900 and 390×844. It retains screenshots in its temporary run directory and uses isolated synthetic data, a knowledge copy and injected providers with zero paid calls.
+
+## Separate counterpart page — 2026-10-11
+
+Adding a counterpart opens a standalone page in the current app, replacing the directory, conversation and field coach. All add entry points and the existing counterpart-background editor use this page. It is not a modal or a message in the conversation. The page retains day/night tokens, a visible back button, a single-column form and normal page scrolling on desktop and mobile. A name is sufficient to start; further context remains optional and can develop through chat.
+
+Back returns to the original chat and retains both its composer and the unfinished intake draft for this page session. Cancel discards only the intake draft. Saving opens the saved counterpart's conversation; a failed save keeps the page, entered fields and actionable error. A late response cannot close a newly reopened intake page. Page navigation updates the document title, skip link and focus without storing private drafts in browser storage or adding model calls.
+
+`npm run test:intake` covers desktop and 390px/320px layouts in both themes, all add/edit entry points, keyboard focus, cancellation, failure/retry and draft preservation with isolated fictional data and zero provider calls. Existing demo and recovery checks cover delayed saves, deletion and account changes.
+
+## Chat-first layout and supporting pages — 2026-10-11
+
+The owner expanded the review to every remaining data-entry surface and requested the clear hierarchy of a WeChat desktop conversation. The directory, chat and field coach now share one continuous frame. Desktop selection uses the directory; its duplicate header picker and add button are hidden. Mobile keeps the native picker and add button. The main message area retains neutral counterpart bubbles and muted green self/draft bubbles in both themes.
+
+The inline AI area contains one heading and the advice/topic-change actions. Detailed analysis and optional intent expand on demand. The field coach retains clearly labeled heat and three concise action groups, while its evidence, initiative-plan editor and expression-preference entry are secondary disclosures. The input toolbar places recording speaker, image attachment and optional meaning together. Short next-action text replaces repeated instructions. Visible control boundaries, disclosure chevrons, keyboard focus and 44px targets remain; secondary disclosure text uses the muted text color with normal text contrast.
+
+Profile (including questionnaire and expression learning), meeting, heat evidence and owner administration join counterpart intake as standalone pages outside the conversation frame. A shared page lifecycle manages the title, skip link, notification location, initial focus and return position. Closing a page preserves its drafts; successful main profile/meeting saves return to chat only if no newer draft or page has replaced the submitted view. Rule and administration actions stay on their page. Background conversation/model completions cannot dismiss the active page or focus hidden inputs. Late administration results are scoped to their originating account and session.
+
+The change affects presentation and client lifecycle only. API permissions, schemas, model context, reply/classifier quotas and feedback review rules are unchanged. Regression fixtures must use visible directory/menu/disclosure navigation, preserving the existing business assertions rather than clicking hidden controls.

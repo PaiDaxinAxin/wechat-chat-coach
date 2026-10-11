@@ -29,7 +29,7 @@
     </section>
     <div class="conversation-layout">
     <aside id="counterpart-directory" class="counterpart-directory" aria-labelledby="directory-title">
-      <div class="directory-heading"><h2 id="directory-title">聊天对象</h2><button id="directory-add" class="quiet-button" type="button" aria-label="添加聊天对象">＋</button></div>
+      <div class="directory-heading"><h2 id="directory-title">聊天</h2><button id="directory-add" class="quiet-button" type="button" aria-label="添加聊天对象">＋</button></div>
       <label class="directory-sort-label"><span class="visually-hidden">对象排序</span><select id="directory-sort" aria-label="对象排序"><option value="recent">最近回复</option><option value="heat_desc">热度从高到低</option></select></label>
       <p id="directory-empty" class="directory-empty small muted">添加一位对象，开始记录对话。</p>
       <ul id="counterpart-list" class="counterpart-list" aria-label="聊天对象列表"></ul>
@@ -59,18 +59,16 @@
         <div id="counterpart-workspace" hidden>
           <div id="transcript" class="transcript" role="group" aria-label="双方真实对话"></div>
           <section id="coach-panel" class="coach-card" aria-labelledby="coach-title">
-            <div class="coach-heading"><span class="coach-mark">AI 辅助</span><span id="heat-status" class="small muted">先录入一句</span><span id="message-count" class="small muted"></span></div>
-            <h2 id="coach-title">本轮建议</h2>
-            <div id="classification-summary" class="helper" role="status"></div>
-            <p id="timing-note" class="helper" hidden></p>
+            <div class="coach-heading"><h2 id="coach-title" class="coach-mark">AI 辅助</h2></div>
             <div id="direction-options" class="direction-options" role="group" aria-label="选择换话题的方向" hidden></div>
             <div class="button-row coach-actions"><button id="direct-reply" class="step-action" type="button">给我建议</button><button id="change-topic" class="secondary topic-switch" type="button" aria-controls="direction-options" aria-expanded="false"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10m-3-3 3 3-3 3M13 11H3m3-3-3 3 3 3"/></svg>换个话题</button></div>
             <p id="daily-reply-quota" class="small muted" hidden></p>
             <p id="coach-loading" class="loading-message" role="status" hidden></p>
+            <details id="coach-context-details" class="coach-details"><summary>本轮判断</summary><div class="coach-context-meta"><span id="heat-status" class="small muted">先录入一句</span><span id="message-count" class="small muted"></span></div><div id="classification-summary" class="helper" role="status"></div><p id="timing-note" class="helper" hidden></p></details>
             <details class="coach-details"><summary>补充想法</summary><label>本轮意图<textarea id="intent" rows="2" maxlength="2000" placeholder="可选：继续了解、承接玩笑，或协商见面"></textarea></label><button id="classify" class="quiet-button" type="button">重新看局面</button><p id="classify-availability" class="helper"></p><p id="quota-summary" class="small muted"></p></details>
           </section>
           <section id="suggestion-panel" class="message self pending-suggestion" tabindex="-1" hidden aria-labelledby="suggestion-title">
-            <div class="suggestion-heading"><span id="suggestion-title" class="message-label">我 · AI 建议，待发送</span><span id="suggestion-direction" class="reply-direction" hidden></span><button id="copy-reply" class="step-action reply-copy" type="button">复制回复</button></div>
+            <div class="suggestion-heading"><span id="suggestion-title" class="message-label">建议回复</span><span id="suggestion-direction" class="reply-direction" hidden></span><button id="copy-reply" class="step-action reply-copy" type="button">复制回复</button></div>
             <div class="suggestion-bubble"><p id="suggestion-loading" class="reply-loading" role="status" hidden></p><label id="suggestion-editor" class="suggestion-editor-label"><span class="visually-hidden">可修改后复制</span><textarea id="suggestion-text" rows="2" maxlength="5000" aria-label="待发送的建议回复"></textarea></label></div>
             <div id="reply-guidance" class="reply-guidance" hidden><p><span class="guidance-label">关系动作：</span><span id="reply-relation"></span></p><p><span class="guidance-label">怎么自己回：</span><span id="reply-own-words"></span></p><p><span class="guidance-label">再接话条件：</span><span id="reply-reentry"></span></p><p id="reply-wait-reason" class="helper" hidden></p></div>
             <p id="suggestion-update" class="reply-update" role="status" aria-live="polite" hidden></p>
@@ -78,8 +76,34 @@
           </section>
           <div id="coach-update-note" class="coach-update-note" hidden><span id="coach-update-text" role="status"></span><button id="view-coach-update" class="quiet-button" type="button" aria-controls="field-coach" hidden>查看</button></div>
         </div>
-        <section id="profile-view" class="inline-card" hidden aria-labelledby="profile-title">
-          <div class="section-heading"><h2 id="profile-title">我的表达，和想练习的地方</h2><button type="button" class="quiet-button" data-close="profile-view" aria-label="收起我的画像">收起</button></div><p class="helper" id="profile-intro">先填一点会更了解你，也可以边聊边补。聊天中明确提到的背景会自动整理。</p>
+      </div>
+      <form id="message-form" class="chat-composer">
+        <p id="next-step" class="next-step" role="status" aria-live="polite" hidden></p>
+        <div class="composer-controls"><label class="compact-label"><span class="visually-hidden">记录</span><select id="message-speaker" aria-label="消息说话人"><option value="other">对方的新消息</option><option value="self">我已发送的消息</option></select></label><button id="add-message-image" class="quiet-button" type="button">加对方图片</button><input id="message-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden><details id="message-meaning-details" class="composer-meaning"><summary>补充意思</summary><label for="message-meaning">你理解的大概意思<textarea id="message-meaning" rows="2" maxlength="2000" placeholder="如：她发这个表情是在调侃；这是我的理解，不是她的原话"></textarea></label></details><span id="editing-message" class="small muted"></span><button id="cancel-message-edit" class="quiet-button" type="button" hidden>取消编辑</button></div>
+        <section id="message-image-preview" class="composer-image" hidden aria-label="待识读的图片"><img id="message-image-thumbnail" alt="本次粘贴或选择的对方图片"><div><p id="message-image-status" class="helper" role="status"></p><button id="remove-message-image" class="quiet-button" type="button">移除图片</button><details id="message-image-result" hidden><summary>AI初次描述 · 可能有误</summary><p id="message-image-description"></p><p id="message-image-uncertainty" class="small muted"></p></details></div></section>
+
+        <div class="composer-input-row"><textarea id="message-text" required rows="3" maxlength="20000" aria-label="聊天消息" placeholder="粘贴对方刚说的话…"></textarea><button id="save-message" class="step-action" type="submit">记录消息</button></div>
+        <p class="composer-hint small muted"><span id="timing-guidance">消息回复频率和间隔也会纳入考量之中</span><span class="composer-keyboard-hint"> · Enter 记录 · Shift + Enter 换行</span></p><p id="message-image-privacy" class="composer-hint small muted" hidden>图片需小于1MB（JPEG / PNG / WebP）。本应用不长期保存原图；刷新会清除未记录的图片。AI描述可修改，不是准确原文。</p>
+      </form>
+    </section>
+    <div id="field-coach-backdrop" class="field-coach-backdrop" hidden aria-hidden="true"></div>
+    <div id="field-coach" class="field-coach" role="complementary" aria-labelledby="field-coach-title">
+      <div class="section-heading"><h2 id="field-coach-title" tabindex="-1">场外教练</h2><span id="field-coach-update-badge" class="coach-update-badge" hidden></span><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
+      <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">先录入一句</strong></div><p id="field-coach-heat-status" role="status">先录入对方的一句原话</p></section>
+      <p id="field-coach-focus" class="coach-focus">本轮重点：先录入一句</p>
+      <ol class="coach-actions" aria-label="本轮行动指引">
+        <li><span class="coach-action-label">后续对话的方向</span><p id="field-coach-initiative">先录入对方的一句原话；认识背景可以边聊边补。</p></li>
+        <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">通用提醒：保留原话，猜测和补充背景分开记录。</p></li>
+        <li><span class="coach-action-label">接话方式</span><p id="field-coach-next">录入后点「给我建议」，少量内容也可以开始。</p></li>
+      </ol>
+      <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-heat-basis" class="helper">一条对方原话就能开始，背景可以边聊边补。</p><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
+      <div id="coach-glossary-terms" class="coach-footnotes" role="note" aria-label="本段用语注释" hidden></div>
+      <details id="field-coach-plan-details" class="field-coach-section coach-plan-entry"><summary>和教练商量</summary><form id="field-coach-plan-form"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div><div id="field-coach-plan-notes" class="coach-footnotes" role="note" aria-label="计划建议用语注释" hidden></div></form></details>
+      <details class="field-coach-section style-entry"><summary>我的表达偏好</summary><p class="helper">这句像不像你？可以保留改写，明确选择今后使用的规则。</p><button id="open-style-preferences" class="quiet-button" type="button">调整我的表达偏好</button></details>
+    </div>
+    </div>
+    <section id="profile-view" class="auxiliary-page counterpart-page" hidden aria-labelledby="profile-title">
+          <header class="counterpart-page-header"><button type="button" class="quiet-button" data-close="profile-view">← 返回聊天</button><h1 id="profile-title" tabindex="-1">我的画像</h1><p class="helper" id="profile-intro">先填一点会更了解你，也可以边聊边补。聊天中明确提到的背景会自动整理。</p></header>
           <form id="profile-form">
             <div id="profile-chat-facts" class="chat-facts" hidden></div>
             <label>真实背景与生活（可选）<textarea id="profile-background" rows="3" maxlength="20000" placeholder="工作、兴趣、生活节奏；也可以纠正聊天中整理的信息"></textarea></label>
@@ -108,7 +132,7 @@
               <label class="checkbox-label"><input id="style-apply" type="checkbox">作为我的表达偏好应用</label>
               <p id="style-replacement" class="helper" hidden></p>
               <button id="style-cancel-draft" class="quiet-button" type="button">清空本次偏好草稿</button>
-              <div class="section-heading style-list-heading"><h3>我的私有规则</h3><button id="style-reload" class="quiet-button" type="button">重新读取规则</button></div>
+              <div class="section-heading style-list-heading"><h2>我的私有规则</h2><button id="style-reload" class="quiet-button" type="button">重新读取规则</button></div>
               <p id="style-status" class="helper" role="status" aria-live="polite"></p>
               <div id="style-rule-list"></div>
               <details id="style-review-history"><summary>我的表达评价记录</summary><div id="style-review-list"></div></details>
@@ -117,50 +141,24 @@
             <p id="profile-saved" class="helper"></p><button class="primary" type="submit">保存画像</button>
           </form>
         </section>
-        <section id="counterpart-dialog" class="inline-card" hidden aria-labelledby="counterpart-dialog-title">
-          <form id="counterpart-form"><div class="section-heading"><h2 id="counterpart-dialog-title">添加聊天对象</h2><button id="close-counterpart-dialog" type="button" class="quiet-button" aria-label="收起对象背景">收起</button></div>
-            <p id="counterpart-channel" class="small muted" hidden></p><p id="counterpart-background" class="small muted" hidden></p>
-            <p class="helper">先填一个称呼即可。已在聊天里提到的信息会自动补充，不用再填一遍。</p>
-            <label>名字<input id="intake-alias" required maxlength="80" placeholder="对方的名字或昵称"></label>
-            <label>备注（可选）<input id="intake-remark" maxlength="200" placeholder="用你能认出的备注，不改原名"></label>
-            <label>认识渠道<select id="intake-channel"><option value="other">暂不填写 / 其他渠道</option><option value="app">交友软件</option><option value="offline">线下认识</option></select></label>
-            <label id="app-profile-field">交友软件资料<textarea id="intake-app" rows="3" maxlength="20000" placeholder="自我介绍、兴趣，以及资料里的相关信息"></textarea></label>
-            <label id="offline-scene-field" hidden>线下场景与当时互动<textarea id="intake-offline" rows="3" maxlength="20000" placeholder="在哪认识、如何开场、当时的互动"></textarea></label>
-            <label>此前大约聊了多少个完整话题（轮，可选）<input id="intake-rounds" type="number" min="0" max="100000" step="1" placeholder="不记得可以先空着"></label>
-            <div id="counterpart-chat-facts" class="chat-facts" hidden></div>
-            <label>其他背景或纠正（可选）<textarea id="intake-background" rows="3" maxlength="20000" placeholder="补充聊天里没提到的信息，或纠正自动整理的内容"></textarea></label>
-            <div class="button-row"><button class="primary" type="submit">保存对象</button><button id="cancel-counterpart-dialog" type="button" class="quiet-button">取消</button><button id="delete-counterpart" type="button" class="quiet-button danger" hidden>删除对象</button></div>
-          </form>
-        </section>
-        <section id="heat-panel" class="inline-card" hidden aria-labelledby="heat-title"><div class="section-heading"><h2 id="heat-title">互动依据</h2><button type="button" class="quiet-button" data-close="heat-panel">收起</button></div><p id="heat-explanation" class="helper"></p><div id="heat-dimensions" class="heat-grid"></div><p id="heat-confidence" class="small muted"></p></section>
-        <section id="meeting-panel" class="inline-card" hidden aria-labelledby="meeting-title"><div class="section-heading"><h2 id="meeting-title">见面安排</h2><button type="button" class="quiet-button" data-close="meeting-panel">收起</button></div><p id="meeting-status" class="small muted"></p><form id="meeting-form"><label>当前状态<select id="meeting-kind"><option value="none">尚无安排</option><option value="proposed">已提出邀约</option><option value="alternative">正在协商其他时间</option><option value="confirmed">双方已确认</option><option value="declined">本次邀约未接受</option></select></label><label>时间<input id="meeting-time" maxlength="500" placeholder="如周六 19:00"></label><label>地点<input id="meeting-place" maxlength="500" placeholder="具体地点或双方认可的范围"></label><label>补充记录<textarea id="meeting-note" rows="2" maxlength="2000" placeholder="实际说过的安排或待确认事项"></textarea></label><button class="primary" type="submit">保存修改</button></form></section>
-        <section id="admin-view" class="inline-card" hidden aria-labelledby="admin-title"><div class="section-heading"><h2 id="admin-title">内测管理与反馈审阅</h2><button type="button" class="quiet-button" data-close="admin-view">收起</button></div><p class="helper">先清洗，再决定是否采用；审阅不等于训练模型参数。</p><button id="reload-admin" class="quiet-button" type="button">刷新管理记录</button><details><summary>邀请与账号权限</summary><form id="invite-form"><label>内测权限<select id="invite-plan"><option value="free">免费 · 三次方向分析</option><option value="paid">付费内测 · 完整问卷</option></select></label><button class="primary" type="submit">创建邀请码</button></form><div id="invite-result" hidden><label>邀请码<input id="generated-invite" readonly autocomplete="off"></label><button id="copy-invite" class="quiet-button" type="button">复制邀请码</button></div><div id="admin-users"></div></details><h3>反馈记录 <span id="feedback-count" class="small muted"></span></h3><div id="admin-feedback-list"></div></section>
-      </div>
-      <form id="message-form" class="chat-composer">
-        <p id="next-step" class="next-step" role="status" aria-live="polite" hidden></p>
-        <div class="composer-controls"><label class="compact-label">记录<select id="message-speaker" aria-label="消息说话人"><option value="other">对方的新消息</option><option value="self">我已发送的消息</option></select></label><button id="add-message-image" class="quiet-button" type="button">加对方图片</button><input id="message-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden><span id="editing-message" class="small muted"></span><button id="cancel-message-edit" class="quiet-button" type="button" hidden>取消编辑</button></div>
-        <section id="message-image-preview" class="composer-image" hidden aria-label="待识读的图片"><img id="message-image-thumbnail" alt="本次粘贴或选择的对方图片"><div><p id="message-image-status" class="helper" role="status"></p><button id="remove-message-image" class="quiet-button" type="button">移除图片</button><details id="message-image-result" hidden><summary>AI初次描述 · 可能有误</summary><p id="message-image-description"></p><p id="message-image-uncertainty" class="small muted"></p></details></div></section>
-        <details id="message-meaning-details" class="composer-meaning"><summary>补充意思（可选，图片或emoji都适用）</summary><label for="message-meaning">你理解的大概意思<textarea id="message-meaning" rows="2" maxlength="2000" placeholder="如：她发这个表情是在调侃；这是我的理解，不是她的原话"></textarea></label></details>
-        <div class="composer-input-row"><textarea id="message-text" required rows="2" maxlength="20000" aria-label="聊天消息" placeholder="粘贴对方刚说的话…"></textarea><button id="save-message" class="step-action" type="submit">记录消息</button></div>
-        <p class="composer-hint small muted"><span id="timing-guidance">消息回复频率和间隔也会纳入考量之中</span> · 可贴文字、emoji或图片 · Enter 记录 · Shift + Enter 换行</p><p id="message-image-privacy" class="composer-hint small muted" hidden>图片需小于1MB（JPEG / PNG / WebP）。本应用不长期保存原图；刷新会清除未记录的图片。AI描述可修改，不是准确原文。</p>
+    <section id="heat-panel" class="auxiliary-page counterpart-page" hidden aria-labelledby="heat-title"><header class="counterpart-page-header"><button type="button" class="quiet-button" data-close="heat-panel">← 返回聊天</button><h1 id="heat-title" tabindex="-1">互动依据</h1><p class="helper">结合已记录的互动，查看热度的参考依据。</p></header><div class="auxiliary-page-body"><p id="heat-explanation" class="helper"></p><div id="heat-dimensions" class="heat-grid"></div><p id="heat-confidence" class="small muted"></p></div></section>
+    <section id="meeting-panel" class="auxiliary-page counterpart-page" hidden aria-labelledby="meeting-title"><header class="counterpart-page-header"><button type="button" class="quiet-button" data-close="meeting-panel">← 返回聊天</button><h1 id="meeting-title" tabindex="-1">见面安排</h1><p class="helper">聊天中提到的安排会自动整理，也可以在这里补充或修改。</p></header><form id="meeting-form"><p id="meeting-status" class="small muted"></p><label>当前状态<select id="meeting-kind"><option value="none">尚无安排</option><option value="proposed">已提出邀约</option><option value="alternative">正在协商其他时间</option><option value="confirmed">双方已确认</option><option value="declined">本次邀约未接受</option></select></label><label>时间<input id="meeting-time" maxlength="500" placeholder="如周六 19:00"></label><label>地点<input id="meeting-place" maxlength="500" placeholder="具体地点或双方认可的范围"></label><label>补充记录<textarea id="meeting-note" rows="2" maxlength="2000" placeholder="实际说过的安排或待确认事项"></textarea></label><button class="primary" type="submit">保存修改</button></form></section>
+    <section id="admin-view" class="auxiliary-page counterpart-page" hidden aria-labelledby="admin-title"><header class="counterpart-page-header"><button type="button" class="quiet-button" data-close="admin-view">← 返回聊天</button><h1 id="admin-title" tabindex="-1">内测管理与反馈审阅</h1><p class="helper">先清洗，再决定是否采用；审阅不等于训练模型参数。</p></header><div class="auxiliary-page-body"><button id="reload-admin" class="quiet-button" type="button">刷新管理记录</button><details><summary>邀请与账号权限</summary><form id="invite-form"><label>内测权限<select id="invite-plan"><option value="free">免费 · 三次方向分析</option><option value="paid">付费内测 · 完整问卷</option></select></label><button class="primary" type="submit">创建邀请码</button></form><div id="invite-result" hidden><label>邀请码<input id="generated-invite" readonly autocomplete="off"></label><button id="copy-invite" class="quiet-button" type="button">复制邀请码</button></div><div id="admin-users"></div></details><h2>反馈记录 <span id="feedback-count" class="small muted"></span></h2><div id="admin-feedback-list"></div></div></section>
+    <section id="counterpart-dialog" class="auxiliary-page counterpart-page" hidden aria-labelledby="counterpart-dialog-title">
+      <header class="counterpart-page-header"><button id="close-counterpart-dialog" type="button" class="quiet-button">← 返回聊天</button><h1 id="counterpart-dialog-title">添加聊天对象</h1><p class="helper">先填一个名字，其他背景可以边聊边补。</p></header>
+      <form id="counterpart-form">
+        <p id="counterpart-channel" class="small muted" hidden></p><p id="counterpart-background" class="small muted" hidden></p>
+        <label>名字<input id="intake-alias" required maxlength="80" placeholder="对方的名字或昵称"></label>
+        <label>备注（可选）<input id="intake-remark" maxlength="200" placeholder="用你能认出的备注，不改原名"></label>
+        <label>认识渠道<select id="intake-channel"><option value="other">暂不填写 / 其他渠道</option><option value="app">交友软件</option><option value="offline">线下认识</option></select></label>
+        <label id="app-profile-field">交友软件资料<textarea id="intake-app" rows="3" maxlength="20000" placeholder="自我介绍、兴趣，以及资料里的相关信息"></textarea></label>
+        <label id="offline-scene-field" hidden>线下场景与当时互动<textarea id="intake-offline" rows="3" maxlength="20000" placeholder="在哪认识、如何开场、当时的互动"></textarea></label>
+        <label>此前大约聊了多少个完整话题（轮，可选）<input id="intake-rounds" type="number" min="0" max="100000" step="1" placeholder="不记得可以先空着"></label>
+        <div id="counterpart-chat-facts" class="chat-facts" hidden></div>
+        <label>其他背景或纠正（可选）<textarea id="intake-background" rows="3" maxlength="20000" placeholder="补充聊天里没提到的信息，或纠正自动整理的内容"></textarea></label>
+        <div class="button-row counterpart-page-actions"><button class="primary" type="submit">保存对象</button><button id="cancel-counterpart-dialog" type="button" class="quiet-button">取消</button><button id="delete-counterpart" type="button" class="quiet-button danger" hidden>删除对象</button></div>
       </form>
     </section>
-    <div id="field-coach-backdrop" class="field-coach-backdrop" hidden aria-hidden="true"></div>
-    <div id="field-coach" class="field-coach" role="complementary" aria-labelledby="field-coach-title">
-      <div class="section-heading"><h2 id="field-coach-title" tabindex="-1">场外教练</h2><span id="field-coach-update-badge" class="coach-update-badge" hidden></span><button id="close-field-coach" class="quiet-button field-coach-close" type="button" aria-label="收起场外教练">收起</button></div>
-      <section class="coach-temperature" aria-label="当前热度"><div class="coach-temperature-top"><span>当前热度</span><strong id="field-coach-temperature">先录入一句</strong></div><p id="field-coach-heat-status" role="status">先录入对方的一句原话</p><p id="field-coach-heat-basis" class="helper">一条对方原话就能开始，背景可以边聊边补。</p></section>
-      <p id="field-coach-focus" class="coach-focus">本轮重点：先录入一句</p>
-      <ol class="coach-actions" aria-label="本轮行动指引">
-        <li><span class="coach-action-label">后续对话的方向</span><p id="field-coach-initiative">先录入对方的一句原话；认识背景可以边聊边补。</p></li>
-        <li><span class="coach-action-label">别做 · 雷点</span><p id="field-coach-pitfall">通用提醒：保留原话，猜测和补充背景分开记录。</p></li>
-        <li><span class="coach-action-label">接话方式</span><p id="field-coach-next">录入后点「给我建议」，少量内容也可以开始。</p></li>
-      </ol>
-      <details id="field-coach-details" class="field-coach-section coach-details"><summary>查看判断依据</summary><p id="field-coach-topic"></p><p id="field-coach-state" class="helper"></p><div id="field-coach-full-guidance"></div><p id="field-coach-evidence" class="helper"></p></details>
-      <div id="coach-glossary-terms" class="coach-footnotes" role="note" aria-label="本段用语注释" hidden></div>
-      <form id="field-coach-plan-form" class="field-coach-section"><label for="field-coach-plan">我的主导计划</label><textarea id="field-coach-plan" rows="3" maxlength="2000" placeholder="我想把话题带到……这样做合适吗？"></textarea><button id="field-coach-plan-submit" class="primary" type="submit">问场外教练</button><div id="field-coach-plan-result" class="helper" role="status" aria-live="polite"></div><div id="field-coach-plan-notes" class="coach-footnotes" role="note" aria-label="计划建议用语注释" hidden></div></form>
-      <details class="field-coach-section style-entry"><summary>我的表达偏好</summary><p class="helper">这句像不像你？可以保留改写，明确选择今后使用的规则。</p><button id="open-style-preferences" class="quiet-button" type="button">调整我的表达偏好</button></details>
-    </div>
-    </div>
   </main>
   <template id="coach-term-definitions">
     <details data-coach-term="up"><summary>上切</summary><p>从一个细节聊到更大的类别或方向。例如，从“最近忙工作”，聊到“你是做哪类工作的？”</p></details>

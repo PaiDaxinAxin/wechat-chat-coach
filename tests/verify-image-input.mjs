@@ -1,3 +1,4 @@
+import { switchConversation } from '../scripts/ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -27,7 +28,7 @@ try {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve)); const origin = `http://127.0.0.1:${server.address().port}`;
   browser = await chromium.launch({ ...(process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {}) });
   const page = await browser.newPage({ viewport: { width: 1280, height: 950 } }); page.on('pageerror', (error) => errors.push(error.message)); page.setDefaultTimeout(15000);
-  await page.goto(origin); await page.locator('#startup-status').waitFor({ state: 'hidden' }); await page.locator('#counterpart-select').selectOption(empty.id); await page.waitForFunction(() => !document.getElementById('message-text').disabled && !document.querySelector('#transcript .message'));
+  await page.goto(origin); await page.locator('#startup-status').waitFor({ state: 'hidden' }); await switchConversation(page, empty.id); await page.waitForFunction(() => !document.getElementById('message-text').disabled && !document.querySelector('#transcript .message'));
   const upload = () => page.locator('#message-image-file').setInputFiles({ name: 'fictional.png', mimeType: 'image/png', buffer: png });
   const ready = () => page.waitForFunction(() => !document.getElementById('save-message').disabled);
   await upload(); await page.locator('#message-meaning').fill('我理解这张图是在开玩笑。');
@@ -44,9 +45,9 @@ try {
   await page.locator('#message-text').evaluate((element, bytes) => { const clipboardData = new DataTransfer(); clipboardData.items.add(new File([new Uint8Array(bytes)], 'pasted.png', { type: 'image/png' })); element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true })); }, [...png]);
   await page.locator('#message-image-preview').waitFor({ state: 'visible' }); await page.waitForFunction(() => document.getElementById('save-message').textContent === '识读图片'); report.paste = true;
   hold = true; started = new Promise((resolve) => { entered = resolve; }); await page.locator('#save-message').click(); await started;
-  await page.locator('#message-text').fill('识读期间新写的文字必须保留。'); await page.locator('#counterpart-select').selectOption(peer.id); await page.waitForFunction(() => !document.getElementById('message-text').disabled); await page.locator('#message-text').fill('另一对象自己的草稿。'); release(); hold = false;
+  await page.locator('#message-text').fill('识读期间新写的文字必须保留。'); await switchConversation(page, peer.id); await page.waitForFunction(() => !document.getElementById('message-text').disabled); await page.locator('#message-text').fill('另一对象自己的草稿。'); release(); hold = false;
   await page.waitForResponse((r) => r.url().endsWith('/image-read')); await page.waitForFunction(() => document.getElementById('save-message').textContent === '记录消息'); assert.equal(await page.locator('#message-text').inputValue(), '另一对象自己的草稿。'); report.lateObject = true;
-  await page.locator('#counterpart-select').selectOption(empty.id); await page.waitForFunction(() => document.getElementById('message-text').value === '识读期间新写的文字必须保留。'); await ready(); assert.equal(await page.locator('#message-image-result').isVisible(), true); report.lateTyping = true;
+  await switchConversation(page, empty.id); await page.waitForFunction(() => document.getElementById('message-text').value === '识读期间新写的文字必须保留。'); await ready(); assert.equal(await page.locator('#message-image-result').isVisible(), true); report.lateTyping = true;
   await page.locator('#remove-message-image').click(); await upload(); await page.locator('#message-meaning').fill('这次按新的补充意思识读。'); hold = true; started = new Promise((resolve) => { entered = resolve; }); await page.locator('#save-message').click(); await started;
   const firstMessage = page.locator('#transcript .message').first(); await firstMessage.locator('.message-menu > summary').click(); await firstMessage.getByRole('button', { name: '编辑对方的消息' }).click(); await page.locator('#message-text').fill('本人正在编辑已有记录。');
   release(); hold = false; await page.waitForResponse((r) => r.url().endsWith('/image-read')); await ready(); assert.equal(await page.locator('#message-text').inputValue(), '本人正在编辑已有记录。'); assert.equal(await page.locator('#message-image-preview').isVisible(), false); await page.locator('#cancel-message-edit').click(); report.editing = true;

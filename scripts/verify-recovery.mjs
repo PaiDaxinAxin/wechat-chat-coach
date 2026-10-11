@@ -1,3 +1,4 @@
+import { switchConversation, openCoachPlan } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -95,7 +96,7 @@ try {
     });
     await page.goto(origin);
     await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-    if (await page.locator('#counterpart-select').inputValue() !== person.id) await page.locator('#counterpart-select').selectOption(person.id);
+    if (await page.locator('#counterpart-select').inputValue() !== person.id) await switchConversation(page, person.id);
     assert.equal(requests.length, 0, 'Login and object selection do not spend model calls');
     await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; }); await page.locator('#classify').click();
     await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && document.getElementById('classification-summary').textContent.includes('合成话题') && document.getElementById('coach-panel').getAttribute('aria-busy') === 'false', person.id);
@@ -103,6 +104,7 @@ try {
     await page.locator('#intent').evaluate((element) => { element.closest('details').open = true; });
     await page.locator('#message-text').fill('未提交的消息草稿。');
     await page.locator('#intent').fill('本轮用户意图。');
+    await openCoachPlan(page);
     await page.locator('#field-coach-plan').fill('未提交的主导计划。');
     const url = (operation = 'reply') => `${origin}/api/counterparts/${person.id}/${operation}`;
     const modelRequests = (operation = 'reply') => requests.filter(({ path }) => path === new URL(url(operation)).pathname);
@@ -193,11 +195,11 @@ try {
     f.controller.behavior.reply = async () => { entered.resolve(); await release.promise; throw transient(); };
     await f.page.locator('#direct-reply').click(); await entered.promise;
     if (changed !== 'context') {
-      await f.page.locator('#counterpart-select').selectOption(f.second.id);
+      await switchConversation(f.page, f.second.id);
       await f.page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, f.second.id);
       await f.page.locator('#message-text').fill('另一对象的草稿。');
       if (changed === 'object-roundtrip') {
-        await f.page.locator('#counterpart-select').selectOption(f.person.id);
+        await switchConversation(f.page, f.person.id);
         await f.page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && document.getElementById('message-text').value === '未提交的消息草稿。', f.person.id);
       }
     } else {

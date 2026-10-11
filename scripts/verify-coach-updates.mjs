@@ -1,3 +1,4 @@
+import { switchConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -191,16 +192,16 @@ try {
   // Reload imports the newly created fixture object without treating its saved
   // result as a fresh update. Select and analyze it once before the late-response case.
   await switched.page.reload(); await switched.page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await switched.page.locator('#counterpart-select').selectOption(other.id); await selectedReady(other.id, otherMessage.id);
+  await switchConversation(switched.page, other.id); await selectedReady(other.id, otherMessage.id);
   await switched.startAnalysis(); await switched.idle();
-  await switched.page.locator('#counterpart-select').selectOption(switched.person.id); await selectedReady(switched.person.id, switched.messages[0].id); await noUpdated(switched);
+  await switchConversation(switched.page, switched.person.id); await selectedReady(switched.person.id, switched.messages[0].id); await noUpdated(switched);
   const switchEntered = deferred(), switchRelease = deferred();
   switched.controller.replyGate = async () => { switchEntered.resolve(); await switchRelease.promise; };
   await switched.page.locator('#direct-reply').click(); await switchEntered.promise; await updating(switched);
-  await switched.page.locator('#counterpart-select').selectOption(other.id); await selectedReady(other.id, otherMessage.id); await noUpdated(switched);
+  await switchConversation(switched.page, other.id); await selectedReady(other.id, otherMessage.id); await noUpdated(switched);
   const switchedResponse = switched.page.waitForResponse((response) => response.url() === `${switched.url}/reply` && response.request().method() === 'POST');
   switchRelease.resolve(); assert.equal((await switchedResponse).status(), 200); await noUpdated(switched);
-  await switched.page.locator('#counterpart-select').selectOption(switched.person.id); await selectedReady(switched.person.id, switched.messages[0].id); await noUpdated(switched);
+  await switchConversation(switched.page, switched.person.id); await selectedReady(switched.person.id, switched.messages[0].id); await noUpdated(switched);
   await switched.finish({ otherObjectUnaffected: true, savedLateResultNoFreshCue: true });
 
   const roundtrip = await journey('late-result-after-object-roundtrip'); await updated(roundtrip);
@@ -209,14 +210,14 @@ try {
   controllers.set(roundtripMessage.id, { mode: 'neutral', classifications: 0, replies: 0 });
   await roundtrip.page.reload(); await roundtrip.page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
   const roundtripReady = (id, messageId, allowBusy = false) => roundtrip.page.waitForFunction(({ id, messageId, allowBusy }) => document.getElementById('counterpart-select').value === id && document.getElementById('counterpart-workspace').checkVisibility() && document.querySelector(`[data-message-id="${messageId}"]`) && (allowBusy || document.getElementById('coach-panel').getAttribute('aria-busy') === 'false'), { id, messageId, allowBusy });
-  await roundtrip.page.locator('#counterpart-select').selectOption(roundtripOther.id); await roundtripReady(roundtripOther.id, roundtripMessage.id);
+  await switchConversation(roundtrip.page, roundtripOther.id); await roundtripReady(roundtripOther.id, roundtripMessage.id);
   await roundtrip.startAnalysis(); await roundtrip.idle();
-  await roundtrip.page.locator('#counterpart-select').selectOption(roundtrip.person.id); await roundtripReady(roundtrip.person.id, roundtrip.messages[0].id);
+  await switchConversation(roundtrip.page, roundtrip.person.id); await roundtripReady(roundtrip.person.id, roundtrip.messages[0].id);
   const roundtripEntered = deferred(), roundtripRelease = deferred();
   roundtrip.controller.replyGate = async () => { roundtripEntered.resolve(); await roundtripRelease.promise; };
   await roundtrip.page.locator('#direct-reply').click(); await roundtripEntered.promise;
-  await roundtrip.page.locator('#counterpart-select').selectOption(roundtripOther.id); await roundtripReady(roundtripOther.id, roundtripMessage.id);
-  await roundtrip.page.locator('#counterpart-select').selectOption(roundtrip.person.id); await roundtripReady(roundtrip.person.id, roundtrip.messages[0].id, true);
+  await switchConversation(roundtrip.page, roundtripOther.id); await roundtripReady(roundtripOther.id, roundtripMessage.id);
+  await switchConversation(roundtrip.page, roundtrip.person.id); await roundtripReady(roundtrip.person.id, roundtrip.messages[0].id, true);
   const roundtripResponse = roundtrip.page.waitForResponse((response) => response.url() === `${roundtrip.url}/reply` && response.request().method() === 'POST');
   roundtripRelease.resolve(); assert.equal((await roundtripResponse).status(), 200); await roundtrip.idle(); await noUpdated(roundtrip);
   assert.equal(await roundtrip.page.locator('#direct-reply').isDisabled(), false, 'A completed old-visit request must release the current busy UI after returning to the object');

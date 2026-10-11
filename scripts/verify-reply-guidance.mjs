@@ -51,7 +51,7 @@ try {
       const panel = document.getElementById('suggestion-panel');
       if (!panel.checkVisibility() || panel.getAttribute('aria-busy') !== 'false') return false;
       return ['wait', 'pause'].includes(action)
-        ? document.getElementById('suggestion-title').textContent.includes(action === 'pause' ? '停止当前推进' : '暂时不回')
+        ? document.getElementById('suggestion-title').textContent.includes(action === 'pause' ? '停止推进' : '暂时不回')
         : document.getElementById('suggestion-text').value === reply && !document.getElementById('suggestion-text').disabled;
     }, body.data.suggestion);
     return body.data;
@@ -85,7 +85,7 @@ try {
       assert.equal(initial.directionCount, 0);
       assert.equal(initial.oldReady, true, 'The old empty-array readiness check incorrectly passes before the saved conversation arrives');
       assert.equal(initial.workspaceVisible, false);
-      assert.equal(initial.title, '我 · AI 建议，待发送', 'The CI failure observed initial HTML, before restored advice was rendered');
+      assert.equal(initial.title, '建议回复', 'The CI failure observed initial HTML, before restored advice was rendered');
       const complete = ready(); release(); await complete;
     } finally { release(); await page.unroute(url, handler); }
   }
@@ -121,7 +121,7 @@ try {
   assert.equal(await page.locator('#reply-reentry').textContent(), responses[2].guidance.reentryWhen);
   await reloadWithHeldDetail();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), true);
-  assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 暂时不回');
+  assert.equal(await page.locator('#suggestion-title').textContent(), '当前建议 · 暂时不回');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   assert.equal(replies, 3); assert.equal(classifications, 1, 'Reload uses durable attempts, not another model call');
   const before = await detail();
@@ -165,7 +165,7 @@ try {
   assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
   assert.equal(await page.locator('#reply-reentry').textContent(), responses[4].guidance.reentryWhen);
   await reloadWithHeldDetail();
-  assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 先停止当前推进');
+  assert.equal(await page.locator('#suggestion-title').textContent(), '当前建议 · 停止推进');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   assert.equal(replies, 5, 'An earlier copy cannot replace a later current pause after reload');
   const ordered = await detail();
@@ -179,7 +179,7 @@ try {
     data: { requestId: 'newer-archived-api-copy', copiedText: legacyReply.suggestion.reply } });
   assert.equal(newerOldCopy.status(), 200);
   await reloadWithHeldDetail();
-  assert.equal(await page.locator('#suggestion-title').textContent(), 'AI 建议 · 先停止当前推进');
+  assert.equal(await page.locator('#suggestion-title').textContent(), '当前建议 · 停止推进');
   assert.equal(await page.locator('#suggestion-editor').isVisible(), false);
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
   assert.equal((await detail()).suggestions.length, ordered.suggestions.length, 'Archived data is retained without becoming selectable advice');
