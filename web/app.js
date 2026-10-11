@@ -4,13 +4,13 @@ const state = {
   selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null, copyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
-  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0, intakeReturn: null,
+  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, coachResultRevision: 0,
-  activeInlineCard: null, inlineTrigger: null, bootLoading: false, conversationVisit: 0, coachErrorContext: null, coachUpdate: null, meetingDrafts: new Map(),
+  activePage: null, pageReturn: null, pageVisit: 0, bootLoading: false, conversationVisit: 0, coachErrorContext: null, coachUpdate: null, meetingDrafts: new Map(),
   styleLearning: null, styleReadSerial: 0, styleCase: null, styleReviewDirty: false, styleSupersedesId: null, profileDraftVersion: 0,
-  directorySort: 'recent', directoryReadSerial: 0,
+  directorySort: 'recent', directoryReadSerial: 0, adminReadSerial: 0,
 };
 const directionNames = { up: '上切 · 看更大的类别', down: '下切 · 深入具体细节', sideways: '平移 · 关联另一个话题' };
 const actionNames = { continue: '继续了解', warm: '自然升温', handle_obstacle: '承接阻力', clarify: '澄清', invite: '协商邀约', pause: '暂停投入', reply: '建议回复', wait: '先等待' };
@@ -19,7 +19,7 @@ const focusNames = { value_display: '价值展示', emotion: '情绪拉升', sec
 const dimensionNames = { activeInteraction: '主动互动', responseEngagement: '回复参与', personalInterest: '对我的兴趣', reciprocalFlirting: '双向暧昧', actionFollowThrough: '行动兑现' };
 const levelNames = { unknown: '未知', negative: '有负向信号', passive: '被动回应', positive: '积极参与', repeated_positive: '持续积极' };
 const heatNames = { pause: '建议暂停', insufficient_evidence: '初步观察', too_low: '当前投入较低', potential: '可以继续建设', high_invite: '可协商见面' };
-const initialInformationDirection = '初步方向：接住这句，围绕她愿意聊的细节尝试获得更多信息。';
+const initialInformationDirection = '初步方向：接住这句，尝试获得更多信息。';
 const confidenceNames = { limited: '证据有限', moderate: '证据中等', strong: '证据较充分' };
 const channelNames = { app: '交友软件认识', offline: '线下认识', other: '其他渠道' };
 const topicStatusNames = { developing: '话题正在展开', repetitive: '话题有重复迹象', closing: '可以自然收尾', unknown: '话题阶段待判断' };
@@ -81,12 +81,14 @@ async function perform(button, label, callback, scope) {
   if (button?.disabled) return;
   const original = button?.textContent;
   const form = button?.closest('form');
+  const pageId = (form || button)?.closest('.auxiliary-page')?.id, pageVisit = state.pageVisit;
   const intakeInstance = form?.id === 'counterpart-form' ? state.intakeInstance : null;
   let localError = form?.querySelector('.form-error');
   if (localError) localError.hidden = true;
   if (button) { button.disabled = true; button.textContent = label; }
   try { return await callback(); }
   catch (error) {
+    if (pageId && !isPageVisit(pageId, pageVisit)) return;
     if (intakeInstance !== null && (intakeInstance !== state.intakeInstance || $('counterpart-dialog').hidden)) return;
     if (scope && (state.me?.user.id !== scope.userId || state.selectedId !== scope.counterpartId)) return;
     if (error.displayed) return;
@@ -166,44 +168,61 @@ function modelFailureMessage(error, fallback = '暂时没能给出建议，请�
 function canRetryModel(error) {
   return ![401, 403].includes(error.status) && !['DAILY_REPLY_QUOTA_EXHAUSTED', 'CLASSIFICATION_QUOTA_EXHAUSTED', 'PROVIDER_BUDGET_EXHAUSTED', 'PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code);
 }
-const inlineCards = ['profile-view', 'heat-panel', 'meeting-panel', 'admin-view'];
-function closeInlineCards({ restoreFocus = false } = {}) {
-  const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
-  const trigger = state.inlineTrigger;
-  for (const id of inlineCards) $(id).hidden = true;
-  state.activeInlineCard = null; state.inlineTrigger = null;
-  if (restoreFocus && focusedInCard) {
-    const triggerMenu = trigger?.closest('.chat-menu');
-    const menuSummary = triggerMenu?.querySelector(':scope > summary');
-    const insideClosedMenu = triggerMenu && !triggerMenu.open && trigger !== menuSummary;
-    const visibleTrigger = !insideClosedMenu && trigger?.isConnected && trigger.matches('button,input,textarea,select,a[href],summary,[tabindex]') && trigger.checkVisibility() ? trigger : trigger?.closest('#field-coach') && $('toggle-field-coach').checkVisibility() ? $('toggle-field-coach') : menuSummary || $('chat-menu').querySelector('summary');
-    visibleTrigger?.focus({ preventScroll: true });
-  }
-}
-function openInlineCard(id) {
-  if (!inlineCards.includes(id)) return;
-  const trigger = document.activeElement;
-  closeInlineCards();
-  $(id).hidden = false;
-  state.activeInlineCard = id; state.inlineTrigger = trigger;
+const auxiliaryPages = {
+  'counterpart-dialog': { title: 'counterpart-dialog-title', focus: 'intake-alias', skip: '跳到对象资料' },
+  'profile-view': { title: 'profile-title', focus: 'profile-background', skip: '跳到我的画像' },
+  'meeting-panel': { title: 'meeting-title', focus: 'meeting-kind', skip: '跳到见面安排' },
+  'heat-panel': { title: 'heat-title', focus: 'heat-title', skip: '跳到互动依据' },
+  'admin-view': { title: 'admin-title', focus: 'admin-title', skip: '跳到内测管理' },
+};
+function openAuxiliaryPage(id) {
+  const page = auxiliaryPages[id];
+  if (!page || !state.me) return;
+  if (!state.activePage) state.pageReturn = { trigger: document.activeElement, scrollY: window.scrollY, title: document.title };
+  rememberComposer();
+  closeFieldCoach();
   $('chat-menu').open = false;
-  $(id).tabIndex = -1;
-  $(id).scrollIntoView({ block: 'start', behavior: 'auto' });
-  const firstField = $(id).querySelector('input:not([hidden]):not([disabled]),textarea:not([disabled]),select:not([disabled])');
-  (firstField?.getClientRects().length ? firstField : $(id)).focus({ preventScroll: true });
+  for (const pageId of Object.keys(auxiliaryPages)) $(pageId).hidden = pageId !== id;
+  state.activePage = id; state.pageVisit++;
+  $(id).querySelectorAll('.form-error').forEach((error) => { error.hidden = true; });
+  document.querySelector('.conversation-layout').hidden = true;
+  $(id).querySelector('.counterpart-page-header').after($('notice'));
+  document.title = `${$(page.title).textContent} · 聊天教练`;
+  const skipLink = document.querySelector('.skip-link');
+  skipLink.href = `#${page.focus}`; skipLink.textContent = page.skip;
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  $(page.focus).focus({ preventScroll: true });
 }
+function closeAuxiliaryPage({ restoreFocus = true } = {}) {
+  const previous = state.pageReturn;
+  for (const id of Object.keys(auxiliaryPages)) $(id).hidden = true;
+  state.activePage = null; state.pageReturn = null; state.pageVisit++;
+  document.querySelector('.conversation-layout').hidden = false;
+  $('chat-thread').before($('notice'));
+  if (previous) document.title = previous.title;
+  const skipLink = document.querySelector('.skip-link');
+  skipLink.href = '#message-text'; skipLink.textContent = '跳到聊天输入';
+  if (!previous || !restoreFocus) return;
+  window.scrollTo({ top: previous.scrollY, behavior: 'instant' });
+  const trigger = previous.trigger;
+  const focusTarget = trigger?.checkVisibility() ? trigger
+    : trigger?.closest('#field-coach') && $('toggle-field-coach').checkVisibility() ? $('toggle-field-coach')
+      : $('chat-menu').querySelector('summary');
+  focusTarget?.focus({ preventScroll: true });
+}
+function isPageVisit(id, visit) { return state.activePage === id && state.pageVisit === visit; }
 function closeMenu(menu, { restoreFocus = false } = {}) {
   const focusedInside = menu.contains(document.activeElement);
   menu.open = false;
   if (restoreFocus && focusedInside) menu.querySelector('summary')?.focus({ preventScroll: true });
 }
 function scrollToLatest() {
-  requestAnimationFrame(() => { if ($('counterpart-dialog').hidden) $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
+  requestAnimationFrame(() => { if (!state.activePage) $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
 }
 function scrollToSuggestion() {
   const context = currentContextKey(), visit = state.conversationVisit;
   requestAnimationFrame(() => {
-    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden || !$('counterpart-dialog').hidden) return;
+    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden || state.activePage) return;
     const thread = $('chat-thread');
     thread.scrollTop += $('suggestion-panel').getBoundingClientRect().top - thread.getBoundingClientRect().top - 12;
   });
@@ -288,25 +307,25 @@ function updateNextStep() {
     const needsQuestionnaire = state.me?.requiresQuestionnaireUpdate || state.me?.profile?.requiresQuestionnaireUpdate;
     if (hasContent) {
       step = 'record';
-      text = `下一步：点「${actions.record.textContent}」或按 Enter`;
+      text = `点「${actions.record.textContent}」或按 Enter`;
     } else if (busy) {
       preparing = true;
-      text = 'AI 正在准备，完成后这里会提示下一步';
+      text = 'AI 正在准备建议…';
     } else if (isPendingSuggestion(suggestion) && reply && !hasCopyReceipt && !acknowledged) {
       step = 'copy';
-      text = '下一步：改成你的说法，点「复制回复」后发到微信';
+      text = '建议已备好，复制后发到微信';
     } else if (!prerequisite && !suggestion && !quotaExhausted && state.detail.messages?.at(-1)?.speaker === 'other') {
       step = 'advise';
-      text = '下一步：点「给我建议」拿一句回复；想换方向点「换个话题」';
+      text = '点「给我建议」，准备下一句';
     } else {
       step = 'record';
       text = needsQuestionnaire ? prerequisite : !state.detail.messages?.some(({ speaker }) => speaker === 'other')
-        ? '下一步：把对方的一句原话贴到下方'
-        : copied ? '下一步：发到微信后，等对方回复，把原话贴到下方'
-          : isNoReplySuggestion(suggestion) ? '下一步：这轮先不回；对方再发消息时贴到下方'
+        ? '先记录对方的一句原话'
+        : copied ? '发到微信后，粘贴对方的新回复'
+          : isNoReplySuggestion(suggestion) ? '这轮先不回，等新的互动'
             : quotaExhausted && !suggestion && state.detail.messages?.at(-1)?.speaker === 'other'
-              ? '下一步：今日免费建议已用完；自己回复后，把发出的话记为「我已发送的消息」'
-              : `下一步：等对方回复，把原话贴到下方${quotaExhausted ? '（今日免费建议已用完）' : ''}`;
+              ? '今日免费建议已用完，可继续记录聊天'
+              : `粘贴对方的新回复${quotaExhausted ? '（今日免费建议已用完）' : ''}`;
     }
   }
   for (const [name, action] of Object.entries(actions)) action.classList.toggle('is-next', name === step);
@@ -325,7 +344,7 @@ async function attachMessageImage(file) {
     state.composerImage = { id: crypto.randomUUID(), dataUrl, interpretation: null };
     rememberComposer({ changed: true }); updateComposer();
     $('message-meaning-details').open = true;
-    $('message-meaning').focus({ preventScroll: true });
+    if (!state.activePage) $('message-meaning').focus({ preventScroll: true });
   } catch (error) { if (state.me?.user.id === scope.userId && state.selectedId === scope.counterpartId) announce(error.message, 'error'); }
 }
 async function readComposerImage(scope) {
@@ -346,7 +365,7 @@ async function readComposerImage(scope) {
     if (current?.image !== image || current.editingId || current.speaker !== 'other') return;
     const text = current.text === submitted.text ? [current.text.trim(), data.imageInterpretation.description].filter(Boolean).join('\n') : current.text;
     state.messageDrafts.set(id, { ...current, text, image: { ...image, interpretation: data.imageInterpretation } });
-    if (state.selectedId === id) { const focusDraft = document.activeElement === $('save-message') || document.activeElement === document.body; restoreComposer(id); updateComposer(); if (focusDraft) $('message-text').focus({ preventScroll: true }); }
+    if (state.selectedId === id) { const focusDraft = !state.activePage && (document.activeElement === $('save-message') || document.activeElement === document.body); restoreComposer(id); updateComposer(); if (focusDraft) $('message-text').focus({ preventScroll: true }); }
   } catch (error) { if (error.code !== 'RECOVERY_CANCELLED') error.message = modelFailureMessage(error, '图片暂时没能读清，请重试。'); throw error; }
   finally { if (state.imageCalls.get(callKey) === call) state.imageCalls.delete(callKey); if (state.me?.user.id === scope.userId) updateComposer(); }
 }
@@ -384,7 +403,7 @@ function applyDemoMode() {
     $('auth').hidden = true;
     $('admin-nav').hidden = true;
     $('admin-view').hidden = true;
-    $('profile-title').textContent = '演示画像：表达风格与练习目标';
+    $('profile-title').textContent = '演示画像';
     $('profile-intro').textContent = '以下是预置的虚构背景，可修改后观察建议如何变化。这份演示画像不代表你的真实情况。';
   }
 }
@@ -404,9 +423,9 @@ function setAuthMode(mode) {
 }
 function showView(view) {
   if (view === 'admin' && (state.localDemo || state.me?.user.role !== 'owner')) return;
-  if (view === 'coach') { closeInlineCards({ restoreFocus: true }); scrollToLatest(); }
-  if (view === 'profile') openInlineCard('profile-view');
-  if (view === 'admin') openInlineCard('admin-view');
+  if (view === 'coach') { closeAuxiliaryPage(); scrollToLatest(); }
+  if (view === 'profile') openAuxiliaryPage('profile-view');
+  if (view === 'admin') openAuxiliaryPage('admin-view');
   if (view === 'admin') void perform($('reload-admin'), '读取中…', loadAdmin);
 }
 function updateQuota(quota = state.me?.quota) {
@@ -540,9 +559,7 @@ function openStylePreferences() {
     renderStyleObservation();
     $('style-case').hidden = false; $('style-case-empty').hidden = true;
   }
-  openInlineCard('profile-view'); $('style-preferences').open = true;
-  // The entry lives in a narrow overlay; close it so the inline editor is reachable.
-  closeFieldCoach();
+  openAuxiliaryPage('profile-view'); $('style-preferences').open = true;
   $('style-preferences').scrollIntoView({ block: 'start', behavior: 'auto' });
   (state.styleCase ? $('style-own-version') : $('style-rule-text')).focus({ preventScroll: true });
 }
@@ -568,7 +585,7 @@ function styleDraftInput() {
 }
 async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
   if (!$('profile-form').reportValidity()) return;
-  const userId = state.me?.user.id, counterpartId = state.selectedId, draftVersion = state.profileDraftVersion, actionHadFocus = document.activeElement === button;
+  const userId = state.me?.user.id, counterpartId = state.selectedId, draftVersion = state.profileDraftVersion, pageVisit = state.pageVisit, actionHadFocus = document.activeElement === button;
   const scope = { userId, counterpartId };
   await perform(button, '保存画像…', async () => {
     if (!state.styleLearning) throw new Error('请先重新读取规则，再保存画像。你的草稿仍保留。');
@@ -592,7 +609,7 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
     if (counterpartId) await loadCounterpart(counterpartId, { autoAnalyze: false });
     if (state.me?.user.id !== userId || state.selectedId !== counterpartId) return;
     if (includeDraft && state.profileDraftVersion === draftVersion) resetStyleDraft();
-    if (!includeDraft && actionHadFocus && document.activeElement === document.body) {
+    if (!includeDraft && isPageVisit('profile-view', pageVisit) && actionHadFocus && document.activeElement === document.body) {
       const ruleId = changes.ruleChange?.candidateId || changes.ruleChange?.ruleId;
       const card = ruleId ? $('style-rule-list').querySelector(`[data-rule-id="${CSS.escape(ruleId)}"]`) : null;
       if (card) card.tabIndex = -1;
@@ -600,7 +617,7 @@ async function saveProfile(button, { ruleChange, includeDraft = false } = {}) {
     }
     const adopted = changes.ruleChange?.type === 'adopt' || changes.ruleChange?.type === 'adopt_new';
     announce(adopted ? '表达规则已采用。后续辅助会使用你的私有规则；本次保存没有调用模型，可自主重新分析。' : changes.ruleChange?.type === 'revoke' ? '规则已停用，后续辅助不再使用。本次保存没有调用模型。' : changes.ruleChange?.type === 'propose' ? '候选规则已保存，尚未应用；本次保存没有调用模型。' : '画像与自述评价已保存。本次保存没有调用模型。');
-    if (includeDraft && state.profileDraftVersion === draftVersion && !changes.review && !changes.ruleChange) showView('coach');
+    if (includeDraft && state.profileDraftVersion === draftVersion && isPageVisit('profile-view', pageVisit)) closeAuxiliaryPage();
   }, scope);
 }
 function saveRuleAction(button, ruleChange) { return saveProfile(button, { ruleChange }); }
@@ -722,7 +739,7 @@ async function loadCounterpart(id, { autoAnalyze = false } = {}) {
   if (state.detail) rememberComposer();
   if (previousId && previousId !== id) state.intentDrafts.set(previousId, $('intent').value);
   const changed = previousId !== id;
-  if (changed) { state.conversationVisit++; state.coachUpdate = null; closeInlineCards(); closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
+  if (changed) { state.conversationVisit++; state.coachUpdate = null; closeFieldCoach(); announce(''); showCounterpartLoading('正在读取这段对话…'); }
   state.selectedId = id;
   if (changed) { $('counterpart-workspace').hidden = true; $('empty-state').hidden = true; if ($('coach-error')) $('coach-error').hidden = true; }
   if (changed) { state.detail = null; state.suggestion = null; updateComposer(); renderFieldCoach(null); renderFieldCoachPlan(); }
@@ -775,7 +792,7 @@ async function loadCounterpart(id, { autoAnalyze = false } = {}) {
   renderSuggestion();
   fillMeeting(detail.meeting);
   updateComposer();
-  if (retryHadFocus && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
+  if (retryHadFocus && !state.activePage && document.activeElement === document.body) $('message-text').focus({ preventScroll: true });
   if (changed) {
     if (currentSuggestion()) scrollToSuggestion();
     else scrollToLatest();
@@ -1209,16 +1226,16 @@ function renderFieldCoach(classification) {
     : range ? range.label : analyzing ? '正在结合背景和这句话' : !hasMessage ? '先录入对方的一句原话' : analyzed ? '先自然交流，随新回应调整' : '先接住这句，尝试获得更多信息';
   const observed = Object.values(heat?.dimensions || {}).filter((dimension) => dimension.level !== 'unknown').length;
   $('field-coach-heat-basis').textContent = scored ? `暂定指数，非成功率 · 已观察 ${observed}/5 维度`
-    : range ? '初步范围，会随完整背景与后续互动调整。' : !hasMessage ? '一条对方原话就能开始，背景可以边聊边补。'
-      : analyzed ? '初步观察，会随认识背景和后续回应调整。' : '通用初步方向，分析完成后会结合真实回应调整。';
+    : range ? '初步范围，会随完整背景与后续互动调整。' : !hasMessage ? '一句原话就能开始，背景边聊边补。'
+      : analyzed ? '初步观察，会随认识背景和后续回应调整。' : '通用初步方向，随真实回应调整。';
   const focus = workingFocus();
   $('field-coach-focus').textContent = `本轮重点：${paused ? '停止这类推进' : focus?.stage && focus.stage !== 'unknown' ? focusNames[focus.stage] : quiet ? '自然留白' : suggestion ? '按当前建议继续' : hasMessage ? '尝试获得更多信息' : '先录入一句'}`;
   $('field-coach-focus').title = focus?.reason || '';
   const low = heat?.status === 'too_low' || (scored ? heat.score < 40 : range?.upper <= 45);
   const high = scored && heat.score >= 65;
   const defaultDirection = high ? '接住她主动展开的内容，分享一点自己的经历。' : initialInformationDirection;
-  const defaultPitfall = low ? '通用提醒：别连环追问、催回复，也别急着自证或升级。'
-    : high ? '通用提醒：别连续加码、反复试探，也别忽略她的边界。'
+  const defaultPitfall = low ? '通用提醒：别连环追问、催回复或急着升级。'
+    : high ? '通用提醒：别连续加码、反复试探或忽略边界。'
       : '通用提醒：别连续追问、堆叠升温；先接住这句话。';
   const obstacle = classification?.obstacle?.type;
   let action = guidance?.ownWordsGuide || coach?.initiative || defaultDirection;
@@ -1235,8 +1252,8 @@ function renderFieldCoach(classification) {
     action = '先弄清她的意思，轻松接住疑虑。';
     pitfall = '别把疑虑当调侃，也别继续加码。';
   } else if (!hasMessage) {
-    action = '先录入对方的一句原话；认识背景可以边聊边补。';
-    pitfall = '通用提醒：保留原话，猜测和补充背景分开记录。';
+    action = '先记录对方的一句原话。';
+    pitfall = '通用提醒：保留原话，补充信息写在批注。';
   }
   // Keep historical advice intact, including later conditions and negations.
   // CSS bounds the preview; the full advice remains readable in the disclosure.
@@ -1246,7 +1263,7 @@ function renderFieldCoach(classification) {
   const highest = options.length ? Math.max(...options.map(({ weight }) => weight)) : null;
   const recommended = options.filter(({ weight }) => weight === highest);
   $('field-coach-next').textContent = paused || heat?.status === 'too_low' ? '先留白，暂不升级或邀约。'
-    : !hasMessage ? '录入后点「给我建议」，少量内容也可以开始。'
+    : !hasMessage ? '记录后点「给我建议」。'
     : guidance?.reentryWhen ? guidance.reentryWhen
       : quiet ? '先自然留白，达到当前建议的接话条件再继续。'
       : classification?.topicDecision?.mode !== 'change' ? coach?.nextAction || '分享一点相关内容，再留一个好接的小问题；别连环追问。'
@@ -1347,7 +1364,6 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
   state.autoAttempts.add(inputContext);
   state.modelCalls.set(inputContext, call);
   state.coachUpdate = { call, context: inputContext, visit: call.visit, phase: 'updating' };
-  closeInlineCards();
   const intent = type === 'reply' && !automatic ? $('intent').value.trim() : '';
   const request = requestId(type, id, direction, intent, topicChangeRequested);
   let localError = $('coach-error');
@@ -1419,7 +1435,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
     if (['REQUEST_ID_CONTEXT_CONFLICT', 'CONTEXT_CHANGED'].includes(error.code) && state.selectedId === id) {
       try { await loadCounterpart(id, { autoAnalyze: false }); } catch { /* No automatic retry. */ }
     }
-    if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id) { fillProfile(); showView('profile'); }
+    if ((error.code === 'FULL_PROFILE_REQUIRES_UPDATE' || error.code === 'PROFILE_REQUIRED') && state.selectedId === id && !state.activePage && !automatic) showView('profile');
   } finally {
     if (state.modelCalls.get(inputContext) === call) state.modelCalls.delete(inputContext);
     if (state.coachUpdate?.call === call && state.coachUpdate.phase === 'updating') state.coachUpdate = null;
@@ -1430,7 +1446,7 @@ async function coachCall(type, button, { direction, automatic = false, topicChan
       updateCoachBusy();
       // The complete editor/guidance appears only after the busy state clears.
       if (replyAccepted) scrollToSuggestion();
-      if (classificationAccepted && focusTopicChange && (document.activeElement === button || document.activeElement === document.body)) {
+      if (classificationAccepted && focusTopicChange && !state.activePage && (document.activeElement === button || document.activeElement === document.body)) {
         $('direction-options').querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
         $('direction-options').scrollIntoView({ block: 'nearest' });
       }
@@ -1468,8 +1484,8 @@ function renderSuggestion() {
   $('suggestion-update').hidden = generating || !feedback;
   $('suggestion-update').textContent = feedback?.text || '';
   $('suggestion-update').classList.toggle('error', Boolean(feedback?.error));
-  if (generating) { $('suggestion-title').textContent = '我 · AI 正在准备回复'; updateReplyCopyState(); updateComposer(); return; }
-  if (!suggestion) { $('suggestion-title').textContent = '我 · AI 建议'; $('suggestion-text').value = ''; updateReplyCopyState(); updateComposer(); return; }
+  if (generating) { $('suggestion-title').textContent = '正在准备回复'; updateReplyCopyState(); updateComposer(); return; }
+  if (!suggestion) { $('suggestion-title').textContent = '建议回复 · 未发送'; $('suggestion-text').value = ''; updateReplyCopyState(); updateComposer(); return; }
   const relatedMessage = [...(state.detail?.messages || [])].reverse().find((message) => message.speaker === 'self' && message.suggestionId === suggestion.id);
   $('suggestion-text').value = state.suggestionDrafts.get(suggestion.id) ?? suggestion.pendingReplyText ?? relatedMessage?.text ?? suggestion.reply ?? '';
   $('suggestion-action').textContent = actionNames[suggestion.action] || '建议';
@@ -1516,11 +1532,11 @@ function isPendingSuggestion(suggestion) {
 function updateSentState() {
   if (!state.suggestion) return;
   if (isNoReplySuggestion(state.suggestion)) {
-    $('suggestion-title').textContent = state.suggestion.action === 'pause' ? 'AI 建议 · 先停止当前推进' : 'AI 建议 · 暂时不回';
+    $('suggestion-title').textContent = state.suggestion.action === 'pause' ? '当前建议 · 停止推进' : '当前建议 · 暂时不回';
     $('sent-state').textContent = '这是节奏建议，不是待发消息；出现上述接话条件后再判断。';
     return;
   }
-  $('suggestion-title').textContent = '我 · AI 建议';
+  $('suggestion-title').textContent = '建议回复 · 未发送';
   $('sent-state').textContent = '可按你的习惯修改，再复制到微信。';
 }
 const backgroundFieldNames = { background: '背景', work: '工作', location: '所在地', interests: '兴趣', availability: '时间安排', met: '认识经历', preference: '偏好', relationship_goal: '关系目标' };
@@ -1575,11 +1591,6 @@ function readIntakeForm() {
   return { alias: $('intake-alias').value, remark: $('intake-remark').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
 }
 function openCounterpart(person = null) {
-  if ($('counterpart-dialog').hidden) state.intakeReturn = { trigger: document.activeElement, scrollY: window.scrollY, title: document.title };
-  rememberComposer();
-  closeInlineCards();
-  closeFieldCoach();
-  $('chat-menu').open = false;
   state.intakeInstance++;
   state.editingCounterpartId = person?.id || null;
   const draft = state.intakeDrafts.get(state.editingCounterpartId || 'new') || person;
@@ -1592,44 +1603,36 @@ function openCounterpart(person = null) {
   updateIntakeChannel();
   renderBackgroundContext();
   $('delete-counterpart').hidden = !person;
-  document.querySelector('.conversation-layout').hidden = true;
-  $('counterpart-dialog').hidden = false;
-  document.title = `${$('counterpart-dialog-title').textContent} · 聊天教练`;
-  const skipLink = document.querySelector('.skip-link');
-  skipLink.href = '#intake-alias'; skipLink.textContent = '跳到对象资料';
-  window.scrollTo({ top: 0, behavior: 'instant' });
-  $('intake-alias').focus({ preventScroll: true });
+  openAuxiliaryPage('counterpart-dialog');
 }
-function closeCounterpartPage({ restoreFocus = true } = {}) {
-  const previous = state.intakeReturn;
-  $('counterpart-dialog').hidden = true;
-  document.querySelector('.conversation-layout').hidden = false;
-  state.intakeReturn = null;
-  if (previous) document.title = previous.title;
-  const skipLink = document.querySelector('.skip-link');
-  skipLink.href = '#message-text'; skipLink.textContent = '跳到聊天输入';
-  if (!previous || !restoreFocus) return;
-  window.scrollTo({ top: previous.scrollY, behavior: 'instant' });
-  const trigger = previous.trigger;
-  const focusTarget = trigger?.checkVisibility() ? trigger : $('chat-menu').querySelector('summary');
-  focusTarget?.focus({ preventScroll: true });
-}
+function closeCounterpartPage(options) { closeAuxiliaryPage(options); }
 async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。', isCurrent = () => true) {
   if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return false; }
   try { await navigator.clipboard.writeText(text); if (confirmation && isCurrent()) announce(confirmation); return true; }
   catch { if (isCurrent()) announce('浏览器未允许复制。请选中文本手动复制。', 'error'); return false; }
 }
+function isCurrentAdminSession(userId, token) { return state.me?.user.role === 'owner' && state.me.user.id === userId && state.csrf === token; }
 async function loadAdmin() {
-  if (state.localDemo || state.me.user.role !== 'owner') return;
+  if (state.localDemo || state.me?.user.role !== 'owner') return;
+  const userId = state.me.user.id, token = state.csrf, serial = ++state.adminReadSerial;
   const [records, users] = await Promise.all([api('/api/admin/feedback'), api('/api/admin/users')]);
+  if (!isCurrentAdminSession(userId, token) || serial !== state.adminReadSerial) return;
   $('admin-users').replaceChildren(...users.users.map((user) => {
     const select = el('select', { 'aria-label': `${user.username}的内测权限` }, el('option', { value: 'free' }, '免费'), el('option', { value: 'paid' }, '付费内测'));
     select.value = user.plan;
-    const save = el('button', { class: 'small-button', type: 'button', onclick: () => void perform(save, '保存中…', async () => { await put(`/api/admin/users/${encodeURIComponent(user.id)}/plan`, { plan: select.value }); await loadAdmin(); if (user.id === state.me.user.id) await reloadMe(); announce('内测权限已更新。'); }) }, '保存');
+    const save = el('button', { class: 'small-button', type: 'button', onclick: () => void perform(save, '保存中…', async () => {
+      await put(`/api/admin/users/${encodeURIComponent(user.id)}/plan`, { plan: select.value });
+      if (!isCurrentAdminSession(userId, token)) return;
+      await loadAdmin();
+      if (!isCurrentAdminSession(userId, token)) return;
+      if (user.id === userId) await reloadMe({ expectedUserId: userId });
+      if (isCurrentAdminSession(userId, token)) announce('内测权限已更新。');
+    }) }, '保存');
     const tokenResult = el('div', { class: 'mcp-token-result', hidden: '' });
     const tokenButton = el('button', { class: 'quiet-button', type: 'button', onclick: () => void perform(tokenButton, '创建密钥…', async () => {
       if (!confirm(`为 ${user.username} 创建新的账号 MCP 接入密钥？该账号原密钥会失效。`)) return;
       const data = await post(`/api/admin/users/${encodeURIComponent(user.id)}/mcp-token`, {});
+      if (!isCurrentAdminSession(userId, token)) return;
       const field = el('input', { type: 'password', readonly: '', autocomplete: 'off', 'aria-label': '账号 MCP 接入密钥' });
       field.value = data.token;
       const copy = el('button', { type: 'button', class: 'small-button', onclick: () => void copyText(field.value, '接入密钥已复制，请妥善保管。') }, '复制密钥');
@@ -1650,8 +1653,14 @@ function feedbackText(record) {
   return [raw.actualSentText ? `${inferredFeedback(record) ? '推定上一轮草稿（发送未确认）' : '实际发送'}：${raw.actualSentText}` : '', raw.counterpartReply ? `对方后续：${raw.counterpartReply}` : '', raw.observation ? `用户观察：${raw.observation}` : '', `类型：${{ positive: '有效做法', pitfall: '雷点', uncertain: '不确定' }[raw.kind] || '待确认'}`, `使用许可：${raw.consent ? '已同意清洗审阅' : '未获得许可'}`].filter(Boolean).join('\n\n');
 }
 function renderAdminFeedback(record) {
+  const userId = state.me?.user.id, token = state.csrf;
   const stageNames = { raw_untrusted: '未清洗', clean_candidate: '已清洗候选', cleaned_candidate: '已清洗候选', approved_candidate: '已批准候选', owner_reviewed: '已审阅', approved_use: '已批准使用', rejected: '已拒绝', quarantined: '隔离待补充' };
-  const cleanButton = el('button', { class: 'secondary', type: 'button', disabled: Boolean(record.review), onclick: () => void perform(cleanButton, '清洗中…', async () => { await post(`/api/admin/feedback/${encodeURIComponent(record.id)}/clean`, {}); await loadAdmin(); announce('清洗结果已记录；是否采用仍需人工审阅。'); }) }, record.review ? '此记录已审阅' : record.cleaning ? '重新清洗' : '清洗这条反馈');
+  const cleanButton = el('button', { class: 'secondary', type: 'button', disabled: Boolean(record.review), onclick: () => void perform(cleanButton, '清洗中…', async () => {
+    await post(`/api/admin/feedback/${encodeURIComponent(record.id)}/clean`, {});
+    if (!isCurrentAdminSession(userId, token)) return;
+    await loadAdmin();
+    if (isCurrentAdminSession(userId, token)) announce('清洗结果已记录；是否采用仍需人工审阅。');
+  }) }, record.review ? '此记录已审阅' : record.cleaning ? '重新清洗' : '清洗这条反馈');
   const card = el('article', { class: 'feedback-review' }, el('div', { class: 'section-heading' }, el('div', {}, el('h3', {}, record.user?.username || '内测用户'), el('p', { class: 'small muted' }, record.id)), el('span', { class: 'badge' }, stageNames[record.stage] || record.stage)), el('pre', {}, feedbackText(record)), cleanButton);
   if (record.cleaning) {
     const cleaning = record.cleaning;
@@ -1679,7 +1688,12 @@ function renderAdminFeedback(record) {
     form.append(el('label', {}, '批准用途', purpose), el('div', { class: 'form-grid' }, el('label', {}, '适用条件', conditions), el('label', {}, '限制', limits)), el('label', {}, '审阅说明', note));
     const review = async (decision, button) => {
       if (decision === 'approve' && (!conditions.value.trim() || !limits.value.trim())) { announce('批准前请写明适用条件和局限。', 'error'); return; }
-      await perform(button, '保存审阅…', async () => { await post(`/api/admin/feedback/${encodeURIComponent(record.id)}/review`, { decision, purpose: purpose.value, conditions: conditions.value.trim(), limits: limits.value.trim(), note: note.value.trim() }); await loadAdmin(); announce(decision === 'approve' ? '审阅已保存。只有获得许可且已清洗的候选可被批准使用。' : '拒绝决定已保存，原始记录保留可追溯。'); });
+      await perform(button, '保存审阅…', async () => {
+        await post(`/api/admin/feedback/${encodeURIComponent(record.id)}/review`, { decision, purpose: purpose.value, conditions: conditions.value.trim(), limits: limits.value.trim(), note: note.value.trim() });
+        if (!isCurrentAdminSession(userId, token)) return;
+        await loadAdmin();
+        if (isCurrentAdminSession(userId, token)) announce(decision === 'approve' ? '审阅已保存。只有获得许可且已清洗的候选可被批准使用。' : '拒绝决定已保存，原始记录保留可追溯。');
+      });
     };
     const approve = el('button', { class: 'primary', type: 'button', disabled: Boolean(record.review) || cleaning.stage !== 'clean_candidate' || !cleaning.consent || !cleaning.allowedPurposes?.length, onclick: () => void review('approve', approve) }, '批准指定用途');
     const reject = el('button', { class: 'quiet-button danger', type: 'button', disabled: Boolean(record.review), onclick: () => void review('reject', reject) }, '拒绝');
@@ -1708,7 +1722,7 @@ $('auth-form').addEventListener('submit', (event) => {
   });
 });
 function clearSessionUI() {
-  state.directoryReadSerial++;
+  state.directoryReadSerial++; state.adminReadSerial++;
   state.conversationVisit++; state.coachErrorContext = null; state.coachUpdate = null;
   state.me = null; state.csrf = ''; state.selectedId = null; state.detail = null; state.suggestion = null; state.replyFeedback = null;
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
@@ -1729,7 +1743,7 @@ function clearSessionUI() {
   $('generated-invite').value = ''; $('invite-result').hidden = true;
   $('counterpart-form').reset(); $('message-form').reset(); $('meeting-form').reset(); $('coach-error')?.remove();
   document.querySelectorAll('form .form-error').forEach((node) => node.remove());
-  closeInlineCards(); closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
+  closeFieldCoach(); updateComposer(); renderFieldCoach(null); renderFieldCoachPlan();
   showCounterpartLoading();
   if (!state.localDemo) $('username').focus();
 }
@@ -1740,7 +1754,7 @@ $('logout').addEventListener('click', () => void perform($('logout'), '退出中
   announce('已退出。');
 }));
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => showView(button.dataset.view)));
-document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeInlineCards({ restoreFocus: true })));
+document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => closeAuxiliaryPage()));
 document.addEventListener('click', (event) => { document.querySelectorAll('.chat-menu[open]').forEach((menu) => { if (!menu.contains(event.target)) closeMenu(menu); }); });
 document.addEventListener('keydown', (event) => {
   const modalCoach = fieldCoachViewport.matches && $('field-coach').dataset.open === 'true';
@@ -1821,7 +1835,7 @@ $('retry-counterpart').addEventListener('click', () => {
 });
 for (const [button, card] of [['open-heat', 'heat-panel'], ['open-meeting', 'meeting-panel']]) $(button).addEventListener('click', () => {
   if (!state.detail) return;
-  openInlineCard(card);
+  openAuxiliaryPage(card);
 });
 $('questionnaire-kind').addEventListener('change', () => { captureAnswers(); renderQuestionnaire($('questionnaire-kind').value); });
 $('open-style-preferences').addEventListener('click', openStylePreferences);
@@ -1868,7 +1882,7 @@ $('counterpart-form').addEventListener('submit', (event) => {
     if (newerDraft) state.intakeDrafts.set(data.counterpart.id, newerDraft);
     if (state.selectedId !== selectedId || $('counterpart-dialog').hidden || state.editingCounterpartId !== editingId) return;
     closeCounterpartPage();
-    const isCurrent = () => state.me?.user.id === userId && state.selectedId === data.counterpart.id && state.intakeInstance === instance && $('counterpart-dialog').hidden;
+    const isCurrent = () => state.me?.user.id === userId && state.selectedId === data.counterpart.id && state.intakeInstance === instance && !state.activePage;
     try { await loadCounterpart(data.counterpart.id); }
     catch (error) {
       if (isCurrent() && !error.displayed) showCounterpartLoading('对象资料已保存，聊天暂时没能刷新，请重试。', true);
@@ -1907,6 +1921,9 @@ $('delete-counterpart').addEventListener('click', () => {
     state.directoryReadSerial++;
     if (state.editingCounterpartId === id && !$('counterpart-dialog').hidden) closeCounterpartPage();
     if (state.selectedId !== id) { await loadCounterparts({ selectIfNeeded: false }); return; }
+    // An object-specific page cannot remain editable after its object is gone.
+    // Account-wide profile/admin pages and a new intake keep their own drafts.
+    if (['meeting-panel', 'heat-panel'].includes(state.activePage)) closeAuxiliaryPage();
     // Retire in-flight reads before clearing the selected conversation. A late
     // pre-delete response must not restore it or take over the next selection.
     state.detailRequestSerial++; state.conversationVisit++;
@@ -1916,7 +1933,7 @@ $('delete-counterpart').addEventListener('click', () => {
     for (const element of ['transcript', 'direction-options', 'heat-dimensions']) $(element).replaceChildren();
     $('counterpart-title').textContent = '模拟微信'; $('counterpart-background').textContent = '';
     $('counterpart-workspace').hidden = true; $('empty-state').hidden = false;
-    closeInlineCards(); updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
+    updateComposer(); renderDirectory(); renderFieldCoach(null); renderFieldCoachPlan(); renderBackgroundContext();
     await loadCounterparts();
     if (state.me?.user.id === userId) announce('对象及其关联记录已删除。');
   }, scope);
@@ -1968,7 +1985,7 @@ $('message-form').addEventListener('submit', (event) => {
       if (state.selectedId !== id) return;
       await refreshCounterpart(id, { autoAnalyze: !editing });
       if (state.selectedId !== id) return;
-      closeInlineCards(); scrollToLatest();
+      scrollToLatest();
       announce(body.speaker === 'other' && !editing ? '对方的新消息已记录。' : '原话已记录。');
     } finally { state.messageCalls.delete(callKey); updateComposer(); }
   }, scope);
@@ -2009,23 +2026,28 @@ $('meeting-kind').addEventListener('change', updateMeetingRequirements);
 for (const type of ['input', 'change']) $('meeting-form').addEventListener(type, () => state.meetingDrafts.set(meetingDraftKey(), readMeetingForm()));
 $('meeting-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const id = state.selectedId, userId = state.me?.user.id, key = meetingDraftKey();
+  const id = state.selectedId, userId = state.me?.user.id, key = meetingDraftKey(), pageVisit = state.pageVisit;
   const submitted = readMeetingForm(); state.meetingDrafts.set(key, submitted);
   void perform(event.submitter, '保存安排…', async () => {
     const data = await put(`${counterpartPath(id)}/meeting`, submitted);
-    if (state.meetingDrafts.get(key) === submitted) state.meetingDrafts.delete(key);
-    if (state.me?.user.id === userId && state.selectedId === id) {
+    if (state.me?.user.id !== userId) return;
+    const unchanged = state.meetingDrafts.get(key) === submitted;
+    if (unchanged) state.meetingDrafts.delete(key);
+    if (state.selectedId === id) {
       state.detail.manualMeeting = data.meeting; state.detail.meeting = data.meeting; fillMeeting(data.meeting);
-      await refreshCounterpart(id);
-      if (state.me?.user.id === userId && state.selectedId === id) announce('安排已修改。');
+      if (unchanged && isPageVisit('meeting-panel', pageVisit)) closeAuxiliaryPage();
+      announce(unchanged ? '安排已修改。' : '安排已保存，刚补充的内容仍保留在表单里。');
+      void refreshCounterpart(id).catch(() => {});
     }
   }, { userId, counterpartId: id });
 });
 $('reload-admin').addEventListener('click', () => void perform($('reload-admin'), '读取中…', loadAdmin));
 $('invite-form').addEventListener('submit', (event) => {
   event.preventDefault();
+  const userId = state.me?.user.id, token = state.csrf;
   void perform(event.submitter, '创建邀请…', async () => {
     const data = await post('/api/admin/invites', { plan: $('invite-plan').value });
+    if (!isCurrentAdminSession(userId, token)) return;
     const invite = typeof data.invite === 'string' ? data.invite : data.invite?.token || data.invite?.code;
     if (!invite) throw new Error('邀请已创建，但返回结果缺少邀请码。请联系维护者核查，勿连续重复创建。');
     $('generated-invite').value = invite; $('invite-result').hidden = false; announce('单次邀请码已创建，请只分享给本次内测参与者。');

@@ -1,3 +1,4 @@
+import { openNewConversation, returnToConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -81,7 +82,7 @@ try {
   };
   await page.goto(origin); await page.locator('#workspace').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#profile-view').isVisible(), false, 'Blank profile does not block entry');
-  await page.locator('#add-counterpart').click(); await page.locator('#intake-alias').fill('虚构对象');
+  await openNewConversation(page); await page.locator('#intake-alias').fill('虚构对象');
   const created = await waitRequest('/api/counterparts', 'POST', () => page.locator('#counterpart-form button[type=submit]').click());
   const id = created.counterpart.id;
   assert.equal(created.counterpart.rounds, null, 'Unfilled prior topic counts remain unknown');
@@ -123,7 +124,7 @@ try {
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(evidenceDir, 'automatic-meeting-mobile-day.png') });
-  await page.locator('#theme-toggle').click();
+  await returnToConversation(page); await page.locator('#theme-toggle').click(); await menu('#open-meeting');
   await page.screenshot({ path: join(evidenceDir, 'automatic-meeting-mobile-night.png') });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   report.cases.push('Day/night mobile arrangement has no horizontal overflow');
@@ -143,7 +144,7 @@ try {
   assert.equal(server.betaStore.getMeeting(user.id, id).time, '周六 20:00');
   report.cases.push('A typed manual correction survives a concurrent reply and can be saved');
 
-  await page.locator('[data-close=meeting-panel]').click(); await menu('[data-view=profile]');
+  await returnToConversation(page); await menu('[data-view=profile]');
   await page.locator('.questionnaire-details > summary').click();
   const question = page.locator('#questionnaire select').first(); await question.selectOption('4');
   const callsBeforeProfileSave = { classifications, replies };

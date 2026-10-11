@@ -1,3 +1,4 @@
+import { openNewConversation, returnToConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -118,6 +119,7 @@ async function waitRequest(suffix, method, action) {
   return payload.data;
 }
 async function menuAction(selector) {
+  await returnToConversation(page);
   if (!await page.locator(selector).isVisible()) await page.locator('#chat-menu > summary').click();
   await page.locator(selector).click();
 }
@@ -185,7 +187,7 @@ try {
   await login('test-owner', 'SyntheticPassword2026');
   await verifySessionBoundaries();
   await menuAction('#admin-nav');
-  await page.locator('#admin-view > details > summary').click();
+  await page.locator('#admin-view .auxiliary-page-body > details > summary').click();
   await waitRequest('/api/admin/invites', 'POST', () => page.locator('#invite-form button[type=submit]').click());
   await page.waitForFunction(() => document.getElementById('generated-invite').value.length > 10);
   const invite = await page.locator('#generated-invite').inputValue();
@@ -195,7 +197,7 @@ try {
   const fullOption = await page.locator('#questionnaire-kind option[value=full]').evaluate((option) => ({ disabled: option.disabled, markup: option.outerHTML }));
   assert.equal(fullOption.disabled, true, JSON.stringify(fullOption));
   await profile('short');
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('对象 A');
   await page.locator('#intake-channel').selectOption('app');
   await page.locator('#intake-app').fill('资料提到设计工作、城市散步和咖啡。');
@@ -215,7 +217,7 @@ try {
   assert.equal(await page.locator('#direction-options button').count(), 3);
   assert.equal(classifications, 2);
   assert.ok((await page.locator('[data-direction=down]').textContent()).includes('10%'));
-  await waitRequest(`/api/counterparts/${id}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
+  await waitRequest(`/api/counterparts/${id}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details:has(#intent) > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, 2, 'replay must not invoke classifier');
   await waitRequest(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
   await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
@@ -240,7 +242,7 @@ try {
   await page.locator('#message-text').fill('今天又开始一个新项目了。');
   await waitRequest(`/api/counterparts/${id}/followup`, 'POST', () => page.locator('#save-message').click());
   await page.locator('#coach-loading').waitFor({ state: 'hidden' });
-  if (!await page.locator('#classify-availability').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click();
+  if (!await page.locator('#classify-availability').isVisible()) await page.locator('#coach-panel > .coach-details:has(#intent) > summary').click();
   await page.locator('#classify-availability').filter({ hasText: '试用已用完' }).waitFor();
   assert.equal(classifications, 3, 'Exhausted trial must not call classifier');
   assert.equal(replies, 1, 'Exhausted analysis never spends a reply without a click');

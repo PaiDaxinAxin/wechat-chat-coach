@@ -1,3 +1,4 @@
+import { switchConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -181,9 +182,9 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await page.screenshot({ path: join(evidenceDir, `390-${theme}.png`), fullPage: true });
   }
-  await page.locator('#counterpart-select').selectOption(people.high.id);
+  await switchConversation(page, people.high.id);
   await page.waitForFunction(() => !document.querySelector('#message-text').disabled && document.querySelector('#counterpart-title').textContent === '咖啡同好');
-  await page.locator('#counterpart-select').selectOption(people.recent.id);
+  await switchConversation(page, people.recent.id);
   await page.waitForFunction((id) => document.querySelector('#counterpart-select').value === id && !document.querySelector('#message-text').disabled, people.recent.id);
   assert.equal(await page.locator('#message-text').inputValue(), '保留当前对话的未提交草稿');
   assertNoInference(); report.cases.push('Mobile retains the native selector and compact sorting, with contact-specific drafts');

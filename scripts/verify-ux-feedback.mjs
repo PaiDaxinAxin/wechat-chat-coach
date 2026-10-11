@@ -1,3 +1,4 @@
+import { switchConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -105,9 +106,9 @@ try {
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await visibleReply(page, `${viewport.width}x${viewport.height} after reload`);
-    await page.locator('#counterpart-select').selectOption(other.id);
+    await switchConversation(page, other.id);
     await page.waitForFunction((value) => document.querySelector('.message-bubble')?.textContent === value, '我周末喜欢拍照，你呢？');
-    await page.locator('#counterpart-select').selectOption(contact);
+    await switchConversation(page, contact);
     await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await visibleReply(page, `${viewport.width}x${viewport.height} after switching back`);
@@ -176,7 +177,7 @@ try {
   await page.route('**/suggestions/*/copied', heldCopy);
   const oldCopy = page.waitForResponse((r) => r.url().endsWith('/copied'));
   await page.locator('#copy-reply').click(); await copyStarted.promise;
-  await page.locator('#counterpart-select').selectOption(other.id);
+  await switchConversation(page, other.id);
   await page.waitForFunction((value) => document.querySelector('.message-bubble')?.textContent === value, '我周末喜欢拍照，你呢？');
   await reply(page, '对象 B 的独立建议');
   const bDraft = await page.locator('#suggestion-text').inputValue();
@@ -185,7 +186,7 @@ try {
   assert.equal(await page.locator('#suggestion-text').inputValue(), bDraft);
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复');
   assert.equal(await page.locator('#notice').isVisible(), false);
-  await page.locator('#counterpart-select').selectOption(id);
+  await switchConversation(page, id);
   await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复', 'A new visit never inherits old copy feedback');
   report.cases.push('Delayed clipboard/edit and cross-conversation receipt results remain isolated');
@@ -194,7 +195,7 @@ try {
   await page.evaluate(() => { window.fixtureClipboard.hold = true; window.fixtureClipboard.fail = true; window.fixtureClipboard.release = null; });
   await page.locator('#copy-reply').click();
   await page.waitForFunction(() => typeof window.fixtureClipboard.release === 'function');
-  await page.locator('#counterpart-select').selectOption(other.id);
+  await switchConversation(page, other.id);
   await page.waitForFunction((value) => document.querySelector('.message-bubble')?.textContent === value, '我周末喜欢拍照，你呢？');
   await page.evaluate(() => { window.fixtureClipboard.hold = false; window.fixtureClipboard.release(); });
   await page.waitForFunction((before) => window.fixtureClipboard.rejected === before + 1, rejectedBefore);
@@ -202,7 +203,7 @@ try {
   assert.equal(await page.locator('#notice').isVisible(), false, 'A delayed clipboard rejection from A cannot report against B');
   assert.equal(await page.locator('#copy-reply').textContent(), '复制回复');
   await page.evaluate(() => { window.fixtureClipboard.fail = false; });
-  await page.locator('#counterpart-select').selectOption(id);
+  await switchConversation(page, id);
   await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   report.cases.push('Delayed clipboard denial does not leak an error into another conversation');
 

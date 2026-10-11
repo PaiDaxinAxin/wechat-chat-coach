@@ -1,3 +1,4 @@
+import { switchConversation, openNewConversation, openCoachPlan } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -195,6 +196,7 @@ try {
       await coachNote.locator('summary').focus(); await page.keyboard.press('Enter');
       assert.equal(await coachNote.locator('summary').textContent(), '注 · 上切');
       assert.equal(await coachNote.locator('p').first().isVisible(), true, 'A currently mentioned term opens from the keyboard');
+      await openCoachPlan(page);
       await page.locator('#field-coach-plan').fill('先分享自己的项目，再了解对方的经历。');
       await response(`/api/counterparts/${id}/coach-plan`, () => page.locator('#field-coach-plan-submit').click());
       await page.locator('#field-coach-plan-result').filter({ hasText: '先分享经历' }).waitFor();
@@ -220,7 +222,7 @@ try {
       await menuItem('#open-meeting'); await page.locator('#meeting-panel').waitFor({ state: 'visible' });
       await page.locator('#meeting-kind').selectOption('confirmed'); await scan('meeting-form');
       await page.locator('[data-close=meeting-panel]').click();
-      await page.locator('#add-counterpart').click(); await page.locator('#counterpart-form').waitFor({ state: 'visible' });
+      await openNewConversation(page); await page.locator('#counterpart-form').waitFor({ state: 'visible' });
       await scan('counterpart-form');
       await page.locator('#intake-alias').fill(`虚构空聊-${width}-${theme}`);
       await page.locator('#intake-channel').selectOption('app');
@@ -235,7 +237,7 @@ try {
       for (const button of await page.locator('[data-direction]').all()) assert.equal(await button.isDisabled(), true);
       await scan('empty-conversation');
       assert.equal(modelRequests, requestsBeforeEmpty); assert.deepEqual(report.mockCalls, callsBeforeEmpty);
-      await page.locator('#counterpart-select').selectOption(id);
+      await switchConversation(page, id);
       await page.waitForFunction(() => !document.getElementById('message-text').disabled);
       await page.route('**/api/me', async (route) => {
         const received = await route.fetch(); const body = await received.json(); body.data.profile.background = '';

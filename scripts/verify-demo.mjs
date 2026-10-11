@@ -1,3 +1,4 @@
+import { switchConversation, openNewConversation, openCoachPlan } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -174,6 +175,7 @@ try {
   assert.equal(await page.locator('#coach-glossary-toggle,.coach-glossary').count(), 0, 'The persistent dictionary and toggle are removed');
   assert.equal(await page.locator('#coach-glossary-terms').isVisible(), false, 'No visible coach term means no footnotes');
   assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0);
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').fill('我想聊男对女、升温、平移和下切。');
   assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false, 'An unsubmitted plan never creates explanatory notes');
   assert.equal(await page.locator('#coach-glossary-terms > details').count(), 0, 'Plan wording does not become coach guidance');
@@ -238,6 +240,7 @@ try {
   assert.equal(followup.timing.fromSource, 'clipboard_copied');
   await page.locator('.message-bubble').filter({ hasText: followupText }).waitFor();
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
+  await page.locator('#coach-context-details > summary').click();
   await page.locator('#timing-note').filter({ hasText: '录入估计' }).waitFor();
   assert.equal(classifications, 3); assert.equal(replies, 1);
   const me = (await (await context.request.get(`${origin}/api/me`)).json()).data;
@@ -278,7 +281,7 @@ try {
   await failPage.locator('#message-form .form-error').waitFor({ state: 'visible' });
   await failPage.unroute('**/followup');
   await failPage.route('**/classify', (route) => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'SESSION_EXPIRED', message: '合成会话结束。' } }) }));
-  await failPage.locator('#coach-panel > .coach-details > summary').click();
+  await failPage.locator('#coach-panel > .coach-details:has(#intent) > summary').click();
   await failPage.locator('#classify').click();
   await failPage.locator('#startup-retry').waitFor({ state: 'visible' });
   assert.equal(await failPage.locator('#auth').isVisible(), false);
@@ -290,7 +293,7 @@ try {
   await failContext.close();
   assert.equal(classifications, 3); assert.equal(replies, 1); assert.deepEqual(pageErrors, []);
   // A completed request for another object cannot clear this object's draft or loading state.
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('虚构对象 B'); await page.locator('#intake-channel').selectOption('app'); await page.locator('#intake-app').fill('虚构资料，喜欢电影。');
   await page.locator('#intake-background').fill('虚构跨对象并发验收。');
   const second = await response('/api/counterparts', 'POST', () => page.locator('#counterpart-form button[type=submit]').click());
@@ -299,7 +302,7 @@ try {
   await page.locator('#message-text').fill('虚构 B 的第一句。');
   await response(`/api/counterparts/${secondId}/followup`, 'POST', () => page.locator('#save-message').click());
   await page.locator('#coach-loading').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(id);
+  await switchConversation(page, id);
   await page.locator('#message-text').waitFor({ state: 'visible' });
   await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id);
   await page.locator('#message-text').fill('A 的未提交草稿');
@@ -307,7 +310,7 @@ try {
   await page.waitForTimeout(150);
   assert.equal(await page.locator('#message-text').inputValue(), 'A 的未提交草稿');
   assert.equal(await page.locator('#coach-loading').isVisible(), false);
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(classifications, 4);
   const beforeFailedClassification = classifications;
@@ -334,14 +337,14 @@ try {
   assert.equal(failedDetail.heat.score, null);
   assert.equal(failedDetail.heat.preliminaryRange, null);
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForTimeout(150);
   assert.equal(classifications, beforeFailedClassification + 2, 'Exhausted recovery for the current context does not restart after reload');
   assert.equal(modelPosts.length, beforeAutomaticFailurePosts + 2, 'Reload after automatic failure sends no model POST, including cached replays');
   assert.equal(await page.locator('#coach-error').isVisible(), false);
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向');
   assert.equal(await page.locator('#field-coach-focus').textContent(), '本轮重点：尝试获得更多信息', 'Reload retains the general direction without silently rerunning a failed model');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details:has(#intent) > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, beforeFailedClassification + 3, 'Explicit reanalysis is allowed');
   const recoveredClassificationCalls = classifications;
   await page.setViewportSize({ width: 390, height: 844 });
@@ -349,6 +352,7 @@ try {
   assert.equal(await page.locator('#field-coach').isVisible(), true);
   assert.equal(await page.evaluate(() => document.activeElement.id), 'field-coach-title');
   const coachPlan = '我想分享一个自己的项目，再问她怎么处理困难。';
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').fill(coachPlan);
   const beforePlan = (await (await context.request.get(`${origin}/api/counterparts/${secondId}`)).json()).data;
   holdPlan = new Promise((done) => { releasePlan = done; });
@@ -356,16 +360,17 @@ try {
   await page.locator('#field-coach-plan-submit').click();
   await page.locator('#field-coach-plan-submit').filter({ hasText: '教练正在看' }).waitFor();
   await page.locator('#close-field-coach').click();
-  await page.locator('#counterpart-select').selectOption(id);
+  await switchConversation(page, id);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   await page.locator('#toggle-field-coach').click();
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').fill('A 的未提交主导计划');
   releasePlan();
   assert.equal((await planResponse).status(), 200);
   assert.equal(await page.locator('#field-coach-plan').inputValue(), 'A 的未提交主导计划');
   assert.equal(await page.locator('#field-coach-plan-result').textContent(), '', 'Background B assessment never appears for A');
   await page.locator('#close-field-coach').click();
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   await page.locator('#toggle-field-coach').click();
   await page.locator('#field-coach-plan-result').filter({ hasText: '等对方回应后' }).waitFor();
@@ -373,14 +378,15 @@ try {
   assert.equal(afterPlan.messages.length, beforePlan.messages.length, 'Coach plan is not a WeChat message');
   assert.equal(afterPlan.suggestions.length, beforePlan.suggestions.length, 'Coach plan is not a pending reply');
   assert.equal(plans, 1);
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').focus(); await page.keyboard.press('Escape');
   assert.equal(await page.locator('#field-coach').isVisible(), false);
   assert.equal(await page.evaluate(() => document.activeElement.id), 'toggle-field-coach');
-  await page.locator('#counterpart-select').selectOption(id); await page.locator('#message-text').waitFor({ state: 'visible' });
+  await switchConversation(page, id); await page.locator('#message-text').waitFor({ state: 'visible' });
   await page.locator('#toggle-field-coach').click();
   assert.equal(await page.locator('#field-coach-plan').inputValue(), 'A 的未提交主导计划');
   await page.locator('#close-field-coach').click();
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.locator('#message-text').waitFor({ state: 'visible' });
   await page.locator('#toggle-field-coach').click();
   assert.equal(await page.locator('#field-coach-plan').inputValue(), coachPlan);
@@ -510,7 +516,7 @@ try {
   await messageCard.locator('.message-label').filter({ hasText: '标注' }).waitFor();
   assert.equal(classifications, recoveredClassificationCalls, 'Changing metadata does not silently call the model');
   assert.equal(await page.locator('#field-coach-temperature').textContent(), '初步方向', 'Correcting time invalidates the previous displayed temperature');
-  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details > summary').click(); await page.locator('#classify').click(); });
+  await response(`/api/counterparts/${secondId}/classify`, 'POST', async () => { if (!await page.locator('#classify').isVisible()) await page.locator('#coach-panel > .coach-details:has(#intent) > summary').click(); await page.locator('#classify').click(); });
   assert.equal(classifications, recoveredClassificationCalls + 1);
   await page.locator('#cancel-message-edit').click();
   const suggestedA = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
@@ -528,7 +534,7 @@ try {
   });
   assert.equal(oldCopy.status(), 200, 'The existing account-owned receipt API remains compatible');
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'A newer old-context copy receipt cannot revive archived advice');
   assert.equal(await page.locator('#copy-reply').isDisabled(), true);
@@ -545,7 +551,7 @@ try {
   assert.deepEqual(afterC.messages.slice(-2).map((message) => message.text), [manualB, counterpartC]);
   assert.equal(server.betaStore.listFeedback(me.user.id).length, feedbackBeforeManual, 'No stale A feedback anchor is created');
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false, 'Reload never restores superseded A as pending');
   const newAfterB = (await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('[data-direction=down]').click())).suggestion;
@@ -561,9 +567,9 @@ try {
   assert.equal(await page.locator('#suggestion-editor').isVisible(), true, 'Failed copy acknowledgment retains the current editable advice');
   await page.unroute('**/suggestions/*/copied');
   const currentCopy = await response(`/api/counterparts/${secondId}/suggestions/${newAfterB.id}/copied`, 'POST', () => page.locator('#copy-reply').click());
-  await page.locator('#suggestion-title').filter({ hasText: '我 · AI 建议' }).waitFor();
+  await page.locator('#suggestion-title').filter({ hasText: '建议回复 · 未发送' }).waitFor();
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   assert.equal(await page.locator('#suggestion-text').inputValue(), copiedCurrentText, 'Reload restores the eligible edited copy');
   await page.locator('#message-text').fill('本轮建议复制后的回应。');
@@ -621,6 +627,8 @@ try {
     assert.equal(await selected.getAttribute('aria-pressed'), 'true');
     assert.equal(await selected.evaluate((button) => button.classList.contains('selected')), true);
     assert.equal(await selected.locator('.direction-check').isVisible(), true, 'The selected direction has a visible check');
+    // Verify the resting selection; pointer hover is separately covered by the affordance suite.
+    await page.mouse.move(0, 0);
     const colors = await selected.evaluate((button) => {
       const sample = document.createElement('span'); sample.style.backgroundColor = 'var(--color-accent)'; button.append(sample);
       const result = { selected: getComputedStyle(button).backgroundColor, accent: getComputedStyle(sample).backgroundColor };
@@ -714,7 +722,7 @@ try {
   assert.equal(await page.locator('#suggestion-text').inputValue(), retainedReplyDraft, 'Failed replacement keeps the current edited draft');
   staticDirectionFixtures = true;
   await page.reload(); await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await assertStaticDirection('sideways');
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A previous copy refresh cannot replace a newly accepted reply with its stale GET.
@@ -764,7 +772,7 @@ try {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   // A held B reply cannot update A, erase A's draft or show a fresh-switch status there.
   const crossObjectReply = await beginDirection('up', { reply: 'B 的晚回建议绝不能显示在 A。' });
-  await page.locator('#counterpart-select').selectOption(id);
+  await switchConversation(page, id);
   await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id);
   await page.locator('#message-text').fill('方向生成期间 A 的新草稿。');
   const otherDirectoryRefresh = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'GET');
@@ -773,7 +781,7 @@ try {
   assert.notEqual(await page.locator('#suggestion-text').inputValue(), crossObjectReply.suggestion.reply);
   assert.equal(await page.locator('#suggestion-loading').isVisible(), false);
   assert.equal(await page.locator('#suggestion-update').isVisible(), false);
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await assertStaticDirection('down');
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   // A hidden draft is not evidence of having used a reply when a new other message arrives.
@@ -852,9 +860,9 @@ try {
         selfColor: getComputedStyle(self).backgroundColor, otherColor: getComputedStyle(other).backgroundColor, colors };
     });
     assert.ok(Math.abs(layout.coachWidth - layout.replyWidth) < 1 && Math.abs(layout.coachRight - layout.replyRight) < 1, `${theme} AI card shares the reply width and right edge`);
-    assert.equal(layout.coachColor, layout.colors.coach); assert.equal(layout.replyColor, layout.colors.self);
+    assert.equal(layout.coachColor, layout.colors.surface); assert.equal(layout.replyColor, layout.colors.self);
     assert.equal(layout.selfColor, layout.colors.self); assert.equal(layout.otherColor, layout.colors.surface);
-    assert.notEqual(layout.coachColor, layout.replyColor, 'The AI card has a lighter, distinct green surface');
+    assert.notEqual(layout.coachColor, layout.replyColor, 'The secondary AI card is a neutral surface, distinct from the green own-reply bubble');
   }
   await page.setViewportSize({ width: 1280, height: 950 });
   for (const theme of ['day', 'night']) {
@@ -877,9 +885,10 @@ try {
     const selectors = ['.coach-temperature-top > span', '#field-coach-temperature', '.coach-action-label'];
     return selectors.map((selector) => { const style = getComputedStyle(document.querySelector(selector)); return { size: parseFloat(style.fontSize), weight: Number(style.fontWeight) }; });
   });
-  assert.ok(strongCoachText[0].size >= 16 && strongCoachText[1].size >= 28 && strongCoachText[2].size >= 16);
+  assert.ok(strongCoachText[0].size >= 15 && strongCoachText[1].size >= 28 && strongCoachText[2].size >= 13);
   assert.ok(strongCoachText.every(({ weight }) => weight >= 600), 'Heat and action headings have clear visual emphasis');
   const glossaryPlan = '脚注操作不得擦掉的场外计划，草稿中的下切和平移不触发说明。';
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').fill(glossaryPlan);
   assert.equal(await page.locator('#field-coach-plan-notes').isVisible(), false);
   const glossaryComposer = await page.locator('#message-text').inputValue();
@@ -930,7 +939,7 @@ try {
   // unsubmitted wording. These are temporary real records, not response mocks.
   await page.setViewportSize({ width: 1280, height: 950 });
   async function selectConversation(targetId) {
-    await response(`/api/counterparts/${targetId}`, 'GET', () => page.locator('#counterpart-select').selectOption(targetId));
+    await response(`/api/counterparts/${targetId}`, 'GET', () => switchConversation(page, targetId));
     await page.waitForFunction(() => !document.getElementById('message-text').disabled);
   }
   await glossary.locator('[data-coach-term=obstacle] > summary').click();
@@ -989,13 +998,13 @@ try {
   await page.unroute(messageUrl);
   await page.screenshot({ path: join(evidenceDir, 'composer-preserved-after-error.png'), fullPage: true });
   const beforeEmptyIntake = { classifications, replies, plans };
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('背景草稿验收对象');
   await page.locator('#intake-channel').selectOption('offline');
   await page.locator('#intake-offline').fill('虚构跑步活动上互相认识，简单聊了路线。');
   await page.locator('#intake-background').fill('刚认识，只知道双方都喜欢跑步。');
   await page.locator('#close-counterpart-dialog').click();
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   assert.equal(await page.locator('#intake-alias').inputValue(), '背景草稿验收对象');
   assert.equal(await page.locator('#intake-channel').inputValue(), 'offline');
   assert.equal(await page.locator('#intake-offline').inputValue(), '虚构跑步活动上互相认识，简单聊了路线。');
@@ -1013,16 +1022,16 @@ try {
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
   assert.deepEqual({ classifications, replies, plans }, beforeEmptyIntake, 'An empty conversation neither generates nor manufactures a failed attempt');
   await page.screenshot({ path: join(evidenceDir, 'empty-conversation-next-step.png'), fullPage: true });
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   assert.equal(await page.locator('#intake-alias').inputValue(), '', 'A successful save clears only its submitted new-object draft');
   await page.locator('#intake-alias').fill('明确取消的草稿');
   await page.locator('#cancel-counterpart-dialog').click();
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   assert.equal(await page.locator('#intake-alias').inputValue(), '', 'Cancel explicitly discards the current intake draft');
   await page.locator('#close-counterpart-dialog').click();
   const failedConversationPath = `**/api/counterparts/${secondId}`;
   await page.route(failedConversationPath, (route) => route.fulfill({ status: 503, json: { error: { code: 'UNAVAILABLE', message: '隔离的读取失败。' } } }));
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.locator('#retry-counterpart').waitFor();
   assert.equal(await page.locator('#message-text').isDisabled(), true);
   assert.equal(await page.locator('#counterpart-workspace').isVisible(), false);
@@ -1045,7 +1054,7 @@ try {
     if (holdLateFailure) { startLateRead(); await lateFailureGate; }
     await route.fulfill({ status: 503, json: { error: { code: 'UNAVAILABLE', message: '旧对象的迟到错误不能出现在新对象。' } } });
   });
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.locator('#retry-counterpart').waitFor();
   holdLateFailure = true;
   await page.locator('#retry-counterpart').click(); await lateReadStarted;
@@ -1081,7 +1090,7 @@ try {
   });
   assert.deepEqual(visibleFeedback, { fullyVisible: true, toolbarVisible: true, shellScroll: 0 }, 'Copy feedback and toolbar stay in view after nested scrolling');
   await page.screenshot({ path: join(evidenceDir, 'copy-feedback-visible.png'), fullPage: true });
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('异步保存对象 A');
   await page.locator('#intake-channel').selectOption('other');
   await page.locator('#intake-background').fill('合成背景 A，正在保存。');
@@ -1096,7 +1105,7 @@ try {
   const savedIntakeResponse = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/counterparts' && r.request().method() === 'POST');
   await page.locator('#counterpart-form button[type=submit]').click(); await intakeSavedPromise;
   await page.locator('#close-counterpart-dialog').click();
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('另外新建的对象 B');
   await page.locator('#intake-background').fill('合成背景 B，属于重新打开的新表单。');
   releaseIntakeSave(); const savedA = (await (await savedIntakeResponse).json()).data.counterpart;

@@ -1,3 +1,4 @@
+import { switchConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -76,7 +77,7 @@ try {
   await page.goto(origin); await page.locator('#username').fill(user.username); await page.locator('#password').fill(password);
   await perform('/api/login', 'POST', () => page.locator('#auth-submit').click());
   await ready();
-  if (await page.locator('#counterpart-select').inputValue() !== person.id) { await page.locator('#counterpart-select').selectOption(person.id); await ready(); }
+  if (await page.locator('#counterpart-select').inputValue() !== person.id) { await switchConversation(page, person.id); await ready(); }
   assert.equal(calls.classify, 0, 'Login and object selection read context without model calls');
   await page.locator('#classify').evaluate((node) => { node.closest('details').open = true; });
   await perform('/classify', 'POST', () => page.locator('#classify').click()); await ready();
@@ -130,8 +131,8 @@ try {
   await note().locator('button[type=submit]').click(); await note().locator('.form-error').waitFor({ state: 'visible' });
   assert.equal(await note().locator('textarea').inputValue(), '失败时仍保留的背景草稿。');
   await page.unroute(annotationUrl);
-  await page.locator('#counterpart-select').selectOption(second.id); await ready();
-  await page.locator('#counterpart-select').selectOption(person.id); await ready();
+  await switchConversation(page, second.id); await ready();
+  await switchConversation(page, person.id); await ready();
   assert.equal(await note().locator('textarea').inputValue(), '失败时仍保留的背景草稿。');
   assert.equal(await note().locator('.form-error').isVisible(), true);
   await note().locator('textarea').fill(''); clock += 10;
@@ -182,7 +183,7 @@ try {
   await note().locator('textarea').fill('迟到保存的独立背景。'); clock += 10;
   const lateResponse = page.waitForResponse((r) => r.url() === annotationUrl && r.request().method() === 'PATCH');
   await note().locator('button[type=submit]').click(); await applied.promise;
-  await page.locator('#counterpart-select').selectOption(second.id); await ready();
+  await switchConversation(page, second.id); await ready();
   await page.locator('#message-text').fill('第二对象的新草稿。'); await page.locator('#message-text').focus();
   late.resolve(); assert.equal((await lateResponse).status(), 200);
   await page.waitForTimeout(100);
@@ -190,7 +191,7 @@ try {
   assert.equal(await page.locator('#message-text').inputValue(), '第二对象的新草稿。');
   assert.equal(await page.evaluate(() => document.activeElement.id), 'message-text');
   await page.unroute(annotationUrl);
-  await page.locator('#counterpart-select').selectOption(person.id); await ready();
+  await switchConversation(page, person.id); await ready();
   assert.equal(await page.locator('#suggestion-panel').isVisible(), false);
   await note().locator('textarea').fill(''); clock += 10;
   await perform('/annotation', 'PATCH', () => note().locator('button[type=submit]').click());

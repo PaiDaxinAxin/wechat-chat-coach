@@ -1,3 +1,4 @@
+import { switchConversation, openCoachPlan, returnToConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -66,6 +67,7 @@ try {
     await page.locator('#workspace').waitFor({ state: 'visible' });
   }
   async function openPreferences() {
+    await returnToConversation(page);
     if (!await page.locator('#field-coach').isVisible()) await page.locator('#toggle-field-coach').click();
     const summary = page.locator('.style-entry > summary');
     if (!await page.locator('#open-style-preferences').isVisible()) await summary.click();
@@ -81,11 +83,12 @@ try {
   await response(`/api/counterparts/${id}/classify`, 'POST', () => page.locator('#classify').click());
   await page.waitForFunction(() => document.querySelectorAll('[data-direction]').length === 3 && [...document.querySelectorAll('[data-direction]')].every((button) => !button.disabled));
   await response(`/api/counterparts/${id}/reply`, 'POST', () => page.locator('[data-direction=down]').click());
-  await page.locator('#suggestion-panel').waitFor({ state: 'visible' });
+  await page.locator('#suggestion-panel[aria-busy=false]').waitFor({ state: 'visible' });
   const original = await page.locator('#suggestion-text').inputValue(), ownVersion = '我最近也在做设计。你最投入的项目是什么？';
   await page.locator('#suggestion-text').fill(ownVersion);
   await page.locator('.message').first().locator('.message-menu > summary').click(); await page.locator('.message').first().getByRole('button', { name: '编辑对方的消息', exact: true }).click();
   await page.locator('#message-speaker').selectOption('self'); await page.locator('#message-text').fill('尚未提交的本人原话');
+  await openCoachPlan(page);
   await page.locator('#field-coach-plan').fill('尚未提交的主导计划');
   await openPreferences();
   assert.equal(await page.locator('#style-original').textContent(), original);
@@ -124,7 +127,7 @@ try {
   assert.equal((await get('/api/me')).profile.style, '我保持简短直接，也愿意分享真实经历。');
   await page.locator('#style-cancel-draft').click();
   // Adopted rules are account scoped and enter an explicit later call on another object.
-  await page.locator('#counterpart-select').selectOption(secondId);
+  await switchConversation(page, secondId);
   await page.waitForFunction((secondId) => document.getElementById('counterpart-select').value === secondId && document.getElementById('counterpart-workspace').checkVisibility() && !document.getElementById('direct-reply').disabled, secondId);
   await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('#direct-reply').click());
   assert.deepEqual(JSON.parse(contexts.at(-1).userProfile).confirmedPersonalStyle.rules.map(({ text }) => text), [candidateText]);
@@ -133,16 +136,19 @@ try {
   await page.locator('#style-rule-text').fill('愿意练习自然地表达欣赏。'); await page.locator('#style-rule-target').selectOption('growth_goal'); await page.locator('#style-apply').check();
   await response('/api/profile', 'PUT', save); await settleProfile(); assert.deepEqual(counts(), beforeRules);
   learning = await get('/api/style-learning'); assert.equal(learning.rules.filter(({ status }) => status === 'adopted').length, 2);
+  await openPreferences();
   await page.locator(`[data-rule-id="${candidateId}"] [data-rule-action=edit]`).click();
   assert.equal(await page.locator('#style-apply').isChecked(), false, 'Editing never silently adopts a new version');
   const replacementText = '先分享一句真实经历，再自然承接她的话。'; await page.locator('#style-rule-text').fill(replacementText); await page.locator('#style-apply').check();
   await response('/api/profile', 'PUT', save); await settleProfile(); learning = await get('/api/style-learning');
   assert.equal(learning.rules.find(({ id: ruleId }) => ruleId === candidateId).status, 'revoked');
   const replacement = learning.rules.find(({ text }) => text === replacementText); assert.equal(replacement.supersedesId, candidateId); assert.equal(replacement.status, 'adopted');
+  await openPreferences();
   await response('/api/profile', 'PUT', () => page.locator(`[data-rule-id="${replacement.id}"] [data-rule-action=revoke]`).click());
   await page.locator(`[data-rule-id="${replacement.id}"][data-rule-status=revoked]`).waitFor(); assert.deepEqual(counts(), beforeRules);
   await page.locator('#notice').filter({ hasText: '规则已停用' }).waitFor();
   assert.equal(await page.evaluate(() => document.activeElement.closest('[data-rule-id]')?.dataset.ruleId), replacement.id, 'Revocation keeps focus on a visible rule record');
+  await returnToConversation(page);
   await response(`/api/counterparts/${secondId}/reply`, 'POST', () => page.locator('#direct-reply').click());
   const afterRevoke = JSON.parse(contexts.at(-1).userProfile).confirmedPersonalStyle.rules;
   assert.deepEqual(afterRevoke.map(({ text }) => text), ['愿意练习自然地表达欣赏。']);
@@ -152,14 +158,16 @@ try {
   // Natural synthetic review artifacts, captured before recovery sentinel drafts.
   await page.locator('#style-rule-list').scrollIntoViewIfNeeded();
   for (const theme of ['day', 'night']) {
-    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+    if (await page.locator('html').getAttribute('data-theme') !== theme) { await returnToConversation(page); await page.locator('#theme-toggle').click(); await openPreferences(); }
     await page.screenshot({ path: join(evidenceDir, `${theme}.png`), fullPage: true });
   }
   // A CAS conflict does not overwrite another tab or drop any form/chat drafts.
   const me = await get('/api/me'); const current = await get('/api/style-learning');
   const remote = await mutation('/api/profile', 'PUT', { ...profile, style: me.profile.style, styleLearning: { requestId: randomUUID(), expectedRevision: current.revision, ruleChange: { type: 'propose', rule: { target: 'current_preference', text: '另一个标签页的候选', conditions: '', limits: '' } } } }); assert.equal(remote.status(), 200);
   await page.locator('#style-rule-text').fill('冲突时应保留的偏好草稿'); await page.locator('#profile-background').fill('未保存的真实背景修正');
+  await returnToConversation(page);
   await page.locator('#message-text').fill('冲突时应保留的聊天草稿'); await page.locator('#message-speaker').selectOption('self');
+  await openPreferences();
   await response('/api/profile', 'PUT', save, 409); await page.locator('#profile-form .form-error').waitFor({ state: 'visible' });
   assert.ok((await page.locator('#profile-form .form-error').textContent()).includes('重新读取规则'));
   assert.equal(await page.locator('#style-rule-text').inputValue(), '冲突时应保留的偏好草稿'); assert.equal(await page.locator('#message-text').inputValue(), '冲突时应保留的聊天草稿');
@@ -175,7 +183,7 @@ try {
   let release, acceptedResolve; const accepted = new Promise((done) => { acceptedResolve = done; }); const held = new Promise((done) => { release = done; });
   await page.route('**/api/profile', async (route) => { const received = await route.fetch(); acceptedResolve(); await held; await route.fulfill({ response: received }); });
   await save(); await accepted;
-  await page.locator('#counterpart-select').selectOption(id); await page.locator('#message-text').fill('对象切换后的新草稿'); await page.locator('#message-speaker').selectOption('self');
+  await switchConversation(page, id); await page.locator('#message-text').fill('对象切换后的新草稿'); await page.locator('#message-speaker').selectOption('self');
   const delivered = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/profile' && r.request().method() === 'PUT');
   release(); await delivered; await settleProfile(); await page.unroute('**/api/profile');
   assert.equal(await page.locator('#counterpart-select').inputValue(), id); assert.equal(await page.locator('#message-text').inputValue(), '对象切换后的新草稿'); assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
@@ -184,7 +192,7 @@ try {
   for (const width of [320, 1280]) {
     await page.setViewportSize({ width, height: 950 });
     for (const theme of ['day', 'night']) {
-      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+      if (await page.locator('html').getAttribute('data-theme') !== theme) { await returnToConversation(page); await page.locator('#theme-toggle').click(); await openPreferences(); }
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${theme} ${width}px overflow`);
       const button = await page.locator('#style-reload').boundingBox(); assert.ok(button.height >= 44);
     }
@@ -206,7 +214,7 @@ try {
   const accountAccepted = new Promise((done) => { accountAcceptedResolve = done; }); const accountHeld = new Promise((done) => { releaseAccount = done; });
   await page.route('**/api/profile', async (route) => { const received = await route.fetch(); accountAcceptedResolve(); await accountHeld; await route.fulfill({ response: received }); });
   await save(); await accountAccepted;
-  await page.locator('#chat-menu > summary').click();
+  await returnToConversation(page); await page.locator('#chat-menu > summary').click();
   await response('/api/logout', 'POST', () => page.locator('#logout').click()); await login('style-other');
   const accountDelivered = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/profile' && r.request().method() === 'PUT');
   releaseAccount(); await accountDelivered; await settleProfile(); await page.unroute('**/api/profile');

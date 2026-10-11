@@ -1,3 +1,4 @@
+import { switchConversation, openNewConversation, returnToConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -43,7 +44,7 @@ try {
   async function ready(id) {
     await page.waitForFunction((id) => document.getElementById('workspace').checkVisibility() && document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id);
   }
-  async function select(id) { await page.locator('#counterpart-select').selectOption(id); await ready(id); }
+  async function select(id) { await switchConversation(page, id); await ready(id); }
   async function menu(selector) { if (!await page.locator(selector).isVisible()) await page.locator('#chat-menu > summary').click(); await page.locator(selector).click(); }
   async function saved(path, method, action) {
     const pending = page.waitForResponse((response) => new URL(response.url()).pathname === path && response.request().method() === method);
@@ -95,7 +96,7 @@ try {
   report.cases.push('Desktop, 390px and 320px day/night intake pages replace chat, directory and coach; back retains intake and chat drafts, cancel clears only intake');
 
   await page.setViewportSize({ width: 1280, height: 720 });
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('保存失败后重试的虚构对象');
   await page.locator('#intake-remark').fill('读书同好');
   await page.locator('#intake-channel').selectOption('app');
@@ -150,7 +151,7 @@ try {
   page.off('request', trackEdits);
   report.cases.push('A successful edit followed by failed detail read shows retry and recovers without a second write or losing the chat draft');
 
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('目录刷新失败但已保存的对象');
   let failedDirectoryReads = 0;
   await page.route(`${origin}/api/counterparts`, async (route) => {
@@ -169,7 +170,7 @@ try {
   await page.unroute(`${origin}/api/counterparts`);
   report.cases.push('A successful write opens the new conversation even when the follow-up directory GET fails, without duplicate creation');
 
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('读取挂起的已保存对象');
   const readGate = new Promise((resolve) => { releaseHeldRead = resolve; });
   const heldPath = `${origin}/api/counterparts/*`;
@@ -180,7 +181,7 @@ try {
   const pendingRead = page.waitForRequest((request) => request.method() === 'GET' && /^\/api\/counterparts\/[^/]+$/.test(new URL(request.url()).pathname));
   const savedBeforeRead = (await saved('/api/counterparts', 'POST', () => submit().click())).counterpart;
   await pendingRead;
-  await page.locator('#add-counterpart').click();
+  await openNewConversation(page);
   await page.locator('#intake-alias').fill('后来打开的新对象草稿');
   await page.locator('#intake-background').fill('旧对象读取完成后也必须保留这段内容。');
   const completedRead = page.waitForResponse((response) => response.url() === `${origin}/api/counterparts/${savedBeforeRead.id}` && response.request().method() === 'GET');
@@ -196,6 +197,137 @@ try {
   await page.locator('#cancel-counterpart-dialog').click();
   await select(original.id); assert.equal(await page.locator('#message-text').inputValue(), chatDraft);
   report.cases.push('A delayed post-save detail response cannot replace or steal focus from a reopened add page');
+
+  // All account/background forms replace the chat. None may share its scroll
+  // region or leave an invisible chat control as the keyboard target.
+  const auxiliaryEntries = [
+    { id: 'profile-view', entry: '[data-view=profile]', focus: 'profile-background' },
+    { id: 'meeting-panel', entry: '#open-meeting', focus: 'meeting-kind' },
+    { id: 'heat-panel', entry: '#open-heat', focus: 'heat-title' },
+    { id: 'admin-view', entry: '#admin-nav', focus: 'admin-title' },
+  ];
+  for (const width of [1280, 390, 320]) {
+    await page.setViewportSize({ width, height: width === 1280 ? 900 : 844 });
+    for (const theme of ['day', 'night']) {
+      if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#theme-toggle').click();
+      for (const entry of auxiliaryEntries) {
+        await menu(entry.entry);
+        await page.locator(`#${entry.id}`).waitFor({ state: 'visible' });
+        assert.equal(await page.locator(`#${entry.id}`).evaluate((node) => node.parentElement.id), 'main');
+        assert.equal(await page.locator('#workspace').isVisible(), false, `${entry.id}: chat is replaced`);
+        assert.equal(await page.locator('#counterpart-directory').isVisible(), false);
+        assert.equal(await page.locator('#field-coach').isVisible(), false);
+        assert.equal(await page.locator('#chat-thread').locator(`#${entry.id}`).count(), 0);
+        assert.equal(await page.evaluate(() => document.activeElement.id), entry.focus);
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${entry.id}/${width}/${theme}: no overflow`);
+        if (entry.id === 'profile-view') await page.locator('#profile-background').fill('尚未保存的个人背景草稿');
+        if (entry.id === 'meeting-panel') {
+          await page.locator('#meeting-kind').selectOption('proposed');
+          await page.locator('#meeting-time').fill('周六 19:00');
+          await page.locator('#meeting-place').fill('虚构读书咖啡馆');
+        }
+        const scan = await page.evaluate(() => window.axe.run());
+        report.scans.push({ label: `${entry.id}-${width}-${theme}`, violations: scan.violations.map(({ id, impact, nodes }) => ({ id, impact, targets: nodes.map(({ target }) => target) })) });
+        assert.deepEqual(scan.violations.map(({ id }) => id), [], `${entry.id}/${width}/${theme}: accessibility`);
+        if (width !== 320) await page.screenshot({ path: join(evidenceDir, `${entry.id}-${width}-${theme}.png`), fullPage: true });
+        await page.locator(`[data-close=${entry.id}]`).click(); await ready(original.id);
+        assert.equal(await page.evaluate(() => document.activeElement.matches('#chat-menu > summary')), true, 'Back restores the visible menu entry');
+        assert.equal(await page.locator('#message-text').inputValue(), chatDraft);
+        assert.equal(await page.locator('#message-speaker').inputValue(), 'self');
+      }
+      await menu('[data-view=profile]');
+      assert.equal(await page.locator('#profile-background').inputValue(), '尚未保存的个人背景草稿');
+      await returnToConversation(page);
+      await menu('#open-meeting');
+      assert.equal(await page.locator('#meeting-time').inputValue(), '周六 19:00');
+      assert.equal(await page.locator('#meeting-place').inputValue(), '虚构读书咖啡馆');
+      await returnToConversation(page);
+    }
+  }
+  report.cases.push('Profile, meeting, heat and administration use standalone pages in 1280/390/320 day/night layouts; return restores menu focus and retains form/chat drafts');
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const profileSubmit = () => page.locator('#profile-form > button[type=submit]').click();
+  const meetingSubmit = () => page.locator('#meeting-form > button[type=submit]').click();
+  for (const form of [
+    { entry: '[data-view=profile]', pageId: 'profile-view', formId: 'profile-form', path: '/api/profile', input: '#profile-background', value: '资料失败后保留的修正', submit: profileSubmit },
+    { entry: '#open-meeting', pageId: 'meeting-panel', formId: 'meeting-form', path: `/api/counterparts/${original.id}/meeting`, input: '#meeting-time', value: '周六 20:00', submit: meetingSubmit },
+  ]) {
+    await menu(form.entry); await page.locator(form.input).fill(form.value);
+    const url = origin + form.path;
+    await page.route(url, async (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback();
+      await route.fulfill({ status: 503, json: { error: { code: 'TEST_FORM_FAILURE', message: '这次保存没有成功，请再试一次。' } } });
+    });
+    await form.submit(); await page.locator(`#${form.formId} .form-error`).waitFor({ state: 'visible' });
+    assert.equal(await page.locator(`#${form.pageId}`).isVisible(), true);
+    assert.equal(await page.locator(form.input).inputValue(), form.value);
+    assert.equal(await page.locator('#workspace').isVisible(), false);
+    await page.unroute(url);
+    await saved(form.path, 'PUT', form.submit); await ready(original.id);
+    assert.equal(await page.locator(`#${form.pageId}`).isVisible(), false, 'A completed save returns to chat');
+    assert.equal(await page.locator('#message-text').inputValue(), chatDraft);
+  }
+  assert.equal((await server.betaStore.getProfile(owner.id)).background, '资料失败后保留的修正');
+  assert.equal((await server.betaStore.getMeeting(owner.id, original.id)).time, '周六 20:00');
+  report.cases.push('Profile and meeting failed saves retain editable pages; retry persists the correction once and returns to the untouched chat draft');
+
+  // A completed request is not navigation authority after the user has left.
+  for (const delayed of [
+    { entry: '[data-view=profile]', path: '/api/profile', input: '#profile-background', value: '迟到保存的个人背景', submit: profileSubmit, nextEntry: '#open-meeting', nextPage: 'meeting-panel', nextInput: '#meeting-note' },
+    { entry: '#open-meeting', path: `/api/counterparts/${original.id}/meeting`, input: '#meeting-time', value: '周六 21:00', submit: meetingSubmit, nextEntry: '[data-view=profile]', nextPage: 'profile-view', nextInput: '#profile-growth' },
+  ]) {
+    await menu(delayed.entry); await page.locator(delayed.input).fill(delayed.value);
+    let acceptedResolve;
+    const accepted = new Promise((resolve) => { acceptedResolve = resolve; });
+    const gate = new Promise((resolve) => { releaseHeldRead = resolve; });
+    const url = origin + delayed.path;
+    await page.route(url, async (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback();
+      const response = await route.fetch(); acceptedResolve(); await gate; await route.fulfill({ response });
+    });
+    await delayed.submit(); await accepted;
+    await returnToConversation(page); await menu(delayed.nextEntry);
+    await page.locator(delayed.nextInput).fill('后打开页面正在写的草稿');
+    const completed = page.waitForResponse((response) => response.url() === url && response.request().method() === 'PUT');
+    releaseHeldRead(); releaseHeldRead = null; await completed;
+    await page.waitForFunction(() => ![...document.querySelectorAll('#profile-form > button[type=submit], #meeting-form > button[type=submit]')].some((button) => button.disabled));
+    assert.equal(await page.locator(`#${delayed.nextPage}`).isVisible(), true);
+    assert.equal(await page.locator(delayed.nextInput).inputValue(), '后打开页面正在写的草稿');
+    assert.equal(await page.evaluate(() => document.activeElement.id), delayed.nextInput.slice(1));
+    assert.equal(await page.locator('#workspace').isVisible(), false);
+    await page.unroute(url); await returnToConversation(page); await ready(original.id);
+    assert.equal(await page.locator('#message-text').inputValue(), chatDraft);
+  }
+  report.cases.push('Delayed profile and meeting saves cannot close a newly opened form, steal focus or erase its draft');
+
+  // Administrative results are sensitive even when their source page is
+  // hidden: a response from the previous session must not refill that DOM.
+  await menu('#admin-nav');
+  await page.locator('#admin-view .auxiliary-page-body > details > summary').click();
+  let inviteAcceptedResolve;
+  const inviteAccepted = new Promise((resolve) => { inviteAcceptedResolve = resolve; });
+  const inviteGate = new Promise((resolve) => { releaseHeldRead = resolve; });
+  const inviteUrl = `${origin}/api/admin/invites`;
+  await page.route(inviteUrl, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const response = await route.fetch(); inviteAcceptedResolve(); await inviteGate; await route.fulfill({ response });
+  });
+  await page.locator('#invite-form button[type=submit]').click(); await inviteAccepted;
+  await returnToConversation(page); await menu('#logout');
+  await page.locator('#auth').waitFor({ state: 'visible' });
+  await page.locator('#username').fill('intake-empty'); await page.locator('#password').fill('SyntheticIntake2026');
+  await saved('/api/login', 'POST', () => page.locator('#auth-submit').click());
+  await page.locator('#empty-add').waitFor({ state: 'visible' });
+  const inviteDelivered = page.waitForResponse((response) => response.url() === inviteUrl && response.request().method() === 'POST');
+  releaseHeldRead(); releaseHeldRead = null; await inviteDelivered;
+  await page.waitForFunction(() => !document.querySelector('#invite-form button[type=submit]').disabled);
+  assert.equal(await page.locator('#generated-invite').inputValue(), '');
+  assert.equal(await page.locator('#invite-result').isVisible(), false);
+  assert.equal(await page.locator('#admin-view').isVisible(), false);
+  assert.equal(await page.locator('#admin-nav').isVisible(), false);
+  await page.unroute(inviteUrl);
+  report.cases.push('A late administrative invite result cannot repopulate hidden owner data after switching accounts');
 
   const emptySession = await server.betaStore.createSession(emptyAccount.id);
   await context.addCookies([{ name: 'chat_coach_session', value: emptySession.token, url: origin, httpOnly: true, sameSite: 'Strict' }]);

@@ -1,3 +1,4 @@
+import { switchConversation, returnToConversation } from './ui-navigation.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,6 +31,7 @@ try {
     for (let index = 0; index < count; index++) server.betaStore.putMessage(user.id, person.id, { speaker: 'other', text: `${alias}的合成消息${index + 1}` });
     return person;
   }
+  const pageDeletionPeople = ['meeting', 'heat'].map((kind) => ({ kind, ...seedPerson(owner, `页面删除-${kind}`) }));
   const a = seedPerson(owner, '对象 A'), b = seedPerson(owner, '对象 B'), c = seedPerson(owner, '对象 C');
   const secondPerson = seedPerson(otherUser, '第二账号对象');
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -41,8 +43,8 @@ try {
   page.on('dialog', (dialog) => dialog.accept());
   const readDetail = (id) => page.waitForResponse((response) => response.url() === `${origin}/api/counterparts/${id}` && response.request().method() === 'GET');
   async function ready(id) { await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id); }
-  async function returnToChat() { if (await page.locator('#counterpart-dialog').isVisible()) await page.locator('#close-counterpart-dialog').click(); }
-  async function select(id) { await returnToChat(); const response = readDetail(id); await page.locator('#counterpart-select').selectOption(id); await response; await ready(id); }
+  async function returnToChat() { await returnToConversation(page); }
+  async function select(id) { await returnToChat(); if (await page.locator('#counterpart-select').inputValue() === id) { await ready(id); return; } const response = readDetail(id); await switchConversation(page, id); await response; await ready(id); }
   async function menu(selector) { await returnToChat(); if (!await page.locator(selector).isVisible()) await page.locator('#chat-menu > summary').click(); await page.locator(selector).click(); }
   async function login(user) {
     await page.locator('#username').fill(user.username); await page.locator('#password').fill(password); await page.locator('#auth-submit').click();
@@ -136,13 +138,35 @@ try {
   const detailStarted = new Promise((resolve) => { detailEntered = resolve; });
   const detailUrl = `${origin}/api/counterparts/${c.id}`;
   const holdDetail = async (route) => { if (route.request().method() !== 'GET') return route.fallback(); const response = await route.fetch(); detailEntered(); await detailGate; await route.fulfill({ response }); };
-  await page.route(detailUrl, holdDetail); await page.locator('#counterpart-select').selectOption(c.id); await detailStarted;
+  await page.route(detailUrl, holdDetail); await switchConversation(page, c.id); await detailStarted;
   await heldThird.finish(); await ready(b.id);
   const lateDetail = readDetail(c.id); releaseDetail(); await lateDetail; await page.unroute(detailUrl, holdDetail);
   assert.equal(await page.locator('#counterpart-select').inputValue(), b.id);
   assert.equal(await page.locator('#message-text').inputValue(), 'B 的新草稿。');
   assert.equal(await page.locator(`#counterpart-select option[value="${c.id}"]`).count(), 0);
   report.checks.push('pre-delete detail response cannot resurrect a removed counterpart');
+
+  // The user may leave a pending deletion and open another page for the
+  // same object. That page must not silently become an editor for the next one.
+  for (const target of pageDeletionPeople) {
+    await select(target.id); await menu('#edit-counterpart');
+    const held = await holdDelete(target.id, null, { beforeWrite: true });
+    await page.locator('#delete-counterpart').click(); await held.started;
+    await returnToChat(); await menu(target.kind === 'meeting' ? '#open-meeting' : '#open-heat');
+    const panel = target.kind === 'meeting' ? '#meeting-panel' : '#heat-panel';
+    await page.locator(panel).waitFor({ state: 'visible' });
+    if (target.kind === 'meeting') await page.locator('#meeting-note').fill('只属于正在删除对象的安排草稿');
+    await held.finish(); await page.locator(panel).waitFor({ state: 'hidden' });
+    await page.waitForFunction((id) => document.getElementById('workspace').checkVisibility() && document.getElementById('counterpart-select').value !== id && !document.getElementById('message-text').disabled, target.id);
+    assert.equal(await page.locator(`#counterpart-select option[value="${target.id}"]`).count(), 0);
+    if (target.kind === 'meeting') {
+      await menu('#open-meeting');
+      assert.notEqual(await page.locator('#meeting-note').inputValue(), '只属于正在删除对象的安排草稿');
+      await returnToChat();
+    }
+  }
+  await select(b.id);
+  report.checks.push('Late counterpart deletion closes its meeting/heat pages and never reassigns the deleted-object draft to another conversation');
 
   // Responses from the previous account must not alter the new account.
   const accountCases = [['message', true], ['counterpart', true], ['message', false], ['counterpart', false]];
