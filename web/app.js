@@ -4,7 +4,7 @@ const state = {
   selectedId: null, detail: null, selectedDirection: null, suggestion: null, replyFeedback: null, copyFeedback: null,
   editingMessageId: null, editingCounterpartId: null, requestIds: new Map(),
   questionnaireAnswers: {}, suggestionDrafts: new Map(),
-  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0,
+  messageDrafts: new Map(), messageCalls: new Set(), timeCalls: new Map(), composerBeforeEdit: null, intakeDrafts: new Map(), intakeInstance: 0, intakeReturn: null,
   composerImage: null, imageCalls: new Map(), imageSelectionSerial: 0,
   topicChangeContexts: new Set(), annotationDrafts: new Map(), annotationOpen: new Set(), annotationCalls: new Set(), annotationErrors: new Map(),
   intentDrafts: new Map(), planDrafts: new Map(), planResults: new Map(), planCalls: new Map(), copyReceipts: new Map(), copyCalls: new Set(), autoAttempts: new Set(), modelCalls: new Map(), detailRequestSerial: 0, coachResultRevision: 0,
@@ -81,11 +81,13 @@ async function perform(button, label, callback, scope) {
   if (button?.disabled) return;
   const original = button?.textContent;
   const form = button?.closest('form');
+  const intakeInstance = form?.id === 'counterpart-form' ? state.intakeInstance : null;
   let localError = form?.querySelector('.form-error');
   if (localError) localError.hidden = true;
   if (button) { button.disabled = true; button.textContent = label; }
   try { return await callback(); }
   catch (error) {
+    if (intakeInstance !== null && (intakeInstance !== state.intakeInstance || $('counterpart-dialog').hidden)) return;
     if (scope && (state.me?.user.id !== scope.userId || state.selectedId !== scope.counterpartId)) return;
     if (error.displayed) return;
     const message = error.message || '操作未完成，请重试。';
@@ -164,7 +166,7 @@ function modelFailureMessage(error, fallback = '暂时没能给出建议，请�
 function canRetryModel(error) {
   return ![401, 403].includes(error.status) && !['DAILY_REPLY_QUOTA_EXHAUSTED', 'CLASSIFICATION_QUOTA_EXHAUSTED', 'PROVIDER_BUDGET_EXHAUSTED', 'PROFILE_REQUIRED', 'FULL_PROFILE_REQUIRES_UPDATE', 'CONTEXT_REQUIRED'].includes(error.code);
 }
-const inlineCards = ['profile-view', 'counterpart-dialog', 'heat-panel', 'meeting-panel', 'admin-view'];
+const inlineCards = ['profile-view', 'heat-panel', 'meeting-panel', 'admin-view'];
 function closeInlineCards({ restoreFocus = false } = {}) {
   const focusedInCard = state.activeInlineCard && $(state.activeInlineCard).contains(document.activeElement);
   const trigger = state.inlineTrigger;
@@ -196,12 +198,12 @@ function closeMenu(menu, { restoreFocus = false } = {}) {
   if (restoreFocus && focusedInside) menu.querySelector('summary')?.focus({ preventScroll: true });
 }
 function scrollToLatest() {
-  requestAnimationFrame(() => { $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
+  requestAnimationFrame(() => { if ($('counterpart-dialog').hidden) $('chat-thread').scrollTop = $('chat-thread').scrollHeight; });
 }
 function scrollToSuggestion() {
   const context = currentContextKey(), visit = state.conversationVisit;
   requestAnimationFrame(() => {
-    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden) return;
+    if (context !== currentContextKey() || visit !== state.conversationVisit || $('suggestion-panel').hidden || !$('counterpart-dialog').hidden) return;
     const thread = $('chat-thread');
     thread.scrollTop += $('suggestion-panel').getBoundingClientRect().top - thread.getBoundingClientRect().top - 12;
   });
@@ -1573,11 +1575,16 @@ function readIntakeForm() {
   return { alias: $('intake-alias').value, remark: $('intake-remark').value, channel: $('intake-channel').value, appProfile: $('intake-app').value, offlineScene: $('intake-offline').value, background: $('intake-background').value, rounds: $('intake-rounds').value };
 }
 function openCounterpart(person = null) {
+  if ($('counterpart-dialog').hidden) state.intakeReturn = { trigger: document.activeElement, scrollY: window.scrollY, title: document.title };
+  rememberComposer();
+  closeInlineCards();
+  closeFieldCoach();
+  $('chat-menu').open = false;
   state.intakeInstance++;
   state.editingCounterpartId = person?.id || null;
   const draft = state.intakeDrafts.get(state.editingCounterpartId || 'new') || person;
   $('counterpart-form').reset();
-  $('counterpart-dialog-title').textContent = person ? '编辑认识背景' : '添加聊天对象';
+  $('counterpart-dialog-title').textContent = person ? '编辑对象资料' : '添加聊天对象';
   for (const [id, key] of [['intake-alias', 'alias'], ['intake-remark', 'remark'], ['intake-channel', 'channel'], ['intake-app', 'appProfile'], ['intake-offline', 'offlineScene'], ['intake-background', 'background']]) $(id).value = draft?.[key] || (key === 'channel' ? 'other' : '');
   $('intake-rounds').value = draft?.rounds ?? '';
   const error = $('counterpart-form').querySelector('.form-error');
@@ -1585,8 +1592,27 @@ function openCounterpart(person = null) {
   updateIntakeChannel();
   renderBackgroundContext();
   $('delete-counterpart').hidden = !person;
-  openInlineCard('counterpart-dialog');
-  $('intake-alias').focus();
+  document.querySelector('.conversation-layout').hidden = true;
+  $('counterpart-dialog').hidden = false;
+  document.title = `${$('counterpart-dialog-title').textContent} · 聊天教练`;
+  const skipLink = document.querySelector('.skip-link');
+  skipLink.href = '#intake-alias'; skipLink.textContent = '跳到对象资料';
+  window.scrollTo({ top: 0, behavior: 'instant' });
+  $('intake-alias').focus({ preventScroll: true });
+}
+function closeCounterpartPage({ restoreFocus = true } = {}) {
+  const previous = state.intakeReturn;
+  $('counterpart-dialog').hidden = true;
+  document.querySelector('.conversation-layout').hidden = false;
+  state.intakeReturn = null;
+  if (previous) document.title = previous.title;
+  const skipLink = document.querySelector('.skip-link');
+  skipLink.href = '#message-text'; skipLink.textContent = '跳到聊天输入';
+  if (!previous || !restoreFocus) return;
+  window.scrollTo({ top: previous.scrollY, behavior: 'instant' });
+  const trigger = previous.trigger;
+  const focusTarget = trigger?.checkVisibility() ? trigger : $('chat-menu').querySelector('summary');
+  focusTarget?.focus({ preventScroll: true });
 }
 async function copyText(text, confirmation = '已复制。请检查表达，再由你手动发送。', isCurrent = () => true) {
   if (!text.trim()) { announce('当前没有可复制的文本。', 'error'); return false; }
@@ -1688,7 +1714,8 @@ function clearSessionUI() {
   state.counterparts = []; state.requestIds.clear(); state.suggestionDrafts.clear();
   state.messageDrafts.clear(); state.messageCalls.clear(); state.timeCalls.clear(); state.composerBeforeEdit = null; state.editingMessageId = null;
   state.composerImage = null; state.imageCalls.clear(); state.imageSelectionSerial++;
-  state.intakeDrafts.clear(); state.meetingDrafts.clear();
+  state.intakeDrafts.clear(); state.intakeInstance++; state.editingCounterpartId = null; state.meetingDrafts.clear();
+  closeCounterpartPage({ restoreFocus: false });
   state.topicChangeContexts.clear(); state.annotationDrafts.clear(); state.annotationOpen.clear(); state.annotationCalls.clear(); state.annotationErrors.clear();
   state.intentDrafts.clear(); state.planDrafts.clear(); state.planResults.clear(); state.planCalls.clear(); state.copyReceipts.clear(); state.copyCalls.clear(); state.autoAttempts.clear(); state.modelCalls.clear(); state.detailRequestSerial++; state.questionnaireAnswers = {};
   state.styleLearning = null; state.styleReadSerial++; state.profileDraftVersion++; resetStyleDraft(); renderStyleLearning();
@@ -1811,8 +1838,8 @@ $('profile-form').addEventListener('submit', (event) => {
 for (const id of ['add-counterpart', 'empty-add']) $(id).addEventListener('click', () => openCounterpart());
 $('edit-counterpart').addEventListener('click', () => { if (state.detail) openCounterpart(state.detail.counterpart); });
 $('intake-channel').addEventListener('change', updateIntakeChannel);
-$('close-counterpart-dialog').addEventListener('click', () => closeInlineCards({ restoreFocus: true }));
-$('cancel-counterpart-dialog').addEventListener('click', () => { state.intakeDrafts.delete(state.editingCounterpartId || 'new'); closeInlineCards({ restoreFocus: true }); });
+$('close-counterpart-dialog').addEventListener('click', () => closeCounterpartPage());
+$('cancel-counterpart-dialog').addEventListener('click', () => { state.intakeDrafts.delete(state.editingCounterpartId || 'new'); closeCounterpartPage(); });
 for (const type of ['input', 'change']) $('counterpart-form').addEventListener(type, () => { state.intakeDrafts.set(state.editingCounterpartId || 'new', readIntakeForm()); });
 $('counterpart-form').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -1822,18 +1849,35 @@ $('counterpart-form').addEventListener('submit', (event) => {
     const input = { alias: $('intake-alias').value.trim(), remark: $('intake-remark').value.trim(), channel: $('intake-channel').value, appProfile: $('intake-app').value.trim(), offlineScene: $('intake-offline').value.trim(), background: $('intake-background').value.trim(), rounds: $('intake-rounds').value === '' ? null : Number($('intake-rounds').value) };
     const data = editingId ? await put(counterpartPath(editingId), input) : await post('/api/counterparts', input);
     if (state.me?.user.id !== userId) return;
+    // The successful write is enough to open this conversation. A directory
+    // refresh is auxiliary and must not turn it into a failed or duplicate save.
+    const existing = state.counterparts.find((person) => person.id === data.counterpart.id);
+    state.counterparts = state.counterparts.filter((person) => person.id !== data.counterpart.id);
+    state.counterparts.push({ ...existing, ...data.counterpart });
+    state.directoryReadSerial++;
+    renderDirectory();
+    void loadCounterparts({ selectIfNeeded: false }).catch(() => {});
     // A reopened intake is a new editing session, even when both target "new".
     // Its wording must never become an edit of the earlier saved counterpart.
     if (state.intakeInstance !== instance) {
       if (state.intakeDrafts.get(key) === submitted) state.intakeDrafts.delete(key);
-      await loadCounterparts(); return;
+      return;
     }
     const newerDraft = state.intakeDrafts.get(key) !== submitted ? state.intakeDrafts.get(key) : null;
     state.intakeDrafts.delete(key);
     if (newerDraft) state.intakeDrafts.set(data.counterpart.id, newerDraft);
-    if (state.selectedId !== selectedId || state.activeInlineCard !== 'counterpart-dialog' || state.editingCounterpartId !== editingId) { await loadCounterparts(); return; }
-    closeInlineCards({ restoreFocus: true }); await loadCounterparts(); await loadCounterpart(data.counterpart.id); showView('coach');
+    if (state.selectedId !== selectedId || $('counterpart-dialog').hidden || state.editingCounterpartId !== editingId) return;
+    closeCounterpartPage();
+    const isCurrent = () => state.me?.user.id === userId && state.selectedId === data.counterpart.id && state.intakeInstance === instance && $('counterpart-dialog').hidden;
+    try { await loadCounterpart(data.counterpart.id); }
+    catch (error) {
+      if (isCurrent() && !error.displayed) showCounterpartLoading('对象资料已保存，聊天暂时没能刷新，请重试。', true);
+      return;
+    }
+    if (!isCurrent()) return;
+    showView('coach');
     if (newerDraft) openCounterpart(data.counterpart);
+    else $('message-text').focus({ preventScroll: true });
     announce(newerDraft ? '提交的背景已保存，刚补充的内容仍保留在表单里。' : '认识背景已保存。');
   });
 });
@@ -1861,6 +1905,7 @@ $('delete-counterpart').addEventListener('click', () => {
     }
     state.counterparts = state.counterparts.filter((person) => person.id !== id);
     state.directoryReadSerial++;
+    if (state.editingCounterpartId === id && !$('counterpart-dialog').hidden) closeCounterpartPage();
     if (state.selectedId !== id) { await loadCounterparts({ selectIfNeeded: false }); return; }
     // Retire in-flight reads before clearing the selected conversation. A late
     // pre-delete response must not restore it or take over the next selection.

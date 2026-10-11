@@ -24,7 +24,8 @@
     "test:coach-updates": "node scripts/verify-coach-updates.mjs",
     "test:context-learning": "node scripts/verify-context-learning.mjs",
     "test:directory": "node scripts/verify-directory.mjs",
-    "test:affordance": "node scripts/verify-affordance.mjs"
+    "test:affordance": "node scripts/verify-affordance.mjs",
+    "test:intake": "node scripts/verify-intake-page.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.1.0",

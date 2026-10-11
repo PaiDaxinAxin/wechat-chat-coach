@@ -184,6 +184,7 @@ try {
   assert.equal(detailReads, 2, 'The obsolete detail snapshot is replaced by one fresh read');
   assert.match(await page.locator('#counterpart-chat-facts').textContent(), /在杭州做产品/);
   await page.unroute(`${origin}/api/counterparts/${id}`, holdDetailRead);
+  await page.locator('#close-counterpart-dialog').click();
   await menu('#open-meeting');
   assert.equal(await page.locator('#meeting-time').inputValue(), '周六 20:00', 'Fresh projections preserve the saved manual correction');
   assert.deepEqual({ classifications, replies }, callsBeforeOldRead, 'Recovering an obsolete detail read invokes no provider');

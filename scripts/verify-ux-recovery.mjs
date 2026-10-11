@@ -41,8 +41,9 @@ try {
   page.on('dialog', (dialog) => dialog.accept());
   const readDetail = (id) => page.waitForResponse((response) => response.url() === `${origin}/api/counterparts/${id}` && response.request().method() === 'GET');
   async function ready(id) { await page.waitForFunction((id) => document.getElementById('counterpart-select').value === id && !document.getElementById('message-text').disabled, id); }
-  async function select(id) { const response = readDetail(id); await page.locator('#counterpart-select').selectOption(id); await response; await ready(id); }
-  async function menu(selector) { if (!await page.locator(selector).isVisible()) await page.locator('#chat-menu > summary').click(); await page.locator(selector).click(); }
+  async function returnToChat() { if (await page.locator('#counterpart-dialog').isVisible()) await page.locator('#close-counterpart-dialog').click(); }
+  async function select(id) { await returnToChat(); const response = readDetail(id); await page.locator('#counterpart-select').selectOption(id); await response; await ready(id); }
+  async function menu(selector) { await returnToChat(); if (!await page.locator(selector).isVisible()) await page.locator('#chat-menu > summary').click(); await page.locator(selector).click(); }
   async function login(user) {
     await page.locator('#username').fill(user.username); await page.locator('#password').fill(password); await page.locator('#auth-submit').click();
     await page.locator('#counterpart-workspace').waitFor({ state: 'visible' });
